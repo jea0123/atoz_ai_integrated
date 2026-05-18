@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>테스트 케이스/시나리오 생성</title>
+  <link rel="stylesheet" href="/static/qa.css?v=20260518-qa-layout">
+</head>
+<body class="qa-page">
+  <main class="app-shell">
+    <section class="workspace" aria-label="테스트 케이스/시나리오 생성">
+      <header
+        class="topbar"
+        data-app-header
+        data-active="qa"
+        data-eyebrow="QA"
+        data-title="테스트 케이스/시나리오 생성"
+        data-status-id="statusBadge"
+      ></header>
+
+      <section class="layout qa-layout">
+        <aside class="control-panel qa-controls">
+          <div class="panel-head">
+            <h2>작업</h2>
+            <span id="runtimeMode">실행 모드 확인 중</span>
+          </div>
+
+          <nav class="task-tabs" aria-label="작업 선택">
+            <button type="button" class="task-tab active" data-task-tab="tc">
+              <span>1단계</span>
+              <strong>단위시험 케이스</strong>
+            </button>
+            <button type="button" class="task-tab" data-task-tab="ts">
+              <span>2단계</span>
+              <strong>통합시험 시나리오</strong>
+            </button>
+          </nav>
+
+          <form id="tcForm" class="task-form active" data-task-panel="tc">
+            <label class="drop-zone" for="tcTemplateHwpx">
+              <input id="tcTemplateHwpx" name="template_hwpx" type="file" accept=".hwpx">
+              <span class="file-mark">HWPX</span>
+              <strong>기존 단위시험 케이스</strong>
+              <small data-file-label="tcTemplateHwpx">HWPX 파일 선택</small>
+            </label>
+
+            <label class="drop-zone" for="tcUiPdf">
+              <input id="tcUiPdf" name="ui_pdf" type="file" accept=".pdf">
+              <span class="file-mark">PDF</span>
+              <strong>사용자인터페이스설계서</strong>
+              <small data-file-label="tcUiPdf">파일 선택</small>
+            </label>
+            <button class="primary-button" id="tcButton" type="submit">생성</button>
+          </form>
+
+          <form id="tsForm" class="task-form" data-task-panel="ts">
+            <label class="drop-zone" for="tsTemplateXlsx">
+              <input id="tsTemplateXlsx" name="template_xlsx" type="file" accept=".xlsx">
+              <span class="file-mark">XLSX</span>
+              <strong>기존 통합시험 시나리오</strong>
+              <small data-file-label="tsTemplateXlsx">파일 선택</small>
+            </label>
+
+            <label class="drop-zone" for="tsTcXlsx">
+              <input id="tsTcXlsx" name="tc_xlsx" type="file" accept=".xlsx">
+              <span class="file-mark">XLSX</span>
+              <strong>단위시험 케이스</strong>
+              <small data-file-label="tsTcXlsx">1단계에서 생성한 엑셀 파일 선택</small>
+            </label>
+
+            <label class="drop-zone" for="tsUiPdf">
+              <input id="tsUiPdf" name="ui_pdf" type="file" accept=".pdf">
+              <span class="file-mark">PDF</span>
+              <strong>사용자인터페이스설계서</strong>
+              <small data-file-label="tsUiPdf">파일 선택</small>
+            </label>
+            <button class="primary-button" id="tsButton" type="submit">생성</button>
+          </form>
+        </aside>
+
+        <section class="result-panel qa-results">
+          <div class="summary-grid qa-summary" id="summaryGrid">
+            <div><span>TC 행 수</span><strong id="tcCount">-</strong></div>
+            <div><span>TS 행 수</span><strong id="tsCount">-</strong></div>
+            <div><span>처리 상태</span><strong id="processStatus">대기</strong></div>
+            <div><span>생성 파일</span><strong id="generatedFileCount">-</strong></div>
+          </div>
+
+          <div class="result-toolbar qa-toolbar">
+            <div>
+              <h2 id="resultTitle">결과</h2>
+              <p id="resultMeta">생성 작업을 선택하고 파일을 업로드하세요.</p>
+            </div>
+          </div>
+
+          <section class="download-panel" id="downloadPanel" hidden></section>
+          <p class="empty qa-empty" id="emptyState">생성된 파일이 아직 없습니다.</p>
+
+          <div class="loading-overlay" id="loadingOverlay" hidden>
+            <div class="loading-card">
+              <span class="loader"></span>
+              <strong id="loadingTitle">처리 중</strong>
+              <p id="loadingMessage">요청을 처리하고 있습니다.</p>
+            </div>
+          </div>
+        </section>
+      </section>
+    </section>
+  </main>
+
+  <script src="/static/header.js?v=20260518-integrated"></script>
+  <script src="/static/qa.js?v=20260518-qa-layout"></script>
+</body>
+</html>

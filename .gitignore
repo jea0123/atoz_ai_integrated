@@ -1,0 +1,35 @@
+﻿.env
+.env.*
+!.env.example
+
+.venv/
+venv/
+
+# Python/runtime output/build artifacts
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+
+web_runtime/
+backup_*
+working_output*
+*_updated.*
+
+# Local sample dumps can be large and are shared outside Git.
+data/테스트/
+
+# Generated outputs
+result_cases/
+result_scenarios/
+temp/
+
+# Local backups / scratch files
+old/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

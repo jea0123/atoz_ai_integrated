@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>산출물 매핑 확인</title>
+  <link rel="stylesheet" href="/static/check.css?v=20260511-blue-polish">
+</head>
+<body>
+  <main class="app-shell">
+    <section class="workspace" aria-label="산출물 매핑 확인">
+      <header
+        class="topbar"
+        data-app-header
+        data-active="check"
+        data-eyebrow="Output Mapping"
+        data-title="산출물 매핑 확인"
+        data-status-id="statusBadge"
+      ></header>
+
+      <section class="layout">
+        <form id="checkForm" class="control-panel">
+          <div class="panel-head">
+            <h2>입력</h2>
+            <span>01</span>
+          </div>
+
+          <fieldset class="mode-toggle">
+            <legend>
+              <span>매칭 방식</span>
+              <small id="runtimeMode">실행 모드 확인 중</small>
+            </legend>
+            <label>
+              <input type="radio" name="match_mode" value="ai_first" checked>
+              <span>
+                <strong>AI 우선</strong>
+                <small>문서를 읽고 먼저 판단</small>
+              </span>
+            </label>
+          </fieldset>
+
+          <label class="drop-zone" for="standardFile" data-drop="standardFile">
+            <input id="standardFile" name="standard_file" type="file" accept=".pdf">
+            <span class="file-mark">PDF</span>
+            <strong>문서관리표준</strong>
+            <small id="standardName">파일 선택</small>
+          </label>
+
+          <label class="drop-zone folder" for="folderFiles">
+            <input id="folderFiles" name="folder_files" type="file" webkitdirectory directory multiple>
+            <span class="file-mark">DIR</span>
+            <strong>검사 폴더</strong>
+            <small id="folderName">미선택 시 data\테스트 사용</small>
+          </label>
+
+          <button class="primary-button" id="runButton" type="submit">
+            <span>↻</span>
+            확인하기
+          </button>
+
+          <button class="secondary-button" id="applyButton" type="button">
+            <span>↯</span>
+            덤프 후 반영
+          </button>
+        </form>
+
+        <section class="result-panel">
+          <div class="summary-grid" id="summaryGrid">
+            <div><span>참고 산출물</span><strong id="outputCount">-</strong></div>
+            <div><span>검사 파일</span><strong id="fileCount">-</strong></div>
+            <div><span>매칭 산출물</span><strong id="matchCount">-</strong></div>
+            <div><span>매칭 파일</span><strong id="matchedFileCount">-</strong></div>
+          </div>
+
+          <div class="result-toolbar">
+            <div>
+              <h2>결과</h2>
+              <p id="resultMeta">준비됨</p>
+            </div>
+            <input id="resultFilter" type="search" placeholder="검색">
+          </div>
+
+          <section class="apply-report" id="applyReport" hidden></section>
+
+          <div class="results" id="results">
+            <div class="table-statusbar">
+              <div>
+                <strong id="visibleCount">0</strong>
+                <span>표시 중</span>
+              </div>
+            </div>
+
+            <div class="audit-table-shell">
+              <table class="audit-table">
+                <thead>
+                  <tr>
+                    <th>산출물</th>
+                    <th>반영 대상 파일</th>
+                    <th>점수</th>
+                  </tr>
+                </thead>
+                <tbody id="resultRows"></tbody>
+              </table>
+            </div>
+
+            <p class="empty" id="emptyState" hidden>표시할 결과가 없습니다.</p>
+          </div>
+
+          <div class="loading-overlay" id="loadingOverlay" hidden>
+            <div class="loading-card">
+              <span class="loader"></span>
+              <strong>산출물 매핑 검사 중</strong>
+              <p>
+                PDF와 폴더 안 문서를 읽어 파일명, 내부 문서명, <br>
+                템플릿 경로를 비교하고 있습니다.
+              </p>
+            </div>
+          </div>
+        </section>
+      </section>
+    </section>
+  </main>
+
+  <script src="/static/header.js?v=20260508-apply-errors"></script>
+  <script src="/static/check.js?v=20260511-blue-polish"></script>
+</body>
+</html>

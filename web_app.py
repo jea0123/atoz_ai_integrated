@@ -1,0 +1,478 @@
+# 산출물 매핑 확인 웹 화면을 제공하고, 실제 처리는 기능별 모듈로 넘깁니다.
+from __future__ import annotations
+
+import argparse
+import json
+import mimetypes
+from pathlib import Path
+import shutil
+import sys
+import traceback
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import quote, unquote, urlparse
+from uuid import uuid4
+
+from app_runtime import (
+    RESULT_DIR,
+    WEB_DIR,
+    TEMP_DIR,
+    TS_TEMPLATE_PATH,
+    cleanup_runtime,
+    ensure_runtime_dirs,
+    log_event,
+    read_runtime_env,
+    remove_runtime_path,
+    resolve_runtime_model,
+    resolve_runtime_ollama_chat_url,
+    runtime_mode_payload,
+)
+from output_file_check.folder_workflow import run_web_check, run_web_folder_apply
+from web_uploads import parse_multipart_items, safe_upload_filename
+from qa_generation.generate_tc import generate_test_cases
+from qa_generation.generate_ts import generate_test_scenarios
+
+
+RESULT_FILES: dict[str, Path] = {}
+RESULT_DOWNLOAD_NAMES: dict[str, str] = {}
+RESULT_DELETE_AFTER_DOWNLOAD: dict[str, bool] = {}
+RESULT_CLEANUP_ROOTS: dict[str, Path] = {}
+
+
+def attach_folder_download(payload: dict[str, object]) -> None:
+    # 폴더 반영 결과를 브라우저에서 받을 수 있도록 덤프 폴더를 ZIP으로 묶어 다운로드 토큰을 붙인다.
+    dump_root = Path(str(payload.get("dump_root") or ""))
+    if not dump_root.is_dir():
+        log_event("folder_download.missing_dump", dump_root=str(dump_root))
+        return
+
+    token = uuid4().hex
+    download_name = f"{dump_root.name}_결과.zip"
+    zip_path = Path(shutil.make_archive(str(RESULT_DIR / f"{token}_{dump_root.name}_결과"), "zip", dump_root.parent, dump_root.name))
+
+    RESULT_FILES[token] = zip_path
+    RESULT_DOWNLOAD_NAMES[token] = download_name
+    payload["download_url"] = f"/download/{token}"
+    payload["download_name"] = download_name
+    log_event(
+        "folder_download.ready",
+        token=token,
+        dump_root=str(dump_root),
+        zip_path=str(zip_path),
+    )
+
+
+def attach_file_downloads(
+        payload: dict[str, object],
+        *,
+        delete_after_download: bool = False,
+        cleanup_root: Path | None = None,
+) -> None:
+    files = payload.get("files")
+    if not isinstance(files, list):
+        return
+
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+
+        path = Path(str(item.get("path") or ""))
+        if not path.exists() or not path.is_file():
+            continue
+
+        token = uuid4().hex
+        download_name = str(item.get("name") or path.name)
+
+        RESULT_FILES[token] = path
+        RESULT_DOWNLOAD_NAMES[token] = download_name
+        RESULT_DELETE_AFTER_DOWNLOAD[token] = delete_after_download
+        if cleanup_root is not None:
+            RESULT_CLEANUP_ROOTS[token] = cleanup_root
+        item["download_url"] = f"/download/{token}"
+        item["download_name"] = download_name
+
+    payload["download_files"] = [
+        item
+        for item in files
+        if isinstance(item, dict) and item.get("download_url")
+    ]
+
+
+def cleanup_sent_download(token: str, path: Path) -> None:
+    # 임시 QA 결과 파일은 다운로드가 끝난 뒤 토큰과 파일을 함께 정리한다.
+    if not RESULT_DELETE_AFTER_DOWNLOAD.pop(token, False):
+        return
+
+    RESULT_FILES.pop(token, None)
+    RESULT_DOWNLOAD_NAMES.pop(token, None)
+    cleanup_root = RESULT_CLEANUP_ROOTS.pop(token, None)
+    remove_runtime_path(path)
+
+    if cleanup_root is None:
+        return
+
+    output_dir = path.parent
+    try:
+        if output_dir.exists() and any(output_dir.iterdir()):
+            return
+    except OSError:
+        return
+
+    remove_runtime_path(cleanup_root)
+    log_event("download.cleaned", token=token, cleanup_root=str(cleanup_root))
+
+
+def save_uploaded_file(
+        temp_dir: Path,
+        file_items: dict[str, list[tuple[str, bytes]]],
+        field_name: str,
+        fallback_name: str,
+        allowed_suffixes: set[str],
+        *,
+        required: bool = True,
+) -> Path | None:
+    items = file_items.get(field_name) or []
+    if not items:
+        if required:
+            raise ValueError(f"{field_name} 파일을 업로드해주세요.")
+        return None
+    
+    filename, payload = items[0]
+    if not payload:
+        if required:
+            raise ValueError(f"{field_name} 파일이 비어있습니다.")
+        return None
+    
+    suffix = Path(filename).suffix.lower()
+    if suffix not in allowed_suffixes:
+        allowed = ", ".join(allowed_suffixes)
+        raise ValueError(f"{field_name} 파일 형식은 {allowed}만 허용됩니다.")
+    
+    safe_name = safe_upload_filename(filename, field_name, Path(fallback_name).suffix)
+    path = temp_dir / safe_name
+    path.write_bytes(payload)
+    return path
+
+
+def runtime_ai_settings(fields: dict[str, str]) -> tuple[str, str]:
+    env = read_runtime_env()
+    model_name = fields.get("model_name") or resolve_runtime_model(env)
+    ollama_url = fields.get("ollama_url") or resolve_runtime_ollama_chat_url(env)
+
+    if not ollama_url:
+        raise ValueError("OLLAMA_BASE_URL이 설정되어 있지 않습니다.")
+    
+    return model_name, ollama_url
+
+
+class WebHandler(BaseHTTPRequestHandler):
+    server_version = "OutputMappingHTTP/1.0"
+
+    def do_GET(self) -> None:
+        # 정적 화면, 런타임 모드 API, 다운로드 요청을 처리한다.
+        request_path = urlparse(self.path).path
+        if request_path == "/api/runtime-mode":
+            self.send_json(runtime_mode_payload())
+            return
+
+        if request_path in {"/", "/check", "/check.html"}:
+            self.serve_file(WEB_DIR / "check.html")
+            return
+
+        if request_path in {"/qa", "/qa.html"}:
+            self.serve_file(WEB_DIR / "qa.html")
+            return
+
+        if request_path.startswith("/static/"):
+            relative_path = unquote(request_path.removeprefix("/static/"))
+            self.serve_file(WEB_DIR / "static" / relative_path)
+            return
+
+        if request_path.startswith("/download/"):
+            self.serve_download(request_path.removeprefix("/download/"))
+            return
+
+        self.send_error(404)
+
+    def do_POST(self) -> None:
+        # 폴더 검사, 폴더 덤프 반영 POST 요청을 분기한다.
+        request_path = urlparse(self.path).path
+        
+        if request_path == "/api/folder-apply":
+            self.handle_folder_apply_post()
+            return
+
+        if request_path == "/api/check":
+            self.handle_check_post()
+            return
+        
+        if request_path == "/api/generate-tc":
+            self.handle_generate_tc_post()
+            return
+        
+        if request_path == "/api/generate-ts":
+            self.handle_generate_ts_post()
+            return
+
+        self.send_error(404)
+
+    def handle_check_post(self) -> None:
+        # /api/check 요청 본문을 파싱하고 폴더 매칭만 실행한다.
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            content_type = self.headers.get("Content-Type", "")
+            body = self.rfile.read(content_length)
+            log_event("http.post", path=self.path, content_length=content_length, content_type=content_type)
+            fields, file_items = parse_multipart_items(content_type, body)
+            payload = run_web_check(fields, file_items)
+            self.send_json(payload)
+        except Exception as exc:
+            log_event("http.post.error", path=self.path, error=str(exc))
+            self.send_json({"error": str(exc)}, status=400)
+
+    def handle_folder_apply_post(self) -> None:
+        # /api/folder-apply 요청 본문을 파싱하고 덤프 반영까지 실행한다.
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            content_type = self.headers.get("Content-Type", "")
+            body = self.rfile.read(content_length)
+            log_event("http.post", path=self.path, content_length=content_length, content_type=content_type)
+            fields, file_items = parse_multipart_items(content_type, body)
+            payload = run_web_folder_apply(fields, file_items)
+            attach_folder_download(payload)
+            if not fields.get("dump_path") and isinstance(payload.get("dump_root"), str):
+                remove_runtime_path(Path(payload["dump_root"]))
+            self.send_json(payload)
+        except Exception as exc:
+            log_event("http.post.error", path=self.path, error=str(exc))
+            self.send_json({"error": str(exc)}, status=400)
+
+    def handle_generate_tc_post(self) -> None:
+        temp_dir: Path | None = None
+        preserve_temp_dir = False
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            content_type = self.headers.get("Content-Type", "")
+            body = self.rfile.read(content_length)
+
+            fields, file_items = parse_multipart_items(content_type, body)
+            model_name, ollama_url = runtime_ai_settings(fields)
+
+            request_id = uuid4().hex[:8]
+            temp_dir = TEMP_DIR / f"qa-tc-{request_id}"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            output_dir = temp_dir / "output"
+            output_dir.mkdir()
+
+            pdf_path = save_uploaded_file(
+                temp_dir,
+                file_items,
+                "ui_pdf",
+                "ui.pdf",
+                {".pdf"},
+            )
+            template_hwpx_path = save_uploaded_file(
+                temp_dir,
+                file_items,
+                "template_hwpx",
+                "template.hwpx",
+                {".hwpx"},
+            )
+
+            log_event(
+                "qa.tc.start",
+                request_id=request_id,
+                model=model_name,
+                files={name: len(items) for name, items in file_items.items()},
+            )
+
+            payload = generate_test_cases(
+                pdf_path=pdf_path,
+                model_name=model_name,
+                ollama_url=ollama_url,
+                output_dir=output_dir,
+                template_path=template_hwpx_path,
+            )
+            payload["request_id"] = request_id
+            attach_file_downloads(payload, delete_after_download=True, cleanup_root=temp_dir)
+            preserve_temp_dir = bool(payload.get("download_files"))
+            remove_runtime_path(pdf_path)
+            remove_runtime_path(template_hwpx_path)
+
+            log_event(
+                "qa.tc.done",
+                request_id=request_id,
+                ok=payload.get("ok"),
+                count=payload.get("count"),
+                file_count=len(payload.get("download_files") or []),
+            )
+            self.send_json(payload, status=200 if payload.get("ok") else 400)
+
+        except Exception as exc:
+            log_event("qa.tc.error", error=str(exc), traceback=traceback.format_exc())
+            self.send_json({"ok": False, "error": str(exc), "files": []}, status=400)
+        finally:
+            if temp_dir is not None and not preserve_temp_dir:
+                remove_runtime_path(temp_dir)
+
+    def handle_generate_ts_post(self) -> None:
+        temp_dir: Path | None = None
+        preserve_temp_dir = False
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            content_type = self.headers.get("Content-Type", "")
+            body = self.rfile.read(content_length)
+
+            _, file_items = parse_multipart_items(content_type, body)
+
+            request_id = uuid4().hex[:8]
+            temp_dir = TEMP_DIR / f"qa-ts-{request_id}"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            output_dir = temp_dir / "output"
+            output_dir.mkdir()
+
+            template_xlsx_path = save_uploaded_file(
+                temp_dir,
+                file_items,
+                "template_xlsx",
+                "template.xlsx",
+                {".xlsx"},
+            )
+            tc_xlsx_path = save_uploaded_file(
+                temp_dir,
+                file_items,
+                "tc_xlsx",
+                "test_cases.xlsx",
+                {".xlsx"},
+            )
+            ui_pdf_path = save_uploaded_file(
+                temp_dir,
+                file_items,
+                "ui_pdf",
+                "ui.pdf",
+                {".pdf"},
+            )
+
+            log_event(
+                "qa.ts.start",
+                request_id=request_id,
+                files={name: len(items) for name, items in file_items.items()},
+            )
+
+            payload = generate_test_scenarios(
+                template_xlsx_path=template_xlsx_path,
+                tc_xlsx_path=tc_xlsx_path,
+                ui_pdf_path=ui_pdf_path,
+                output_dir=output_dir,
+                form_path=TS_TEMPLATE_PATH,
+            )
+            payload["request_id"] = request_id
+            attach_file_downloads(payload, delete_after_download=True, cleanup_root=temp_dir)
+            preserve_temp_dir = bool(payload.get("download_files"))
+            remove_runtime_path(template_xlsx_path)
+            remove_runtime_path(tc_xlsx_path)
+            remove_runtime_path(ui_pdf_path)
+
+            log_event(
+                "qa.ts.done",
+                request_id=request_id,
+                ok=payload.get("ok"),
+                count=payload.get("count"),
+                file_count=len(payload.get("download_files") or []),
+            )
+            self.send_json(payload, status=200 if payload.get("ok") else 400)
+
+        except Exception as exc:
+            log_event("qa.ts.error", error=str(exc), traceback=traceback.format_exc())
+            self.send_json({"ok": False, "error": str(exc), "files": []}, status=400)
+        finally:
+            if temp_dir is not None and not preserve_temp_dir:
+                remove_runtime_path(temp_dir)
+
+
+    def serve_file(self, path: Path) -> None:
+        # web 폴더의 HTML/CSS/JS 정적 파일을 응답한다.
+        """임의의 로컬 파일을 읽지 못하도록 웹 정적 파일 폴더 아래 파일만 제공한다."""
+        resolved = path.resolve()
+        if WEB_DIR.resolve() not in resolved.parents and resolved != WEB_DIR.resolve():
+            self.send_error(403)
+            return
+
+        if not resolved.exists() or not resolved.is_file():
+            self.send_error(404)
+            return
+
+        content_type = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
+        data = resolved.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def serve_download(self, token: str) -> None:
+        # 처리 완료된 결과 파일을 토큰으로 찾아 다운로드 응답한다.
+        """생성된 결과 문서를 다운로드로 전송한다."""
+        path = RESULT_FILES.get(token)
+        if not path or not path.exists():
+            self.send_error(404)
+            return
+
+        data = path.read_bytes()
+        download_name = RESULT_DOWNLOAD_NAMES.get(token, path.name)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(download_name)}")
+        self.end_headers()
+        self.wfile.write(data)
+        log_event("download.sent", token=token, path=str(path), bytes=len(data))
+        cleanup_sent_download(token, path)
+
+    def send_json(self, payload: dict[str, object], status: int = 200) -> None:
+        # dict payload를 UTF-8 JSON HTTP 응답으로 보낸다.
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, format: str, *args: object) -> None:
+        # 기본 콘솔 로그 대신 web_app.log 파일에 접근 로그를 남긴다.
+        log_event("http.access", client=self.client_address[0], message=format % args)
+
+
+def parse_args() -> argparse.Namespace:
+    # 웹 서버 host/port 명령줄 옵션을 읽는다.
+    parser = argparse.ArgumentParser(description="산출물 매핑 확인 웹 도구")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    return parser.parse_args()
+
+
+def main() -> None:
+    # 작업 폴더를 정리하고 HTTP 서버를 시작한다.
+    args = parse_args()
+    read_runtime_env()
+    ensure_runtime_dirs()
+    cleanup_runtime()
+
+    server = ThreadingHTTPServer((args.host, args.port), WebHandler)
+    log_event("server.start", url=f"http://{args.host}:{args.port}")
+    print(f"http://{args.host}:{args.port}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)

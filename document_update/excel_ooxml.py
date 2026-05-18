@@ -1,0 +1,432 @@
+# 엑셀 문서 구조의 표지 시트에서 제목/프로젝트명/문서번호 셀을 읽고 수정한다.
+# Excel OOXML 구조를 직접 읽고 표지 시트의 제목/프로젝트명/문서번호를 수정합니다.
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+import re
+import zipfile
+import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape
+
+from .patterns import OUTPUT_ID_PATTERN
+
+
+MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+XML_SPACE_ATTR = "{http://www.w3.org/XML/1998/namespace}space"
+DOCUMENT_NUMBER_LABEL = "\ubb38\uc11c\ubc88\ud638"
+EXCEL_DOCUMENT_SUFFIXES = {".xlsx", ".xlsm", ".xltx", ".xltm"}
+COVER_SHEET_HINT = "\ud45c\uc9c0"
+
+ET.register_namespace("", MAIN_NS)
+ET.register_namespace("r", REL_NS)
+
+
+def qn(local_name: str) -> str:
+    return f"{{{MAIN_NS}}}{local_name}"
+
+
+@dataclass(frozen=True)
+class WorksheetRef:
+    name: str
+    path: str
+
+
+@dataclass(frozen=True)
+class CellInfo:
+    ref: str
+    row: int
+    col: int
+    text: str
+    cell: ET.Element
+    row_element: ET.Element
+
+
+def normalize_part_path(target: str) -> str:
+    target = target.replace("\\", "/")
+    if target.startswith("/"):
+        return str(PurePosixPath(target.lstrip("/")))
+    if target.startswith("xl/"):
+        return str(PurePosixPath(target))
+    return str(PurePosixPath("xl") / target)
+
+
+def workbook_sheets(zf: zipfile.ZipFile) -> list[WorksheetRef]:
+    workbook = ET.fromstring(zf.read("xl/workbook.xml"))
+    rels = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+    rel_map = {
+        rel.attrib.get("Id", ""): rel.attrib.get("Target", "")
+        for rel in rels.findall(f"{{{PKG_REL_NS}}}Relationship")
+    }
+
+    sheets_element = workbook.find(qn("sheets"))
+    if sheets_element is None:
+        return []
+
+    result: list[WorksheetRef] = []
+    for sheet in sheets_element:
+        rel_id = sheet.attrib.get(f"{{{REL_NS}}}id", "")
+        target = rel_map.get(rel_id, "")
+        if not target:
+            continue
+        result.append(
+            WorksheetRef(
+                name=sheet.attrib.get("name", ""),
+                path=normalize_part_path(target),
+            )
+        )
+    return result
+
+
+def cover_sheet_ref(zf: zipfile.ZipFile) -> WorksheetRef:
+    sheets = workbook_sheets(zf)
+    if not sheets:
+        raise RuntimeError("엑셀 통합문서에서 시트를 찾지 못했습니다.")
+
+    for sheet in sheets:
+        if COVER_SHEET_HINT in sheet.name:
+            return sheet
+    return sheets[0]
+
+
+def read_shared_strings(zf: zipfile.ZipFile) -> list[str]:
+    if "xl/sharedStrings.xml" not in zf.namelist():
+        return []
+
+    root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+    values: list[str] = []
+    for item in root.findall(qn("si")):
+        values.append("".join(text.text or "" for text in item.iter(qn("t"))))
+    return values
+
+
+def cell_ref_to_col(ref: str) -> int:
+    letters = "".join(ch for ch in ref if ch.isalpha())
+    value = 0
+    for letter in letters:
+        value = value * 26 + (ord(letter.upper()) - 64)
+    return value
+
+
+def col_to_name(col: int) -> str:
+    letters: list[str] = []
+    while col:
+        col, remainder = divmod(col - 1, 26)
+        letters.append(chr(65 + remainder))
+    return "".join(reversed(letters))
+
+
+def cell_text(cell: ET.Element, shared_strings: list[str]) -> str:
+    cell_type = cell.attrib.get("t")
+    if cell_type == "s":
+        value = cell.find(qn("v"))
+        if value is None or value.text is None:
+            return ""
+        try:
+            return shared_strings[int(value.text)]
+        except (ValueError, IndexError):
+            return ""
+
+    if cell_type == "inlineStr":
+        return "".join(text.text or "" for text in cell.iter(qn("t")))
+
+    value = cell.find(qn("v"))
+    return value.text if value is not None and value.text is not None else ""
+
+
+def row_number(row: ET.Element) -> int:
+    raw = row.attrib.get("r")
+    if raw and raw.isdigit():
+        return int(raw)
+
+    for cell in row.findall(qn("c")):
+        match = re.search(r"\d+", cell.attrib.get("r", ""))
+        if match:
+            return int(match.group(0))
+
+    return 0
+
+
+def iter_cells(root: ET.Element, shared_strings: list[str]) -> list[CellInfo]:
+    sheet_data = root.find(qn("sheetData"))
+    if sheet_data is None:
+        return []
+
+    cells: list[CellInfo] = []
+    for row in sheet_data.findall(qn("row")):
+        current_row = row_number(row)
+        for cell in row.findall(qn("c")):
+            ref = cell.attrib.get("r", "")
+            if not ref:
+                continue
+            cells.append(
+                CellInfo(
+                    ref=ref,
+                    row=current_row,
+                    col=cell_ref_to_col(ref),
+                    text=cell_text(cell, shared_strings),
+                    cell=cell,
+                    row_element=row,
+                )
+            )
+    return cells
+
+
+def clean_cover_value(value: str) -> str:
+    return value.strip().strip("\"'`<>")
+
+
+def meaningful_cover_value(value: str) -> str:
+    cleaned = clean_cover_value(value)
+    if not cleaned:
+        return ""
+
+    noise_prefixes = (
+        "\uc2dd\ud488\uc758\uc57d\ud488\uc548\uc804\ucc98",
+        "\u321c",
+        "(\uc8fc)",
+        "\uac1c \uc815 \uc774 \ub825",
+        "\ubaa9 \ucc28",
+    )
+    noise_values = {
+        DOCUMENT_NUMBER_LABEL,
+        "\ubb38\uc11c\ubc84\uc804",
+        "\uac1c\uc815\uc77c\uc790",
+        "\uc791  \uc131 \uc790",
+        "\uc791\uc131\uc790",
+    }
+
+    if cleaned in noise_values:
+        return ""
+    if any(cleaned.startswith(prefix) for prefix in noise_prefixes):
+        return ""
+    if OUTPUT_ID_PATTERN.fullmatch(cleaned):
+        return ""
+
+    return cleaned
+
+
+def find_excel_cover_identity(file_path: Path) -> tuple[str, str]:
+    with zipfile.ZipFile(file_path, "r") as zf:
+        shared_strings = read_shared_strings(zf)
+        sheet = cover_sheet_ref(zf)
+        root = ET.fromstring(zf.read(sheet.path))
+        cells = iter_cells(root, shared_strings)
+
+    document_rows = [
+        cell.row
+        for cell in cells
+        if clean_cover_value(cell.text) == DOCUMENT_NUMBER_LABEL
+    ]
+    cutoff_row = min(document_rows) if document_rows else 40
+
+    values: list[str] = []
+    for cell in sorted(cells, key=lambda item: (item.row, item.col)):
+        if cell.row >= cutoff_row:
+            continue
+        value = meaningful_cover_value(cell.text)
+        if value and value not in values:
+            values.append(value)
+
+    if len(values) >= 2:
+        return values[-2], values[-1]
+    return "", ""
+
+
+def extract_excel_cover_text(file_path: Path, max_chars: int = 1000) -> str:
+    """표지/첫 워크시트의 앞쪽 셀만 행/열 순서로 읽는다."""
+    with zipfile.ZipFile(file_path, "r") as zf:
+        shared_strings = read_shared_strings(zf)
+        sheet = cover_sheet_ref(zf)
+        root = ET.fromstring(zf.read(sheet.path))
+        cells = iter_cells(root, shared_strings)
+
+    document_rows = [
+        cell.row
+        for cell in cells
+        if clean_cover_value(cell.text) == DOCUMENT_NUMBER_LABEL
+    ]
+    cutoff_row = min(document_rows) + 8 if document_rows else 35
+
+    values: list[str] = []
+    for cell in sorted(cells, key=lambda item: (item.row, item.col)):
+        if cell.row > cutoff_row:
+            continue
+        value = clean_cover_value(cell.text)
+        if value and value not in values:
+            values.append(value)
+        if len(" ".join(values)) >= max_chars:
+            break
+
+    return " ".join(values)[:max_chars]
+
+
+def element_prefix(tag: str) -> str:
+    return f"{tag.split(':', 1)[0]}:" if ":" in tag else ""
+
+
+def cell_xml_pattern(cell_ref: str) -> re.Pattern[str]:
+    return re.compile(
+        rf"<(?P<tag>(?:\w+:)?c)\b(?=[^>]*\br=\"{re.escape(cell_ref)}\")[^>]*(?:/>|>.*?</(?P=tag)>)",
+        re.DOTALL,
+    )
+
+
+def row_xml_pattern(row_index: int) -> re.Pattern[str]:
+    return re.compile(
+        rf"<(?P<tag>(?:\w+:)?row)\b(?=[^>]*\br=\"{row_index}\")[^>]*(?:/>|>.*?</(?P=tag)>)",
+        re.DOTALL,
+    )
+
+
+def any_cell_xml_pattern() -> re.Pattern[str]:
+    return re.compile(r"<(?P<tag>(?:\w+:)?c)\b[^>]*(?:/>|>.*?</(?P=tag)>)", re.DOTALL)
+
+
+def ref_from_cell_xml(cell_xml: str) -> str:
+    match = re.search(r'\br="([^"]+)"', cell_xml)
+    return match.group(1) if match else ""
+
+
+def inline_text_payload(prefix: str, new_text: str) -> str:
+    space_attr = ' xml:space="preserve"' if new_text != new_text.strip() else ""
+    escaped_text = escape(new_text)
+    return f"<{prefix}is><{prefix}t{space_attr}>{escaped_text}</{prefix}t></{prefix}is>"
+
+
+def inline_cell_xml(cell_ref: str, new_text: str, prefix: str = "") -> str:
+    return f'<{prefix}c r="{cell_ref}" t="inlineStr">{inline_text_payload(prefix, new_text)}</{prefix}c>'
+
+
+def replace_cell_xml(cell_xml: str, new_text: str) -> str:
+    start_match = re.match(r"<(?P<tag>(?:\w+:)?c)\b(?P<attrs>[^>]*)/?>?", cell_xml, re.DOTALL)
+    if not start_match:
+        raise RuntimeError("엑셀 셀 XML을 해석하지 못했습니다.")
+
+    tag = start_match.group("tag")
+    attrs = re.sub(r'\s+t="[^"]*"', "", start_match.group("attrs"))
+    prefix = element_prefix(tag)
+    return f"<{tag}{attrs} t=\"inlineStr\">{inline_text_payload(prefix, new_text)}</{tag}>"
+
+
+def replace_or_insert_cell_xml(
+    sheet_xml: str,
+    cell_ref: str,
+    row_index: int,
+    col_index: int,
+    new_text: str,
+) -> str:
+    """시트를 다시 직렬화하지 않고 원본 워크시트 문서 조각에서 셀 하나만 수정한다."""
+    cell_match = cell_xml_pattern(cell_ref).search(sheet_xml)
+    if cell_match:
+        return (
+            sheet_xml[:cell_match.start()]
+            + replace_cell_xml(cell_match.group(0), new_text)
+            + sheet_xml[cell_match.end():]
+        )
+
+    row_match = row_xml_pattern(row_index).search(sheet_xml)
+    if not row_match:
+        raise RuntimeError(f"엑셀 표지에서 {row_index}행을 찾지 못했습니다.")
+
+    row_xml = row_match.group(0)
+    row_tag = row_match.group("tag")
+    prefix = element_prefix(row_tag)
+    new_cell = inline_cell_xml(cell_ref, new_text, prefix)
+
+    if row_xml.endswith("/>"):
+        open_row = row_xml[:-2] + ">"
+        updated_row = f"{open_row}{new_cell}</{row_tag}>"
+    else:
+        inserted = False
+        updated_row_parts: list[str] = []
+        last = 0
+        for candidate in any_cell_xml_pattern().finditer(row_xml):
+            candidate_ref = ref_from_cell_xml(candidate.group(0))
+            if candidate_ref and cell_ref_to_col(candidate_ref) > col_index:
+                updated_row_parts.append(row_xml[last:candidate.start()])
+                updated_row_parts.append(new_cell)
+                updated_row_parts.append(row_xml[candidate.start():])
+                inserted = True
+                break
+
+        if inserted:
+            updated_row = "".join(updated_row_parts)
+        else:
+            close_match = re.search(rf"</{re.escape(row_tag)}>\s*$", row_xml)
+            if not close_match:
+                raise RuntimeError(f"엑셀 표지에서 {row_index}행 닫는 태그를 찾지 못했습니다.")
+            updated_row = row_xml[:close_match.start()] + new_cell + row_xml[close_match.start():]
+
+    return sheet_xml[:row_match.start()] + updated_row + sheet_xml[row_match.end():]
+
+
+def build_updated_excel_cover_sheet(
+    zf: zipfile.ZipFile,
+    new_document_number: str,
+    old_title: str | None,
+    new_title: str | None,
+    old_project_title: str | None,
+    new_project_title: str | None,
+) -> tuple[str, bytes, str, int, int, int]:
+    shared_strings = read_shared_strings(zf)
+    sheet = cover_sheet_ref(zf)
+    original_sheet_xml = zf.read(sheet.path).decode("utf-8", errors="ignore")
+    root = ET.fromstring(original_sheet_xml)
+
+    title_count = 0
+    project_count = 0
+    old_document_number = ""
+    document_number_count = 0
+    updates: dict[str, tuple[int, int, str]] = {}
+
+    for info in iter_cells(root, shared_strings):
+        value = clean_cover_value(info.text)
+        if old_title and new_title and old_title != new_title and value == old_title:
+            updates[info.ref] = (info.row, info.col, new_title)
+            title_count += 1
+        if (
+            old_project_title
+            and new_project_title
+            and old_project_title != new_project_title
+            and value == old_project_title
+        ):
+            updates[info.ref] = (info.row, info.col, new_project_title)
+            project_count += 1
+
+    cell_by_ref = {info.ref: info for info in iter_cells(root, shared_strings)}
+    for info in iter_cells(root, shared_strings):
+        if clean_cover_value(info.text) != DOCUMENT_NUMBER_LABEL:
+            continue
+
+        target_ref = f"{col_to_name(info.col + 1)}{info.row}"
+        target_info = cell_by_ref.get(target_ref)
+        old_document_number = clean_cover_value(target_info.text if target_info else "")
+        if old_document_number != new_document_number:
+            updates[target_ref] = (info.row, info.col + 1, new_document_number)
+        document_number_count = 0 if old_document_number == new_document_number else 1
+        break
+
+    if not old_document_number and document_number_count == 0:
+        raise RuntimeError("엑셀 표지에서 문서번호 오른쪽 칸을 찾지 못했습니다.")
+
+    updated_xml_text = original_sheet_xml
+    for cell_ref, (row_index, col_index, value) in updates.items():
+        updated_xml_text = replace_or_insert_cell_xml(
+            updated_xml_text,
+            cell_ref,
+            row_index,
+            col_index,
+            value,
+        )
+
+    return (
+        sheet.path,
+        updated_xml_text.encode("utf-8"),
+        old_document_number,
+        title_count,
+        project_count,
+        document_number_count,
+    )
