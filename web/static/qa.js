@@ -96,7 +96,12 @@ function updateFileLabel(input) {
     return;
   }
 
-  label.textContent = input.files[0].name;
+  if (input.files.length === 1) {
+    label.textContent = input.files[0].name;
+    return;
+  }
+
+  label.textContent = `${input.files.length}개 선택됨`;
 }
 
 function buildFormData(form) {
@@ -153,6 +158,49 @@ function renderDownloads(files, title) {
       `).join("")}
     </div>
   `;
+}
+
+function renderSourceResults(sourceResults) {
+  if (!sourceResults?.length || downloadPanel.hidden) return;
+
+  const rows = sourceResults.map((item) => {
+    const analysis = item.analysis || {};
+    const risks = analysis.risks || [];
+    const recommendations = analysis.recommendations || [];
+    const screens = analysis.screens || [];
+    const quality = analysis.quality || (item.ok ? "good" : "warning");
+
+    return `
+      <article class="source-result-card">
+        <div class="source-result-head">
+          <strong>${escapeHtml(item.source_pdf || "-")}</strong>
+          <span class="${escapeHtml(quality)}">${item.ok ? "생성 완료" : "확인 필요"}</span>
+        </div>
+        <p>${escapeHtml(analysis.summary || `${analysis.screen_count ?? 0}개 화면 분석 · ${item.count ?? 0}개 생성`)}</p>
+        <small>화면 ${escapeHtml(analysis.screen_count ?? screens.length ?? 0)}개 · 생성 행 ${escapeHtml(item.count ?? 0)}개</small>
+        ${risks.length ? `
+          <ul>
+            ${risks.map((risk) => `<li>${escapeHtml(risk)}</li>`).join("")}
+          </ul>
+        ` : ""}
+        ${recommendations.length ? `
+          <ul>
+            ${recommendations.map((recommendation) => `<li>${escapeHtml(recommendation)}</li>`).join("")}
+          </ul>
+        ` : ""}
+      </article>
+    `;
+  }).join("");
+
+  downloadPanel.insertAdjacentHTML("beforeend", `
+    <div class="source-result-list">
+      <div class="download-panel-head">
+        <strong>사전 분석 요약</strong>
+        <span>${sourceResults.length}개</span>
+      </div>
+      ${rows}
+    </div>
+  `);
 }
 
 function validateFiles(form, rules) {
@@ -348,8 +396,11 @@ async function runTcGeneration(event) {
     setBadge("완료", "done");
     setProcessStatus("완료");
     tcCount.textContent = data.count ?? 0;
-    resultMeta.textContent = `생성 행 수 ${data.count ?? 0}개 · 다운로드 ${data.download_files?.length || 0}개`;
+    const sourceCount = data.source_count ?? data.source_results?.length ?? 1;
+    const failedCount = data.failed_count ?? 0;
+    resultMeta.textContent = `처리 설계서 ${sourceCount}개 · 생성 행 수 ${data.count ?? 0}개 · 다운로드 ${data.download_files?.length || 0}개${failedCount ? ` · 실패 ${failedCount}개` : ""}`;
     renderDownloads(data.download_files || data.files, "단위시험 케이스 파일");
+    renderSourceResults(data.source_results || []);
   } catch (error) {
     showGenerationError(error, "tc");
   } finally {

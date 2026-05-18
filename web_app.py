@@ -20,6 +20,7 @@ from app_runtime import (
     cleanup_runtime,
     ensure_runtime_dirs,
     log_event,
+    parse_json_object,
     read_runtime_env,
     remove_runtime_path,
     resolve_runtime_model,
@@ -28,7 +29,13 @@ from app_runtime import (
 )
 from output_file_check.folder_workflow import run_web_check, run_web_folder_apply
 from web_uploads import parse_multipart_items, safe_upload_filename
-from qa_generation.generate_tc import generate_test_cases
+from qa_generation.generate_tc import (
+    call_ollama,
+    extract_process_flow_steps,
+    extract_screen_blocks,
+    extract_text_from_pdf,
+    generate_test_cases,
+)
 from qa_generation.generate_ts import generate_test_scenarios
 
 
@@ -187,6 +194,123 @@ def apply_download_stem(payload: dict[str, object], stem: str) -> None:
         item["name"] = f"{stem}{suffix}"
 
 
+def unique_download_name(existing_names: set[str], name: str) -> str:
+    path = Path(name)
+    candidate = name
+    index = 2
+    while candidate.casefold() in existing_names:
+        candidate = f"{path.stem}_{index}{path.suffix}"
+        index += 1
+    existing_names.add(candidate.casefold())
+    return candidate
+
+
+def analyze_tc_pdf(pdf_path: Path, source_name: str, model_name: str, ollama_url: str) -> dict[str, object]:
+    analysis: dict[str, object] = {
+        "summary": "",
+        "quality": "warning",
+        "screen_count": 0,
+        "screens": [],
+        "risks": [],
+        "recommendations": [],
+    }
+
+    try:
+        extracted_text = extract_text_from_pdf(pdf_path)
+        screen_blocks = extract_screen_blocks(extracted_text)
+    except Exception as exc:
+        analysis["summary"] = "PDF 텍스트 추출 또는 화면 분석에 실패했습니다."
+        analysis["quality"] = "poor"
+        analysis["risks"] = [str(exc)]
+        return analysis
+
+    screens: list[dict[str, object]] = []
+    for block in screen_blocks:
+        block_text = str(block.get("text") or "")
+        flow_steps = extract_process_flow_steps(block_text)
+        screens.append(
+            {
+                "screen_id": block.get("screen_id") or "",
+                "unit_test_id": block.get("unit_test_id") or "",
+                "process_step_count": len(flow_steps),
+            }
+        )
+
+    risks: list[str] = []
+    if not extracted_text.strip():
+        risks.append("PDF에서 텍스트를 추출하지 못했습니다.")
+    if not screens:
+        risks.append("화면ID를 찾지 못했습니다.")
+    no_step_screens = [screen["screen_id"] for screen in screens if not screen.get("process_step_count")]
+    if no_step_screens:
+        risks.append(f"처리흐름이 없는 화면 {len(no_step_screens)}개가 있습니다.")
+
+    analysis.update(
+        {
+            "summary": f"{source_name}에서 화면 {len(screens)}개를 찾았습니다.",
+            "quality": "poor" if not screens else ("warning" if risks else "good"),
+            "screen_count": len(screens),
+            "screens": screens[:30],
+            "risks": risks,
+            "recommendations": [],
+            "_extracted_text": extracted_text,
+            "_screen_blocks": screen_blocks,
+        }
+    )
+
+    if not screens:
+        return analysis
+
+    screen_brief = "\n".join(
+        f"- {screen['screen_id']} / {screen['unit_test_id']} / 처리흐름 {screen['process_step_count']}개"
+        for screen in screens[:20]
+    )
+    prompt = f"""
+다음 사용자인터페이스설계서 PDF의 사전 분석 결과를 보고 단위시험 케이스 생성 관점으로 요약하세요.
+반드시 JSON 객체만 출력하세요.
+
+파일명: {source_name}
+추출 화면 수: {len(screens)}
+화면 목록:
+{screen_brief}
+
+현재 감지된 위험:
+{chr(10).join(f"- {risk}" for risk in risks) if risks else "- 없음"}
+
+출력 형식:
+{{
+  "summary": "한 문장 요약",
+  "quality": "good 또는 warning 또는 poor",
+  "risks": ["위험요인"],
+  "recommendations": ["생성 전 확인 또는 보완 권고"]
+}}
+"""
+    try:
+        raw = call_ollama(
+            ollama_url,
+            model_name,
+            "당신은 QA 산출물 생성 전 입력 문서를 점검하는 분석가입니다.",
+            prompt,
+            num_predict=1024,
+            timeout=60,
+        )
+        ai = parse_json_object(raw)
+        if isinstance(ai.get("summary"), str) and ai["summary"].strip():
+            analysis["summary"] = ai["summary"].strip()
+        if ai.get("quality") in {"good", "warning", "poor"}:
+            analysis["quality"] = ai["quality"]
+        if isinstance(ai.get("risks"), list):
+            analysis["risks"] = [str(item) for item in ai["risks"] if str(item).strip()]
+        if isinstance(ai.get("recommendations"), list):
+            analysis["recommendations"] = [
+                str(item) for item in ai["recommendations"] if str(item).strip()
+            ]
+    except Exception as exc:
+        analysis["ai_error"] = str(exc)
+
+    return analysis
+
+
 def runtime_ai_settings(fields: dict[str, str]) -> tuple[str, str]:
     # 요청 필드와 .env를 합쳐 QA 생성에 사용할 모델명과 Ollama chat URL을 결정한다.
     """프론트에서 넘어온 값이 있으면 우선 사용하고, 없으면 .env 설정을 사용한다."""
@@ -305,20 +429,16 @@ class WebHandler(BaseHTTPRequestHandler):
             output_dir = temp_dir / "output"
             output_dir.mkdir()
 
-            pdf_path, _ = save_uploaded_file(
-                temp_dir,
-                file_items,
-                "ui_pdf",
-                "ui.pdf",
-                {".pdf"},
-            )
-            template_hwpx_path, template_hwpx_name = save_uploaded_file(
+            template_hwpx_path, _template_hwpx_name = save_uploaded_file(
                 temp_dir,
                 file_items,
                 "template_hwpx",
                 "template.hwpx",
                 {".hwpx"},
             )
+            ui_pdf_items = file_items.get("ui_pdf") or []
+            if not ui_pdf_items:
+                raise ValueError("사용자인터페이스 설계서 PDF를 선택하세요.")
 
             log_event(
                 "qa.tc.start",
@@ -327,18 +447,118 @@ class WebHandler(BaseHTTPRequestHandler):
                 files={name: len(items) for name, items in file_items.items()},
             )
 
-            payload = generate_test_cases(
-                pdf_path=pdf_path,
-                model_name=model_name,
-                ollama_url=ollama_url,
-                output_dir=output_dir,
-                template_path=template_hwpx_path,
-            )
+            all_files: list[dict[str, object]] = []
+            source_results: list[dict[str, object]] = []
+            download_names: set[str] = set()
+            total_count = 0
+
+            for index, (pdf_filename, pdf_payload) in enumerate(ui_pdf_items, start=1):
+                source_name = pdf_filename or f"ui_pdf_{index}.pdf"
+                pdf_path: Path | None = None
+                pdf_output_dir: Path | None = None
+                analysis: dict[str, object] | None = None
+                try:
+                    if not pdf_payload:
+                        raise ValueError("빈 PDF 파일입니다.")
+
+                    if Path(source_name).suffix.lower() != ".pdf":
+                        raise ValueError("PDF 파일만 업로드할 수 있습니다.")
+
+                    safe_pdf_name = safe_upload_filename(source_name, f"ui_pdf_{index}", ".pdf")
+                    pdf_stem = Path(safe_pdf_name).stem
+                    pdf_path = temp_dir / f"ui_pdf_{index}_{safe_pdf_name}"
+                    pdf_path.write_bytes(pdf_payload)
+                    analysis = analyze_tc_pdf(pdf_path, source_name, model_name, ollama_url)
+                    extracted_text = None
+                    screen_blocks = None
+                    if isinstance(analysis, dict):
+                        extracted_text_value = analysis.pop("_extracted_text", None)
+                        if isinstance(extracted_text_value, str):
+                            extracted_text = extracted_text_value
+                        screen_blocks_value = analysis.pop("_screen_blocks", None)
+                        if isinstance(screen_blocks_value, list):
+                            screen_blocks = screen_blocks_value
+
+                    pdf_output_dir = output_dir / f"{index:03d}_{pdf_stem}"
+                    pdf_output_dir.mkdir(parents=True, exist_ok=True)
+
+                    item_payload = generate_test_cases(
+                        pdf_path=pdf_path,
+                        model_name=model_name,
+                        ollama_url=ollama_url,
+                        output_dir=pdf_output_dir,
+                        template_path=template_hwpx_path,
+                        extracted_text=extracted_text,
+                        screen_blocks=screen_blocks,
+                    )
+
+                    item_count = int(item_payload.get("count") or 0)
+                    total_count += item_count
+                    item_files = item_payload.get("files") if isinstance(item_payload.get("files"), list) else []
+
+                    for file_item in item_files:
+                        if not isinstance(file_item, dict):
+                            continue
+                        path = Path(str(file_item.get("path") or ""))
+                        suffix = path.suffix or f".{file_item.get('kind') or 'file'}"
+                        download_name = unique_download_name(
+                            download_names,
+                            f"{pdf_stem}{suffix}",
+                        )
+                        target_path = output_dir / download_name
+                        if path.exists() and path.resolve() != target_path.resolve():
+                            path.replace(target_path)
+                            file_item["path"] = str(target_path)
+                        file_item["name"] = download_name
+                        file_item["source_pdf"] = source_name
+                        all_files.append(file_item)
+
+                    source_results.append(
+                        {
+                            "source_pdf": source_name,
+                            "ok": bool(item_payload.get("ok")),
+                            "count": item_count,
+                            "file_count": len(item_files),
+                            "error": str(item_payload.get("error") or ""),
+                            "analysis": analysis,
+                        }
+                    )
+                except Exception as exc:
+                    source_results.append(
+                        {
+                            "source_pdf": source_name,
+                            "ok": False,
+                            "count": 0,
+                            "file_count": 0,
+                            "error": str(exc),
+                            "analysis": analysis,
+                        }
+                    )
+                finally:
+                    if pdf_path is not None:
+                        remove_runtime_path(pdf_path)
+                    if pdf_output_dir is not None:
+                        remove_runtime_path(pdf_output_dir)
+
+            failed_count = sum(1 for item in source_results if not item.get("ok"))
+            payload = {
+                "ok": bool(all_files),
+                "count": total_count,
+                "files": all_files,
+                "source_results": source_results,
+                "source_count": len(source_results),
+                "failed_count": failed_count,
+            }
+            if not all_files:
+                errors = [
+                    f"{item.get('source_pdf')}: {item.get('error')}"
+                    for item in source_results
+                    if item.get("error")
+                ]
+                payload["error"] = "\n".join(errors) or "단위시험 케이스 생성 결과가 없습니다."
             payload["request_id"] = request_id
-            apply_download_stem(payload, uploaded_stem(template_hwpx_name, "template_hwpx"))
             attach_file_downloads(payload, delete_after_download=True, cleanup_root=temp_dir)
             preserve_temp_dir = bool(payload.get("download_files"))
-            remove_runtime_path(pdf_path)
             remove_runtime_path(template_hwpx_path)
 
             log_event(
@@ -346,6 +566,8 @@ class WebHandler(BaseHTTPRequestHandler):
                 request_id=request_id,
                 ok=payload.get("ok"),
                 count=payload.get("count"),
+                source_count=payload.get("source_count"),
+                failed_count=payload.get("failed_count"),
                 file_count=len(payload.get("download_files") or []),
             )
             self.send_json(payload, status=200 if payload.get("ok") else 400)

@@ -1831,6 +1831,73 @@ body {
   white-space: nowrap;
 }
 
+.source-result-list {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid #c9e7d6;
+  padding-top: 10px;
+}
+
+.source-result-card {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #d8e8de;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.source-result-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.source-result-head strong {
+  min-width: 0;
+  color: #1f4739;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-result-head span {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #e8f8ee;
+  color: #167a48;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.source-result-head span.warning {
+  background: #fff7db;
+  color: #936400;
+}
+
+.source-result-head span.poor {
+  background: #ffe7e7;
+  color: #b42318;
+}
+
+.source-result-card p,
+.source-result-card small,
+.source-result-card li {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.source-result-card ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+}
+
 @media (max-width: 620px) {
   .task-tabs {
     grid-template-columns: 1fr;
