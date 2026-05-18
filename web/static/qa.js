@@ -6,6 +6,7 @@ const loadingMessage = document.querySelector("#loadingMessage");
 
 const resultTitle = document.querySelector("#resultTitle");
 const resultMeta = document.querySelector("#resultMeta");
+const errorPanel = document.querySelector("#errorPanel");
 const downloadPanel = document.querySelector("#downloadPanel");
 const emptyState = document.querySelector("#emptyState");
 
@@ -80,6 +81,7 @@ function setActiveTask(taskName) {
   taskTabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.taskTab === taskName));
   taskPanels.forEach((panel) => panel.classList.toggle("active", panel.dataset.taskPanel === taskName));
   clearDownloads();
+  clearError();
   setProcessStatus("대기");
   resultTitle.textContent = taskName === "tc" ? "단위시험 케이스 생성" : "통합시험 시나리오 생성";
   resultMeta.textContent = "파일을 업로드한 뒤 생성 버튼을 누르세요.";
@@ -119,6 +121,12 @@ function clearDownloads() {
   generatedFileCount.textContent = "-";
 }
 
+function clearError() {
+  if (!errorPanel) return;
+  errorPanel.hidden = true;
+  errorPanel.replaceChildren();
+}
+
 function renderDownloads(files, title) {
   const downloadFiles = (files || []).filter((file) => file && file.download_url);
   generatedFileCount.textContent = downloadFiles.length || "-";
@@ -129,6 +137,7 @@ function renderDownloads(files, title) {
   }
 
   emptyState.hidden = true;
+  clearError();
   downloadPanel.hidden = false;
   downloadPanel.innerHTML = `
     <div class="download-panel-head">
@@ -150,13 +159,164 @@ function validateFiles(form, rules) {
   for (const [selector, message] of rules) {
     const input = form.querySelector(selector);
     if (!input || !input.files.length) {
-      setBadge("확인", "error");
-      setProcessStatus("확인 필요");
-      resultMeta.textContent = message;
+      showGenerationError(new Error(message), form === tsForm ? "ts" : "tc");
       return false;
     }
   }
   return true;
+}
+
+function selectedFileName(inputId) {
+  const input = document.querySelector(`#${inputId}`);
+  return input?.files?.[0]?.name || "";
+}
+
+function friendlyErrorInfo(message, taskName) {
+  const rawMessage = String(message || "").trim();
+  const fallback = taskName === "ts"
+    ? "통합시험 시나리오 생성 중 문제가 발생했습니다. 업로드한 파일을 다시 확인하세요."
+    : "단위시험 케이스 생성 중 문제가 발생했습니다. 업로드한 파일을 다시 확인하세요.";
+
+  if (!rawMessage) {
+    return {
+      summary: fallback,
+      checks: ["업로드한 파일 형식과 위치가 올바른지 확인하세요."],
+      detail: "",
+    };
+  }
+
+  const selectedTcMatch = rawMessage.match(/선택된 단위시험 케이스 파일:\s*(.+)$/m);
+
+  if (taskName === "tc") {
+    const selectedTemplate = selectedFileName("tcTemplateHwpx");
+    const selectedPdf = selectedFileName("tcUiPdf");
+    const detail = [
+      selectedTemplate ? `현재 선택된 기존 단위시험 케이스 파일: ${selectedTemplate}` : "",
+      selectedPdf ? `현재 선택된 사용자인터페이스설계서 파일: ${selectedPdf}` : "",
+    ].filter(Boolean).join("\n");
+
+    if (rawMessage.includes("기존 단위시험 케이스 HWPX를 선택하세요") || rawMessage.includes("template_hwpx")) {
+      return {
+        summary: "'기존 단위시험 케이스' 파일을 확인하세요.",
+        checks: [
+          "1단계의 '기존 단위시험 케이스' 칸에는 HWPX 파일을 넣어야 합니다.",
+          "단위시험 ID, 단위시험 명, 사전조건, 화면 ID, 수행 결과가 있는 기존 단위시험 케이스 양식인지 확인하세요.",
+          "PDF나 XLSX 파일을 넣으면 단위시험 케이스 HWPX를 만들 수 없습니다.",
+        ],
+        detail,
+      };
+    }
+
+    if (rawMessage.includes("사용자인터페이스 설계서 PDF를 선택하세요") || rawMessage.includes("ui_pdf") || rawMessage.includes("PDF 파일을 찾을 수 없습니다")) {
+      return {
+        summary: "'사용자인터페이스설계서' 파일을 확인하세요.",
+        checks: [
+          "1단계의 '사용자인터페이스설계서' 칸에는 PDF 파일을 넣어야 합니다.",
+          "PDF 안에 화면 ID, 화면명, 처리흐름 정보가 포함되어 있어야 단위시험 케이스를 만들 수 있습니다.",
+          "파일이 비어 있거나 잘못된 PDF라면 다른 파일로 다시 선택하세요.",
+        ],
+        detail,
+      };
+    }
+
+    if (rawMessage.includes("HWPX 양식") || rawMessage.includes("단위시험 ID") || rawMessage.includes("수행 결과") || rawMessage.includes("채울 단위시험 표")) {
+      return {
+        summary: "기존 단위시험 케이스 HWPX 양식을 확인하세요.",
+        checks: [
+          "업로드한 HWPX 안에 단위시험 케이스 표 양식이 있는지 확인하세요.",
+          "양식에는 '단위시험 ID'와 테스트 스텝 표의 '수행 결과' 항목이 있어야 합니다.",
+          "일반 HWPX 문서나 표 구조가 다른 파일이면 생성 중에 실패할 수 있습니다.",
+        ],
+        detail,
+      };
+    }
+
+    if (rawMessage.includes("단위시험 케이스 생성 결과가 없습니다")) {
+      return {
+        summary: "사용자인터페이스설계서에서 생성할 테스트 케이스를 찾지 못했습니다.",
+        checks: [
+          "PDF에 화면 ID와 처리흐름이 포함되어 있는지 확인하세요.",
+          "스캔 이미지 위주의 PDF라면 텍스트 추출이 되지 않아 생성 결과가 없을 수 있습니다.",
+          "Ollama 서버와 모델이 정상 동작 중인지 확인한 뒤 다시 시도하세요.",
+        ],
+        detail,
+      };
+    }
+  }
+
+  if (rawMessage.includes("단위시험 케이스 엑셀에서 데이터를 찾지 못했습니다")) {
+    return {
+      summary: "'단위시험 케이스' 파일을 확인하세요.",
+      checks: [
+        "'단위시험 케이스' 칸에는 1단계에서 생성한 단위시험 케이스 XLSX를 넣어야 합니다.",
+        "'기존 통합시험 시나리오' 칸에는 기존 통합시험 시나리오 양식 XLSX를 넣어야 합니다.",
+        "두 XLSX 파일이 서로 바뀌었거나, 단위시험 케이스 칸에 통합시험 시나리오 파일이 들어가면 데이터를 찾을 수 없습니다.",
+      ],
+      detail: selectedTcMatch ? `현재 선택된 단위시험 케이스 파일: ${selectedTcMatch[1].trim()}` : "",
+    };
+  }
+
+  if (taskName === "ts" && rawMessage.includes("list index out of range")) {
+    return {
+      summary: "'기존 통합시험 시나리오' 파일을 읽지 못했습니다.",
+      checks: [
+        "'기존 통합시험 시나리오' 칸에 정상적인 XLSX 파일을 넣었는지 확인하세요.",
+        "엑셀에서 해당 파일을 열어 '다른 이름으로 저장'으로 새 XLSX 파일을 만든 뒤 다시 업로드해보세요.",
+        "한셀, 구버전 엑셀, 외부 도구에서 만든 파일은 셀 스타일 정보 때문에 읽지 못할 수 있습니다.",
+      ],
+      detail: selectedFileName("tsTemplateXlsx")
+        ? `현재 선택된 기존 통합시험 시나리오 파일: ${selectedFileName("tsTemplateXlsx")}`
+        : "",
+    };
+  }
+
+  const looksLikeInternalError =
+    /^name '.+' is not defined$/i.test(rawMessage) ||
+    rawMessage.includes("Traceback") ||
+    rawMessage.includes("pywintypes.com_error");
+
+  if (looksLikeInternalError) {
+    return {
+      summary: fallback,
+      checks: ["업로드한 파일을 다시 확인한 뒤 한 번 더 시도하세요.", "같은 문제가 반복되면 서버 로그를 확인하세요."],
+      detail: "",
+    };
+  }
+
+  return {
+    summary: rawMessage.split("\n")[0],
+    checks: rawMessage.split("\n").slice(1).filter(Boolean),
+    detail: "",
+  };
+}
+
+function renderErrorPanel(info) {
+  if (!errorPanel) return;
+
+  const checks = info.checks || [];
+  errorPanel.hidden = false;
+  errorPanel.innerHTML = `
+    <div class="error-panel-head">
+      <strong>${escapeHtml(info.summary)}</strong>
+      <span>확인 필요</span>
+    </div>
+    ${checks.length ? `
+      <ul>
+        ${checks.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
+      </ul>
+    ` : ""}
+    ${info.detail ? `<p>${escapeHtml(info.detail)}</p>` : ""}
+  `;
+}
+
+function showGenerationError(error, taskName) {
+  const title = taskName === "ts" ? "통합시험 시나리오 생성 실패" : "단위시험 케이스 생성 실패";
+  const info = friendlyErrorInfo(error.message, taskName);
+  resultTitle.textContent = title;
+  resultMeta.textContent = "아래 안내를 확인한 뒤 파일을 다시 선택하세요.";
+  renderErrorPanel(info);
+  setBadge("확인 필요", "error");
+  setProcessStatus("확인 필요");
 }
 
 async function postForm(endpoint, body) {
@@ -179,6 +339,7 @@ async function runTcGeneration(event) {
   setProcessStatus("생성 중");
   setLoading(true, "단위시험 케이스 생성 중", "AI가 화면별 테스트 케이스를 만들고 있습니다.");
   clearDownloads();
+  clearError();
   resultTitle.textContent = "단위시험 케이스 생성";
   resultMeta.textContent = "요청 처리 중입니다.";
 
@@ -190,9 +351,7 @@ async function runTcGeneration(event) {
     resultMeta.textContent = `생성 행 수 ${data.count ?? 0}개 · 다운로드 ${data.download_files?.length || 0}개`;
     renderDownloads(data.download_files || data.files, "단위시험 케이스 파일");
   } catch (error) {
-    setBadge("오류", "error");
-    setProcessStatus("오류");
-    resultMeta.textContent = error.message;
+    showGenerationError(error, "tc");
   } finally {
     setLoading(false);
   }
@@ -210,6 +369,7 @@ async function runTsGeneration(event) {
   setProcessStatus("생성 중");
   setLoading(true, "통합시험 시나리오 생성 중", "단위시험 케이스를 통합시험 시나리오 양식으로 변환하고 있습니다.");
   clearDownloads();
+  clearError();
   resultTitle.textContent = "통합시험 시나리오 생성";
   resultMeta.textContent = "요청 처리 중입니다.";
 
@@ -221,9 +381,7 @@ async function runTsGeneration(event) {
     resultMeta.textContent = `생성 행 수 ${data.count ?? 0}개 · 다운로드 ${data.download_files?.length || 0}개`;
     renderDownloads(data.download_files || data.files, "통합시험 시나리오 파일");
   } catch (error) {
-    setBadge("오류", "error");
-    setProcessStatus("오류");
-    resultMeta.textContent = error.message;
+    showGenerationError(error, "ts");
   } finally {
     setLoading(false);
   }

@@ -17,12 +17,6 @@ WORK_DIR = BASE_DIR / "web_runtime"
 TEMP_DIR = WORK_DIR / "temp"
 RESULT_DIR = WORK_DIR / "results"
 
-QA_RESULT_DIR = RESULT_DIR / "qa"
-TC_RESULT_DIR = QA_RESULT_DIR / "cases"
-TS_RESULT_DIR = QA_RESULT_DIR / "scenarios"
-MAPPING_RESULT_DIR = RESULT_DIR / "mapping"
-
-TC_TEMPLATE_PATH = TEMPLATE_DIR / "test_case_template.hwpx"
 TS_TEMPLATE_PATH = TEMPLATE_DIR / "scenario_sheet_form.xlsx"
 
 LOG_PATH = WORK_DIR / "web_app.log"
@@ -82,10 +76,6 @@ def ensure_runtime_dirs() -> None:
         WORK_DIR,
         TEMP_DIR,
         RESULT_DIR,
-        QA_RESULT_DIR,
-        TC_RESULT_DIR,
-        TS_RESULT_DIR,
-        MAPPING_RESULT_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)
 

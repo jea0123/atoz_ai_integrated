@@ -338,6 +338,27 @@ def generate_test_scenarios(
             req_mapping = extract_req_mapping_from_pdf(ui_pdf_path)
 
     unit_test_data = extract_unit_test_from_excel(tc_xlsx_path)
+    if not unit_test_data:
+        return {
+            "ok": False,
+            "error": "단위시험 케이스 엑셀에서 데이터를 찾지 못했습니다.",
+            "files": [],
+        }
+
+    missing_req_screen_ids = sorted({
+        str(data.get("화면_ID", "")).strip()
+        for data in unit_test_data
+        if str(data.get("화면_ID", "")).strip()
+        and str(data.get("화면_ID", "")).strip() not in req_mapping
+    })
+    if missing_req_screen_ids:
+        return {
+            "ok": False,
+            "error": "사용자인터페이스설계서에서 화면 ID에 해당하는 요구사항 ID를 찾지 못했습니다.",
+            "missing_screen_ids": missing_req_screen_ids[:10],
+            "missing_screen_count": len(missing_req_screen_ids),
+            "files": [],
+        }
 
     for data in unit_test_data:
         screen_id = data.get("화면_ID", "").strip()
@@ -348,7 +369,7 @@ def generate_test_scenarios(
     if not ts_result:
         return {
             "ok": False,
-            "error": "통합시험 시나리오 생성 결과가 없습니다.",
+            "error": "통합시험 시나리오로 변환할 수 있는 단위시험 케이스 데이터가 없습니다.",
             "files": [],
         }
 

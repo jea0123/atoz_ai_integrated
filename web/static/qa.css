@@ -1698,6 +1698,73 @@ body {
   white-space: nowrap;
 }
 
+.qa-toolbar p {
+  margin-top: 6px;
+  color: #475569;
+  line-height: 1.55;
+  white-space: pre-line;
+}
+
+.error-panel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #ef9aa7;
+  border-left: 5px solid var(--red);
+  border-radius: 8px;
+  background: #fff7f8;
+  color: #334155;
+  padding: 12px;
+}
+
+.error-panel[hidden] {
+  display: none;
+}
+
+.error-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.error-panel-head strong {
+  color: var(--red);
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+.error-panel-head span {
+  flex: 0 0 auto;
+  min-height: 26px;
+  border-radius: 6px;
+  background: var(--red-soft);
+  color: var(--red);
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.error-panel ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.error-panel li {
+  line-height: 1.5;
+}
+
+.error-panel p {
+  margin: 0;
+  border-top: 1px solid #f3c4cb;
+  padding-top: 8px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
 .download-panel {
   display: grid;
   gap: 10px;

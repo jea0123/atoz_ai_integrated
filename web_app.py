@@ -67,6 +67,12 @@ def attach_file_downloads(
         delete_after_download: bool = False,
         cleanup_root: Path | None = None,
 ) -> None:
+    # 생성 모듈이 반환한 파일 목록에 브라우저 다운로드 URL을 붙인다.
+    """payload["files"]의 실제 파일 경로를 다운로드 토큰으로 등록한다.
+
+    delete_after_download=True이면 다운로드 응답을 보낸 뒤 해당 파일을 삭제한다.
+    cleanup_root가 전달되면 같은 요청의 출력 파일을 모두 받은 뒤 요청 임시 폴더까지 정리한다.
+    """
     files = payload.get("files")
     if not isinstance(files, list):
         return
@@ -129,7 +135,13 @@ def save_uploaded_file(
         allowed_suffixes: set[str],
         *,
         required: bool = True,
-) -> Path | None:
+) -> tuple[Path, str] | None:
+    # multipart 업로드에서 지정 필드의 첫 번째 파일을 임시 폴더에 저장한다.
+    """필수 여부와 확장자를 검증한 뒤 안전한 파일명으로 저장한다.
+
+    저장 경로와 브라우저가 보낸 원본 파일명을 함께 반환한다.
+    파일이 선택 사항이고 업로드되지 않았으면 None을 반환한다.
+    """
     items = file_items.get(field_name) or []
     if not items:
         if required:
@@ -150,10 +162,34 @@ def save_uploaded_file(
     safe_name = safe_upload_filename(filename, field_name, Path(fallback_name).suffix)
     path = temp_dir / safe_name
     path.write_bytes(payload)
-    return path
+    return path, filename
+
+
+def uploaded_stem(filename: str, field_name: str) -> str:
+    # 다운로드 이름에 쓸 원본 파일명 stem을 안전한 형태로 만든다.
+    suffix = Path(filename).suffix
+    safe_name = safe_upload_filename(filename, field_name, suffix)
+    return Path(safe_name).stem or field_name
+
+
+def apply_download_stem(payload: dict[str, object], stem: str) -> None:
+    # 실제 저장 파일명은 유지하고 브라우저 다운로드 파일명만 업로드 원본 stem으로 맞춘다.
+    files = payload.get("files")
+    if not isinstance(files, list):
+        return
+
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+
+        path = Path(str(item.get("path") or ""))
+        suffix = path.suffix or f".{item.get('kind') or 'file'}"
+        item["name"] = f"{stem}{suffix}"
 
 
 def runtime_ai_settings(fields: dict[str, str]) -> tuple[str, str]:
+    # 요청 필드와 .env를 합쳐 QA 생성에 사용할 모델명과 Ollama chat URL을 결정한다.
+    """프론트에서 넘어온 값이 있으면 우선 사용하고, 없으면 .env 설정을 사용한다."""
     env = read_runtime_env()
     model_name = fields.get("model_name") or resolve_runtime_model(env)
     ollama_url = fields.get("ollama_url") or resolve_runtime_ollama_chat_url(env)
@@ -247,6 +283,12 @@ class WebHandler(BaseHTTPRequestHandler):
             self.send_json({"error": str(exc)}, status=400)
 
     def handle_generate_tc_post(self) -> None:
+        # 단위시험 케이스 생성 요청을 처리한다.
+        """업로드된 HWPX 양식과 UI 설계서 PDF를 임시 폴더에 저장한 뒤 TC 생성 모듈을 실행한다.
+
+        생성 결과는 요청별 output 폴더에 두고 다운로드 토큰을 붙인다.
+        업로드 원본은 생성 직후 삭제하고, 결과 파일은 다운로드 후 정리한다.
+        """
         temp_dir: Path | None = None
         preserve_temp_dir = False
         try:
@@ -263,14 +305,14 @@ class WebHandler(BaseHTTPRequestHandler):
             output_dir = temp_dir / "output"
             output_dir.mkdir()
 
-            pdf_path = save_uploaded_file(
+            pdf_path, _ = save_uploaded_file(
                 temp_dir,
                 file_items,
                 "ui_pdf",
                 "ui.pdf",
                 {".pdf"},
             )
-            template_hwpx_path = save_uploaded_file(
+            template_hwpx_path, template_hwpx_name = save_uploaded_file(
                 temp_dir,
                 file_items,
                 "template_hwpx",
@@ -293,6 +335,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 template_path=template_hwpx_path,
             )
             payload["request_id"] = request_id
+            apply_download_stem(payload, uploaded_stem(template_hwpx_name, "template_hwpx"))
             attach_file_downloads(payload, delete_after_download=True, cleanup_root=temp_dir)
             preserve_temp_dir = bool(payload.get("download_files"))
             remove_runtime_path(pdf_path)
@@ -315,6 +358,12 @@ class WebHandler(BaseHTTPRequestHandler):
                 remove_runtime_path(temp_dir)
 
     def handle_generate_ts_post(self) -> None:
+        # 통합시험 시나리오 생성 요청을 처리한다.
+        """기존 시나리오 XLSX, 단위시험 케이스 XLSX, UI 설계서 PDF를 받아 TS 생성 모듈을 실행한다.
+
+        생성 결과는 요청별 output 폴더에 두고 다운로드 토큰을 붙인다.
+        업로드 원본은 생성 직후 삭제하고, 결과 파일은 다운로드 후 정리한다.
+        """
         temp_dir: Path | None = None
         preserve_temp_dir = False
         try:
@@ -330,21 +379,21 @@ class WebHandler(BaseHTTPRequestHandler):
             output_dir = temp_dir / "output"
             output_dir.mkdir()
 
-            template_xlsx_path = save_uploaded_file(
+            template_xlsx_path, template_xlsx_name = save_uploaded_file(
                 temp_dir,
                 file_items,
                 "template_xlsx",
                 "template.xlsx",
                 {".xlsx"},
             )
-            tc_xlsx_path = save_uploaded_file(
+            tc_xlsx_path, tc_xlsx_name = save_uploaded_file(
                 temp_dir,
                 file_items,
                 "tc_xlsx",
                 "test_cases.xlsx",
                 {".xlsx"},
             )
-            ui_pdf_path = save_uploaded_file(
+            ui_pdf_path, ui_pdf_name = save_uploaded_file(
                 temp_dir,
                 file_items,
                 "ui_pdf",
@@ -366,6 +415,17 @@ class WebHandler(BaseHTTPRequestHandler):
                 form_path=TS_TEMPLATE_PATH,
             )
             payload["request_id"] = request_id
+            if (
+                    not payload.get("ok")
+                    and payload.get("error")
+                    and "요구사항 ID를 찾지 못했습니다" not in str(payload.get("error"))
+            ):
+                payload["error"] = (
+                    f"{payload['error']}\n"
+                    f"선택된 단위시험 케이스 파일: {tc_xlsx_name}\n"
+                    f"선택된 사용자인터페이스설계서 파일: {ui_pdf_name}"
+                )
+            apply_download_stem(payload, uploaded_stem(template_xlsx_name, "template_xlsx"))
             attach_file_downloads(payload, delete_after_download=True, cleanup_root=temp_dir)
             preserve_temp_dir = bool(payload.get("download_files"))
             remove_runtime_path(template_xlsx_path)
