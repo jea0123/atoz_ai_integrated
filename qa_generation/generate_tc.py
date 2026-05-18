@@ -350,7 +350,7 @@ def build_retry_prompt(screen_id, unit_test_id, expected_steps, block_text, bad_
   {block_text}
   """
 
-def build_test_cases_from_text(extracted_text, model_name, ollama_url):
+def build_test_cases_from_text(extracted_text, model_name, ollama_url, screen_blocks=None):
   print(f"\nAI 추론 중... ({model_name})")
 
   system_prompt = """
@@ -473,7 +473,7 @@ def build_test_cases_from_text(extracted_text, model_name, ollama_url):
   }
   """
 
-  screen_blocks = extract_screen_blocks(extracted_text)
+  screen_blocks = screen_blocks if screen_blocks is not None else extract_screen_blocks(extracted_text)
   if not screen_blocks:
     print("화면ID를 찾지 못해 전체 설계서를 한 번에 처리합니다.")
     screen_blocks = [{
@@ -1001,6 +1001,8 @@ def generate_test_cases(
     ollama_url: str,
     output_dir: Path,
     template_path: Path,
+    extracted_text: str | None = None,
+    screen_blocks: list[dict] | None = None,
 ) -> dict:
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
@@ -1008,8 +1010,8 @@ def generate_test_cases(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    extract_text = extract_text_from_pdf(pdf_path)
-    tc_data = build_test_cases_from_text(extract_text, model_name, ollama_url)
+    extract_text = extracted_text if extracted_text is not None else extract_text_from_pdf(pdf_path)
+    tc_data = build_test_cases_from_text(extract_text, model_name, ollama_url, screen_blocks=screen_blocks)
 
     if not tc_data:
         return {
