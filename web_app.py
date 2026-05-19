@@ -46,6 +46,7 @@ RESULT_FILES: dict[str, Path] = {}
 RESULT_DOWNLOAD_NAMES: dict[str, str] = {}
 RESULT_DELETE_AFTER_DOWNLOAD: dict[str, bool] = {}
 RESULT_CLEANUP_ROOTS: dict[str, Path] = {}
+TS_SET_KEY_PATTERN = re.compile(r"\bSFR-[A-Z0-9]+-\d{3}\b", re.IGNORECASE)
 
 
 def attach_folder_download(payload: dict[str, object]) -> None:
@@ -799,11 +800,14 @@ class WebHandler(BaseHTTPRequestHandler):
                 file_items: dict[str, list[tuple[str, bytes]]] = {}
             else:
                 fields, file_items = parse_multipart_items(content_type, body)
+            dump_root_value = fields.get("dump_root", "").strip()
+            if not dump_root_value:
+                raise ValueError("check 결과 폴더 경로를 입력하세요.")
             model_name, ollama_url = runtime_ai_settings(fields)
             request_id = uuid4().hex[:8]
 
             payload = run_folder_qa_pipeline(
-                Path(fields.get("dump_root", "")),
+                Path(dump_root_value),
                 model_name=model_name,
                 ollama_url=ollama_url,
                 scenario_form_path=TS_TEMPLATE_PATH,
@@ -871,7 +875,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 {".hwp", ".hwpx", ".pdf"},
             )
             tc_items = save_uploaded_items(temp_dir, file_items, "tc_xlsx", "test_cases.xlsx", {".xlsx"})
-            ui_items = save_uploaded_items(temp_dir, file_items, "ui_pdf", "ui.pdf", {".pdf"})
+            ui_items = save_uploaded_items(temp_dir, file_items, "ui_pdf", "ui.pdf", {".hwp", ".hwpx", ".pdf"})
 
             log_event(
                 "qa.ts.start",

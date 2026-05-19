@@ -610,7 +610,7 @@ function renderFolderQaResult(data) {
   const requirementItems = Array.isArray(data.requirement_items) ? data.requirement_items : [];
   const missingRequirements = Array.isArray(data.missing_requirements) ? data.missing_requirements : [];
   const roleCounts = data.role_counts || {};
-  generatedFileCount.textContent = placedFiles.length || "-";
+  if (generatedFileCount) generatedFileCount.textContent = placedFiles.length || "-";
   emptyState.hidden = placedFiles.length > 0;
   clearError();
 
@@ -698,8 +698,8 @@ async function runFolderQa(event) {
     const data = await postForm("/api/run-qa-folder", buildFormData(folderQaForm));
     setBadge("완료", "done");
     setProcessStatus("완료");
-    tcCount.textContent = data.tc_count ?? 0;
-    tsCount.textContent = data.ts_count ?? 0;
+    if (tcCount) tcCount.textContent = data.tc_count ?? 0;
+    if (tsCount) tsCount.textContent = data.ts_count ?? 0;
     resultMeta.textContent = `결과 폴더: ${data.dump_root || dumpRoot}\n요구사항 ${data.processed_requirement_count ?? 0}/${data.requirement_count ?? 0}개 · TC ${data.tc_count ?? 0}행 · TS ${data.ts_count ?? 0}행`;
     renderFolderQaResult(data);
   } catch (error) {
