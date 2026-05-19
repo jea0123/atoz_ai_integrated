@@ -13,6 +13,7 @@ from .hwpx_text import (
     is_ole_hwp,
     is_hwpx_zip,
     open_hwp_document,
+    register_hwp_file_path_checker,
     win32,
 )
 
@@ -35,11 +36,7 @@ def needs_hwp_to_hwpx_conversion(file_path: Path) -> bool:
 
 
 def _register_hwp_file_module(hwp: object) -> None:
-    try:
-        hwp.RegisterModule("FilePathCheckDLL", "FilePathCheckerModule")
-    except Exception:
-        # 일부 한글 설치 환경에서는 파일 경로 확인 모듈이 노출되지 않는다.
-        pass
+    register_hwp_file_path_checker(hwp)
 
 
 def _hide_hwp_window(hwp: object) -> None:

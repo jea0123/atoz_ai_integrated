@@ -38,6 +38,7 @@ from qa_generation.generate_tc import (
     generate_test_cases,
 )
 from qa_generation.generate_ts import generate_test_scenarios
+from qa_generation.folder_pipeline import QaFolderMatchingError, run_folder_qa_pipeline
 from qa_generation.generate_ts import extract_req_mapping_from_pdf, extract_unit_test_from_excel
 
 
@@ -45,7 +46,6 @@ RESULT_FILES: dict[str, Path] = {}
 RESULT_DOWNLOAD_NAMES: dict[str, str] = {}
 RESULT_DELETE_AFTER_DOWNLOAD: dict[str, bool] = {}
 RESULT_CLEANUP_ROOTS: dict[str, Path] = {}
-TS_SET_KEY_PATTERN = re.compile(r"\bSFR-[A-Z0-9]+-\d{3}\b", re.IGNORECASE)
 
 
 def attach_folder_download(payload: dict[str, object]) -> None:
@@ -499,6 +499,22 @@ def analyze_tc_pdf(pdf_path: Path, source_name: str, model_name: str, ollama_url
     return analysis
 
 
+def parse_json_fields(content_type: str, body: bytes) -> dict[str, str]:
+    # JSON 요청을 기존 runtime_ai_settings가 쓰는 문자열 필드 dict로 바꾼다.
+    if "application/json" not in content_type.lower():
+        fields, _files = parse_multipart_items(content_type, body)
+        return fields
+
+    raw_payload = json.loads(body.decode("utf-8") or "{}")
+    if not isinstance(raw_payload, dict):
+        raise ValueError("JSON 요청 본문은 객체여야 합니다.")
+
+    return {
+        str(key): "" if value is None else str(value)
+        for key, value in raw_payload.items()
+    }
+
+
 def runtime_ai_settings(fields: dict[str, str]) -> tuple[str, str]:
     # 요청 필드와 .env를 합쳐 QA 생성에 사용할 모델명과 Ollama chat URL을 결정한다.
     """프론트에서 넘어온 값이 있으면 우선 사용하고, 없으면 .env 설정을 사용한다."""
@@ -556,9 +572,13 @@ class WebHandler(BaseHTTPRequestHandler):
         if request_path == "/api/generate-tc":
             self.handle_generate_tc_post()
             return
-        
+
         if request_path == "/api/generate-ts":
             self.handle_generate_ts_post()
+            return
+
+        if request_path == "/api/run-qa-folder":
+            self.handle_run_qa_folder_post()
             return
 
         self.send_error(404)
@@ -586,9 +606,9 @@ class WebHandler(BaseHTTPRequestHandler):
             log_event("http.post", path=self.path, content_length=content_length, content_type=content_type)
             fields, file_items = parse_multipart_items(content_type, body)
             payload = run_web_folder_apply(fields, file_items)
-            attach_folder_download(payload)
-            if not fields.get("dump_path") and isinstance(payload.get("dump_root"), str):
-                remove_runtime_path(Path(payload["dump_root"]))
+            payload["output_mode"] = "folder"
+            if isinstance(payload.get("dump_root"), str):
+                log_event("folder_result.ready", dump_root=str(payload["dump_root"]))
             self.send_json(payload)
         except Exception as exc:
             log_event("http.post.error", path=self.path, error=str(exc))
@@ -626,7 +646,7 @@ class WebHandler(BaseHTTPRequestHandler):
             )
             ui_pdf_items = file_items.get("ui_pdf") or []
             if not ui_pdf_items:
-                raise ValueError("사용자인터페이스 설계서 PDF를 선택하세요.")
+                raise ValueError("사용자인터페이스 설계서 문서를 선택하세요.")
 
             log_event(
                 "qa.tc.start",
@@ -647,12 +667,13 @@ class WebHandler(BaseHTTPRequestHandler):
                 analysis: dict[str, object] | None = None
                 try:
                     if not pdf_payload:
-                        raise ValueError("빈 PDF 파일입니다.")
+                        raise ValueError("빈 문서 파일입니다.")
 
-                    if Path(source_name).suffix.lower() != ".pdf":
-                        raise ValueError("PDF 파일만 업로드할 수 있습니다.")
+                    source_suffix = Path(source_name).suffix.lower()
+                    if source_suffix not in {".hwp", ".hwpx", ".pdf"}:
+                        raise ValueError("HWP, HWPX, PDF 파일만 업로드할 수 있습니다.")
 
-                    safe_pdf_name = safe_upload_filename(source_name, f"ui_pdf_{index}", ".pdf")
+                    safe_pdf_name = safe_upload_filename(source_name, f"ui_pdf_{index}", source_suffix or ".pdf")
                     pdf_stem = Path(safe_pdf_name).stem
                     pdf_path = temp_dir / f"ui_pdf_{index}_{safe_pdf_name}"
                     pdf_path.write_bytes(pdf_payload)
@@ -767,6 +788,41 @@ class WebHandler(BaseHTTPRequestHandler):
             if temp_dir is not None and not preserve_temp_dir:
                 remove_runtime_path(temp_dir)
 
+    def handle_run_qa_folder_post(self) -> None:
+        # check.html의 결과 폴더를 기준으로 TC/TS 생성과 기존 파일 교체를 한 번에 실행한다.
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            content_type = self.headers.get("Content-Type", "")
+            body = self.rfile.read(content_length)
+            if "application/json" in content_type.lower():
+                fields = parse_json_fields(content_type, body)
+                file_items: dict[str, list[tuple[str, bytes]]] = {}
+            else:
+                fields, file_items = parse_multipart_items(content_type, body)
+            model_name, ollama_url = runtime_ai_settings(fields)
+            request_id = uuid4().hex[:8]
+
+            payload = run_folder_qa_pipeline(
+                Path(fields.get("dump_root", "")),
+                model_name=model_name,
+                ollama_url=ollama_url,
+                scenario_form_path=TS_TEMPLATE_PATH,
+                ui_design_items=file_items.get("ui_design_files") or [],
+                ui_design_root=Path(fields.get("ui_design_root", "")) if fields.get("ui_design_root") else None,
+                qa_source_items=file_items.get("qa_source_files") or [],
+                qa_source_root=Path(fields.get("qa_source_root", "")) if fields.get("qa_source_root") else None,
+                tc_source_root=Path(fields.get("tc_source_root", "")) if fields.get("tc_source_root") else None,
+                ts_source_root=Path(fields.get("ts_source_root", "")) if fields.get("ts_source_root") else None,
+                request_id=request_id,
+            )
+            self.send_json(payload, status=200 if payload.get("ok") else 400)
+        except QaFolderMatchingError as exc:
+            log_event("qa.folder.post.matching_error", error=str(exc), payload=exc.payload)
+            self.send_json(exc.payload, status=400)
+        except Exception as exc:
+            log_event("qa.folder.post.error", error=str(exc), traceback=traceback.format_exc())
+            self.send_json({"ok": False, "error": str(exc), "files": []}, status=400)
+
     def handle_generate_ts_post(self) -> None:
         # 통합시험 시나리오 생성 요청을 처리한다.
         """기존 시나리오 XLSX, 단위시험 케이스 XLSX, UI 설계서 PDF를 받아 TS 생성 모듈을 실행한다.
@@ -799,6 +855,20 @@ class WebHandler(BaseHTTPRequestHandler):
                 "template_xlsx",
                 "template.xlsx",
                 {".xlsx"},
+            )
+            tc_xlsx_path, tc_xlsx_name = save_uploaded_file(
+                temp_dir,
+                file_items,
+                "tc_xlsx",
+                "test_cases.xlsx",
+                {".xlsx"},
+            )
+            ui_pdf_path, ui_pdf_name = save_uploaded_file(
+                temp_dir,
+                file_items,
+                "ui_pdf",
+                "ui.pdf",
+                {".hwp", ".hwpx", ".pdf"},
             )
             tc_items = save_uploaded_items(temp_dir, file_items, "tc_xlsx", "test_cases.xlsx", {".xlsx"})
             ui_items = save_uploaded_items(temp_dir, file_items, "ui_pdf", "ui.pdf", {".pdf"})

@@ -5,23 +5,24 @@ import re
 import copy
 import openpyxl
 from openpyxl.styles import Alignment, Border, Side
+from document_update.hwpx_text import extract_document_text
 
 def extract_text_from_pdf(pdf_path):
-  if not os.path.exists(pdf_path):
-    raise FileNotFoundError(f"PDF 파일을 찾을 수 없습니다: {pdf_path}")
-  
-  print(f"\n*** 사용자인터페이스설계서에서 텍스트 추출 중: {pdf_path}")
-  text_content = ""
-  with fitz.open(pdf_path) as doc:
-    for page_num in range(len(doc)):
-      page = doc.load_page(page_num)
-      text_content += page.get_text()
+  return extract_text_from_design_document(pdf_path)
 
-  return text_content.strip()
+def extract_text_from_design_document(document_path):
+  if not os.path.exists(document_path):
+    raise FileNotFoundError(f"사용자인터페이스설계서 파일을 찾을 수 없습니다: {document_path}")
+
+  print(f"\n*** 사용자인터페이스설계서에서 텍스트 추출 중: {document_path}")
+  return extract_document_text(Path(document_path)).strip()
 
 def extract_req_mapping_from_pdf(pdf_path):
+  return extract_req_mapping_from_design_document(pdf_path)
+
+def extract_req_mapping_from_design_document(document_path):
   """사용자인터페이스설계서 PDF에서 {화면ID: 요구사항ID} 매핑을 만든다."""
-  text = extract_text_from_pdf(pdf_path)
+  text = extract_text_from_design_document(document_path)
   mapping = {}
 
   normalized = re.sub(r'[ \t]+', ' ', text)

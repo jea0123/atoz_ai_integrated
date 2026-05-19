@@ -25,6 +25,44 @@
             <span id="runtimeMode">실행 모드 확인 중</span>
           </div>
 
+          <form id="folderQaForm" class="folder-qa-form">
+            <label class="field" for="qaDumpRoot">
+              <span>check 결과 폴더</span>
+              <input id="qaDumpRoot" name="dump_root" type="text" autocomplete="off" placeholder="결과 폴더 경로">
+            </label>
+            <label class="field" for="qaSourceRoot">
+              <span>QA 원천 폴더 경로</span>
+              <input id="qaSourceRoot" name="qa_source_root" type="text" autocomplete="off" placeholder="세 문서가 함께 있는 폴더 경로">
+            </label>
+            <label class="drop-zone compact" for="qaSourceFiles">
+              <input id="qaSourceFiles" name="qa_source_files" type="file" accept=".hwp,.hwpx,.pdf,.xlsx" webkitdirectory directory multiple>
+              <span class="file-mark">ALL</span>
+              <strong>QA 원천 폴더 선택</strong>
+              <small data-file-label="qaSourceFiles">화면/단위/통합 문서 일괄 업로드</small>
+            </label>
+            <section class="selected-folder-preview" id="qaSourcePreview" aria-live="polite" hidden></section>
+            <label class="field" for="uiDesignRoot">
+              <span>화면설계서 폴더 경로</span>
+              <input id="uiDesignRoot" name="ui_design_root" type="text" autocomplete="off" placeholder="직접 경로 입력 또는 아래 폴더 선택">
+            </label>
+            <label class="field" for="tcSourceRoot">
+              <span>단위시험 폴더 경로</span>
+              <input id="tcSourceRoot" name="tc_source_root" type="text" autocomplete="off" placeholder="선택 입력">
+            </label>
+            <label class="field" for="tsSourceRoot">
+              <span>통합시험 폴더 경로</span>
+              <input id="tsSourceRoot" name="ts_source_root" type="text" autocomplete="off" placeholder="선택 입력">
+            </label>
+            <label class="drop-zone compact" for="uiDesignFiles">
+              <input id="uiDesignFiles" name="ui_design_files" type="file" accept=".hwp,.hwpx,.pdf" webkitdirectory directory multiple>
+              <span class="file-mark">DIR</span>
+              <strong>화면설계서 폴더 선택</strong>
+              <small data-file-label="uiDesignFiles">하위 HWP/HWPX/PDF 일괄 업로드</small>
+            </label>
+            <section class="selected-folder-preview" id="uiDesignPreview" aria-live="polite" hidden></section>
+            <button class="secondary-button" id="folderQaButton" type="submit">결과폴더 QA 생성</button>
+          </form>
+
           <nav class="task-tabs" aria-label="작업 선택">
             <button type="button" class="task-tab active" data-task-tab="tc">
               <span>1단계</span>
@@ -45,8 +83,8 @@
             </label>
 
             <label class="drop-zone" for="tcUiPdf">
-              <input id="tcUiPdf" name="ui_pdf" type="file" accept=".pdf" multiple>
-              <span class="file-mark">PDF</span>
+              <input id="tcUiPdf" name="ui_pdf" type="file" accept=".hwp,.hwpx,.pdf" multiple>
+              <span class="file-mark">DOC</span>
               <strong>사용자인터페이스설계서</strong>
               <small data-file-label="tcUiPdf">파일 선택</small>
             </label>
@@ -69,8 +107,8 @@
             </label>
 
             <label class="drop-zone" for="tsUiPdf">
-              <input id="tsUiPdf" name="ui_pdf" type="file" accept=".pdf" multiple>
-              <span class="file-mark">PDF</span>
+              <input id="tsUiPdf" name="ui_pdf" type="file" accept=".hwp,.hwpx,.pdf" multiple>
+              <span class="file-mark">DOC</span>
               <strong>사용자인터페이스설계서</strong>
               <small data-file-label="tsUiPdf">파일 선택</small>
             </label>
