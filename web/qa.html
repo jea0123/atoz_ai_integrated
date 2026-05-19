@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>테스트 케이스/시나리오 생성</title>
-  <link rel="stylesheet" href="/static/qa.css?v=20260518-tc-analysis">
+  <link rel="stylesheet" href="/static/qa.css?v=20260519-ts-focused-ui">
 </head>
 <body class="qa-page">
   <main class="app-shell">
@@ -62,14 +62,14 @@
             </label>
 
             <label class="drop-zone" for="tsTcXlsx">
-              <input id="tsTcXlsx" name="tc_xlsx" type="file" accept=".xlsx">
+              <input id="tsTcXlsx" name="tc_xlsx" type="file" accept=".xlsx" multiple>
               <span class="file-mark">XLSX</span>
               <strong>단위시험 케이스</strong>
               <small data-file-label="tsTcXlsx">1단계에서 생성한 엑셀 파일 선택</small>
             </label>
 
             <label class="drop-zone" for="tsUiPdf">
-              <input id="tsUiPdf" name="ui_pdf" type="file" accept=".pdf">
+              <input id="tsUiPdf" name="ui_pdf" type="file" accept=".pdf" multiple>
               <span class="file-mark">PDF</span>
               <strong>사용자인터페이스설계서</strong>
               <small data-file-label="tsUiPdf">파일 선택</small>
@@ -79,13 +79,6 @@
         </aside>
 
         <section class="result-panel qa-results">
-          <div class="summary-grid qa-summary" id="summaryGrid">
-            <div><span>TC 행 수</span><strong id="tcCount">-</strong></div>
-            <div><span>TS 행 수</span><strong id="tsCount">-</strong></div>
-            <div><span>처리 상태</span><strong id="processStatus">대기</strong></div>
-            <div><span>생성 파일</span><strong id="generatedFileCount">-</strong></div>
-          </div>
-
           <div class="result-toolbar qa-toolbar">
             <div>
               <h2 id="resultTitle">결과</h2>
@@ -110,6 +103,6 @@
   </main>
 
   <script src="/static/header.js?v=20260518-integrated"></script>
-  <script src="/static/qa.js?v=20260518-tc-analysis"></script>
+  <script src="/static/qa.js?v=20260519-ts-focused-ui"></script>
 </body>
 </html>

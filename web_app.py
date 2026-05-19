@@ -5,6 +5,7 @@ import argparse
 import json
 import mimetypes
 from pathlib import Path
+import re
 import shutil
 import sys
 import traceback
@@ -37,12 +38,14 @@ from qa_generation.generate_tc import (
     generate_test_cases,
 )
 from qa_generation.generate_ts import generate_test_scenarios
+from qa_generation.generate_ts import extract_req_mapping_from_pdf, extract_unit_test_from_excel
 
 
 RESULT_FILES: dict[str, Path] = {}
 RESULT_DOWNLOAD_NAMES: dict[str, str] = {}
 RESULT_DELETE_AFTER_DOWNLOAD: dict[str, bool] = {}
 RESULT_CLEANUP_ROOTS: dict[str, Path] = {}
+TS_SET_KEY_PATTERN = re.compile(r"\bSFR-[A-Z0-9]+-\d{3}\b", re.IGNORECASE)
 
 
 def attach_folder_download(payload: dict[str, object]) -> None:
@@ -203,6 +206,191 @@ def unique_download_name(existing_names: set[str], name: str) -> str:
         index += 1
     existing_names.add(candidate.casefold())
     return candidate
+
+
+def extract_ts_set_key(text: str) -> str:
+    match = TS_SET_KEY_PATTERN.search(text or "")
+    return match.group(0).upper() if match else ""
+
+
+def save_uploaded_items(
+        temp_dir: Path,
+        file_items: dict[str, list[tuple[str, bytes]]],
+        field_name: str,
+        fallback_name: str,
+        allowed_suffixes: set[str],
+) -> list[dict[str, object]]:
+    saved: list[dict[str, object]] = []
+    items = file_items.get(field_name) or []
+    for index, (filename, payload) in enumerate(items, start=1):
+        if not payload:
+            continue
+        suffix = Path(filename).suffix.lower()
+        if suffix not in allowed_suffixes:
+            continue
+        safe_name = safe_upload_filename(filename, f"{field_name}_{index}", Path(fallback_name).suffix)
+        path = temp_dir / f"{field_name}_{index}_{safe_name}"
+        path.write_bytes(payload)
+        saved.append(
+            {
+                "field": field_name,
+                "name": filename or safe_name,
+                "safe_name": safe_name,
+                "stem": Path(safe_name).stem,
+                "path": path,
+                "key": extract_ts_set_key(safe_name),
+            }
+        )
+    if not saved:
+        raise ValueError(f"{field_name} 파일을 선택하세요.")
+    return saved
+
+
+def analyze_ts_tc_file(item: dict[str, object]) -> dict[str, object]:
+    path = Path(str(item["path"]))
+    unit_test_data = extract_unit_test_from_excel(path)
+    screen_ids = sorted(
+        {
+            str(row.get("화면_ID", "")).strip()
+            for row in unit_test_data
+            if str(row.get("화면_ID", "")).strip()
+        }
+    )
+    return {
+        **item,
+        "unit_test_data": unit_test_data,
+        "screen_ids": screen_ids,
+        "row_count": len(unit_test_data),
+        "key": str(item.get("key") or "") or extract_ts_set_key(" ".join(screen_ids)),
+    }
+
+
+def analyze_ts_ui_file(item: dict[str, object]) -> dict[str, object]:
+    path = Path(str(item["path"]))
+    req_mapping = extract_req_mapping_from_pdf(path)
+    screen_ids = sorted(req_mapping.keys())
+    req_ids = sorted(set(req_mapping.values()))
+    return {
+        **item,
+        "req_mapping": req_mapping,
+        "screen_ids": screen_ids,
+        "req_count": len(req_mapping),
+        "key": str(item.get("key") or "") or extract_ts_set_key(" ".join(req_ids)),
+    }
+
+
+def rule_match_ts_sets(
+        tc_items: list[dict[str, object]],
+        ui_items: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+    matches: list[dict[str, object]] = []
+    used_ui: set[str] = set()
+
+    for tc_item in tc_items:
+        tc_screens = set(tc_item.get("screen_ids") or [])
+        best_ui = None
+        best_score = 0
+        best_reason = ""
+        for ui_item in ui_items:
+            ui_name = str(ui_item.get("name") or "")
+            if ui_name in used_ui:
+                continue
+            ui_screens = set(ui_item.get("screen_ids") or [])
+            score = 0
+            reason = ""
+            if tc_item.get("key") and tc_item.get("key") == ui_item.get("key"):
+                score += 1000
+                reason = f"파일명 키 일치: {tc_item['key']}"
+            overlap = len(tc_screens & ui_screens)
+            if overlap:
+                score += overlap * 10
+                reason = f"{reason}, 화면ID {overlap}개 일치" if reason else f"화면ID {overlap}개 일치"
+            if score > best_score:
+                best_score = score
+                best_ui = ui_item
+                best_reason = reason
+
+        if best_ui is None:
+            continue
+
+        used_ui.add(str(best_ui.get("name") or ""))
+        matches.append(
+            {
+                "tc": tc_item,
+                "ui": best_ui,
+                "confidence": min(1.0, best_score / 1000),
+                "reason": best_reason,
+            }
+        )
+
+    matched_tc_names = {str(match["tc"].get("name") or "") for match in matches}
+    unmatched_tcs = [item for item in tc_items if str(item.get("name") or "") not in matched_tc_names]
+    unmatched_uis = [item for item in ui_items if str(item.get("name") or "") not in used_ui]
+    return matches, unmatched_tcs, unmatched_uis
+
+
+def ai_refine_ts_sets(
+        rule_matches: list[dict[str, object]],
+        unmatched_tcs: list[dict[str, object]],
+        unmatched_uis: list[dict[str, object]],
+        model_name: str,
+        ollama_url: str,
+) -> dict[str, object]:
+    if not ollama_url or not model_name:
+        return {"summary": "AI 매칭을 건너뛰고 규칙 기반 매칭을 사용했습니다.", "sets": []}
+
+    def brief_file(item: dict[str, object]) -> dict[str, object]:
+        return {
+            "name": item.get("name"),
+            "key": item.get("key"),
+            "screen_count": len(item.get("screen_ids") or []),
+            "sample_screen_ids": list(item.get("screen_ids") or [])[:8],
+        }
+
+    prompt = {
+        "task": "통합시험 시나리오 생성을 위한 단위시험 케이스 XLSX와 사용자인터페이스설계서 PDF 세트를 매칭하세요.",
+        "rules": [
+            "같은 SFR 키가 있으면 같은 세트일 가능성이 높습니다.",
+            "SFR 키가 없거나 애매하면 화면ID 교집합을 기준으로 판단합니다.",
+            "확신이 낮은 파일은 억지로 매칭하지 말고 unmatched로 둡니다.",
+        ],
+        "rule_matches": [
+            {
+                "tc_file": match["tc"].get("name"),
+                "ui_file": match["ui"].get("name"),
+                "reason": match.get("reason", ""),
+            }
+            for match in rule_matches
+        ],
+        "unmatched_tcs": [brief_file(item) for item in unmatched_tcs],
+        "unmatched_uis": [brief_file(item) for item in unmatched_uis],
+        "output_format": {
+            "summary": "한 문장 요약",
+            "sets": [
+                {
+                    "tc_file": "TC 파일명",
+                    "ui_file": "UI PDF 파일명",
+                    "confidence": 0.0,
+                    "reason": "매칭 근거",
+                }
+            ],
+            "risks": ["확인 필요 사항"],
+        },
+    }
+
+    try:
+        raw = call_ollama(
+            ollama_url,
+            model_name,
+            "당신은 QA 산출물 입력 파일을 세트로 매칭하는 분석가입니다. JSON 객체만 출력하세요.",
+            json.dumps(prompt, ensure_ascii=False),
+            num_predict=2048,
+            timeout=90,
+        )
+        parsed = parse_json_object(raw)
+        return parsed if parsed else {"summary": "AI 매칭 응답을 해석하지 못했습니다.", "sets": []}
+    except Exception as exc:
+        return {"summary": "AI 매칭에 실패해 규칙 기반 매칭을 사용했습니다.", "sets": [], "ai_error": str(exc)}
 
 
 def analyze_tc_pdf(pdf_path: Path, source_name: str, model_name: str, ollama_url: str) -> dict[str, object]:
@@ -593,7 +781,11 @@ class WebHandler(BaseHTTPRequestHandler):
             content_type = self.headers.get("Content-Type", "")
             body = self.rfile.read(content_length)
 
-            _, file_items = parse_multipart_items(content_type, body)
+            fields, file_items = parse_multipart_items(content_type, body)
+            try:
+                model_name, ollama_url = runtime_ai_settings(fields)
+            except Exception:
+                model_name, ollama_url = "", ""
 
             request_id = uuid4().hex[:8]
             temp_dir = TEMP_DIR / f"qa-ts-{request_id}"
@@ -608,20 +800,8 @@ class WebHandler(BaseHTTPRequestHandler):
                 "template.xlsx",
                 {".xlsx"},
             )
-            tc_xlsx_path, tc_xlsx_name = save_uploaded_file(
-                temp_dir,
-                file_items,
-                "tc_xlsx",
-                "test_cases.xlsx",
-                {".xlsx"},
-            )
-            ui_pdf_path, ui_pdf_name = save_uploaded_file(
-                temp_dir,
-                file_items,
-                "ui_pdf",
-                "ui.pdf",
-                {".pdf"},
-            )
+            tc_items = save_uploaded_items(temp_dir, file_items, "tc_xlsx", "test_cases.xlsx", {".xlsx"})
+            ui_items = save_uploaded_items(temp_dir, file_items, "ui_pdf", "ui.pdf", {".pdf"})
 
             log_event(
                 "qa.ts.start",
@@ -629,36 +809,223 @@ class WebHandler(BaseHTTPRequestHandler):
                 files={name: len(items) for name, items in file_items.items()},
             )
 
-            payload = generate_test_scenarios(
-                template_xlsx_path=template_xlsx_path,
-                tc_xlsx_path=tc_xlsx_path,
-                ui_pdf_path=ui_pdf_path,
-                output_dir=output_dir,
-                form_path=TS_TEMPLATE_PATH,
-            )
-            payload["request_id"] = request_id
-            if (
-                    not payload.get("ok")
-                    and payload.get("error")
-                    and "요구사항 ID를 찾지 못했습니다" not in str(payload.get("error"))
-            ):
-                payload["error"] = (
-                    f"{payload['error']}\n"
-                    f"선택된 단위시험 케이스 파일: {tc_xlsx_name}\n"
-                    f"선택된 사용자인터페이스설계서 파일: {ui_pdf_name}"
+            analyzed_tcs: list[dict[str, object]] = []
+            analyzed_uis: list[dict[str, object]] = []
+            pre_errors: list[dict[str, object]] = []
+
+            for item in tc_items:
+                try:
+                    analyzed_tcs.append(analyze_ts_tc_file(item))
+                except Exception as exc:
+                    pre_errors.append({"file": item.get("name"), "kind": "tc", "error": str(exc)})
+
+            for item in ui_items:
+                try:
+                    analyzed_uis.append(analyze_ts_ui_file(item))
+                except Exception as exc:
+                    pre_errors.append({"file": item.get("name"), "kind": "ui", "error": str(exc)})
+
+            rule_matches, unmatched_tcs, unmatched_uis = rule_match_ts_sets(analyzed_tcs, analyzed_uis)
+            ai_matching = ai_refine_ts_sets(rule_matches, unmatched_tcs, unmatched_uis, model_name, ollama_url)
+
+            matches = list(rule_matches)
+            matched_tc_names = {str(match["tc"].get("name") or "") for match in matches}
+            matched_ui_names = {str(match["ui"].get("name") or "") for match in matches}
+            tc_by_name = {str(item.get("name") or ""): item for item in analyzed_tcs}
+            ui_by_name = {str(item.get("name") or ""): item for item in analyzed_uis}
+            for item in ai_matching.get("sets", []) if isinstance(ai_matching.get("sets"), list) else []:
+                if not isinstance(item, dict):
+                    continue
+                tc_name = str(item.get("tc_file") or "")
+                ui_name = str(item.get("ui_file") or "")
+                if not tc_name or not ui_name or tc_name in matched_tc_names or ui_name in matched_ui_names:
+                    continue
+                tc_item = tc_by_name.get(tc_name)
+                ui_item = ui_by_name.get(ui_name)
+                if not tc_item or not ui_item:
+                    continue
+                matches.append(
+                    {
+                        "tc": tc_item,
+                        "ui": ui_item,
+                        "confidence": item.get("confidence", 0.5),
+                        "reason": item.get("reason", "AI 매칭"),
+                    }
                 )
-            apply_download_stem(payload, uploaded_stem(template_xlsx_name, "template_xlsx"))
+                matched_tc_names.add(tc_name)
+                matched_ui_names.add(ui_name)
+
+            download_names: set[str] = set()
+            all_files: list[dict[str, object]] = []
+            source_results: list[dict[str, object]] = []
+            total_count = 0
+
+            for index, match in enumerate(matches, start=1):
+                tc_item = match["tc"]
+                ui_item = match["ui"]
+                set_stem = str(tc_item.get("stem") or Path(str(tc_item.get("name") or f"set_{index}")).stem)
+                set_output_dir = output_dir / f"{index:03d}_{set_stem}"
+                set_output_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    item_payload = generate_test_scenarios(
+                        template_xlsx_path=template_xlsx_path,
+                        tc_xlsx_path=Path(str(tc_item["path"])),
+                        ui_pdf_path=Path(str(ui_item["path"])),
+                        output_dir=set_output_dir,
+                        form_path=TS_TEMPLATE_PATH,
+                        req_mapping=ui_item.get("req_mapping") if isinstance(ui_item.get("req_mapping"), dict) else None,
+                        unit_test_data=tc_item.get("unit_test_data") if isinstance(tc_item.get("unit_test_data"), list) else None,
+                        log_progress=index == 1,
+                    )
+                    item_count = int(item_payload.get("count") or 0)
+                    total_count += item_count
+                    item_files = item_payload.get("files") if isinstance(item_payload.get("files"), list) else []
+                    for file_item in item_files:
+                        if not isinstance(file_item, dict):
+                            continue
+                        path = Path(str(file_item.get("path") or ""))
+                        suffix = path.suffix or ".xlsx"
+                        download_name = unique_download_name(download_names, f"ts_{set_stem}{suffix}")
+                        target_path = output_dir / download_name
+                        if path.exists() and path.resolve() != target_path.resolve():
+                            path.replace(target_path)
+                            file_item["path"] = str(target_path)
+                        file_item["name"] = download_name
+                        file_item["source_tc"] = tc_item.get("name")
+                        file_item["source_ui"] = ui_item.get("name")
+                        all_files.append(file_item)
+
+                    source_results.append(
+                        {
+                            "source_pdf": f"{tc_item.get('name')} + {ui_item.get('name')}",
+                            "source_tc": tc_item.get("name"),
+                            "source_ui": ui_item.get("name"),
+                            "ok": bool(item_payload.get("ok")),
+                            "count": item_count,
+                            "file_count": len(item_files),
+                            "error": str(item_payload.get("error") or ""),
+                            "analysis": {
+                                "summary": match.get("reason") or ai_matching.get("summary") or "세트 매칭 완료",
+                                "quality": "good" if item_payload.get("ok") else "warning",
+                                "screen_count": len(tc_item.get("screen_ids") or []),
+                                "screens": [{"screen_id": screen_id} for screen_id in (tc_item.get("screen_ids") or [])],
+                                "risks": item_payload.get("missing_screen_ids", []) if item_payload.get("missing_screen_ids") else [],
+                                "recommendations": [],
+                            },
+                        }
+                    )
+                except Exception as exc:
+                    source_results.append(
+                        {
+                            "source_pdf": f"{tc_item.get('name')} + {ui_item.get('name')}",
+                            "source_tc": tc_item.get("name"),
+                            "source_ui": ui_item.get("name"),
+                            "ok": False,
+                            "count": 0,
+                            "file_count": 0,
+                            "error": str(exc),
+                            "analysis": {
+                                "summary": match.get("reason") or "세트 처리 중 오류가 발생했습니다.",
+                                "quality": "poor",
+                                "screen_count": len(tc_item.get("screen_ids") or []),
+                                "screens": [{"screen_id": screen_id} for screen_id in (tc_item.get("screen_ids") or [])],
+                                "risks": [str(exc)],
+                                "recommendations": [],
+                            },
+                        }
+                    )
+                finally:
+                    remove_runtime_path(set_output_dir)
+
+            unmatched_tc_names = sorted(set(tc_by_name) - matched_tc_names)
+            unmatched_ui_names = sorted(set(ui_by_name) - matched_ui_names)
+            for name in unmatched_tc_names:
+                source_results.append(
+                    {
+                        "source_pdf": name,
+                        "ok": False,
+                        "count": 0,
+                        "file_count": 0,
+                        "error": "매칭되는 사용자인터페이스설계서 PDF를 찾지 못했습니다.",
+                        "analysis": {"summary": "세트 매칭 실패", "quality": "poor", "screen_count": 0, "risks": ["UI PDF 누락"], "recommendations": []},
+                    }
+                )
+            for name in unmatched_ui_names:
+                source_results.append(
+                    {
+                        "source_pdf": name,
+                        "ok": False,
+                        "count": 0,
+                        "file_count": 0,
+                        "error": "매칭되는 단위시험 케이스 XLSX를 찾지 못했습니다.",
+                        "analysis": {"summary": "세트 매칭 실패", "quality": "poor", "screen_count": 0, "risks": ["TC XLSX 누락"], "recommendations": []},
+                    }
+                )
+            for item in pre_errors:
+                source_results.append(
+                    {
+                        "source_pdf": item.get("file"),
+                        "ok": False,
+                        "count": 0,
+                        "file_count": 0,
+                        "error": item.get("error"),
+                        "analysis": {"summary": "사전 분석 실패", "quality": "poor", "screen_count": 0, "risks": [item.get("error")], "recommendations": []},
+                    }
+                )
+
+            ai_risks = ai_matching.get("risks") if isinstance(ai_matching.get("risks"), list) else []
+            if ai_matching.get("summary") or ai_risks or ai_matching.get("ai_error"):
+                matched_set_names = [
+                    f"{match['tc'].get('name')} + {match['ui'].get('name')}"
+                    for match in matches
+                ]
+                source_results.insert(
+                    0,
+                    {
+                        "source_pdf": "AI 세트 매칭 요약",
+                        "is_summary": True,
+                        "ok": not bool(ai_matching.get("ai_error")),
+                        "count": 0,
+                        "file_count": 0,
+                        "error": str(ai_matching.get("ai_error") or ""),
+                        "analysis": {
+                            "summary": str(ai_matching.get("summary") or "세트 매칭 요약을 생성했습니다."),
+                            "quality": "warning" if ai_matching.get("ai_error") or ai_risks else "good",
+                            "metric_label": "세트",
+                            "metric_count": len(matches),
+                            "screen_count": 0,
+                            "risks": [str(item) for item in ai_risks],
+                            "recommendations": matched_set_names[:5],
+                        },
+                    }
+                )
+
+            failed_count = sum(1 for item in source_results if not item.get("ok"))
+            payload = {
+                "ok": bool(all_files),
+                "count": total_count,
+                "files": all_files,
+                "source_results": source_results,
+                "set_count": len(matches),
+                "failed_count": failed_count,
+                "ai_matching": ai_matching,
+            }
+            if not all_files:
+                payload["error"] = "생성 가능한 통합시험 시나리오 세트를 찾지 못했습니다."
+            payload["request_id"] = request_id
             attach_file_downloads(payload, delete_after_download=True, cleanup_root=temp_dir)
             preserve_temp_dir = bool(payload.get("download_files"))
             remove_runtime_path(template_xlsx_path)
-            remove_runtime_path(tc_xlsx_path)
-            remove_runtime_path(ui_pdf_path)
+            for item in [*tc_items, *ui_items]:
+                remove_runtime_path(Path(str(item.get("path") or "")))
 
             log_event(
                 "qa.ts.done",
                 request_id=request_id,
                 ok=payload.get("ok"),
                 count=payload.get("count"),
+                set_count=payload.get("set_count"),
+                failed_count=payload.get("failed_count"),
                 file_count=len(payload.get("download_files") or []),
             )
             self.send_json(payload, status=200 if payload.get("ok") else 400)
