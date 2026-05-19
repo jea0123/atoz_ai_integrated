@@ -20,6 +20,7 @@ const visibleCount = document.querySelector("#visibleCount");
 const loadingOverlay = document.querySelector("#loadingOverlay");
 const applyReport = document.querySelector("#applyReport");
 const runtimeMode = document.querySelector("#runtimeMode");
+const LAST_DUMP_ROOT_KEY = "atoz:lastDumpRoot";
 
 const expandedOutputs = new Set();
 const excludedCandidatePaths = new Set();
@@ -184,8 +185,14 @@ function renderApplyReport(data) {
   const failed = items.filter((item) => item.status === "error");
   const updated = items.filter((item) => item.status === "updated");
   const skipped = Number(data.skipped_file_count || 0);
-  const downloadUrl = data.download_url || "";
-  const downloadName = data.download_name || "결과.zip";
+  const dumpRoot = data.dump_root || "";
+  if (dumpRoot) {
+    try {
+      localStorage.setItem(LAST_DUMP_ROOT_KEY, dumpRoot);
+    } catch {
+      // localStorage를 쓸 수 없는 환경이면 화면 표시만 유지한다.
+    }
+  }
 
   applyReport.hidden = false;
   applyReport.className = `apply-report ${failed.length ? "has-errors" : "is-clean"}`;
@@ -198,8 +205,12 @@ function renderApplyReport(data) {
       <span class="apply-report-badge">${failed.length ? "확인 필요" : "오류 없음"}</span>
     </div>
     ${
-      downloadUrl
-        ? `<a class="apply-download-button" href="${escapeHtml(downloadUrl)}" download="${escapeHtml(downloadName)}">↓ 결과 ZIP 다운로드 <small>${escapeHtml(downloadName)}</small></a>`
+      dumpRoot
+        ? `<div class="apply-folder-result">
+            <span>결과 폴더</span>
+            <code>${escapeHtml(dumpRoot)}</code>
+            <a href="/qa.html?dump_root=${encodeURIComponent(dumpRoot)}">QA 생성으로 이동</a>
+          </div>`
         : ""
     }
     ${
@@ -432,7 +443,7 @@ async function runRequest({ endpoint, busyText, preparingText, doneText, applyMo
         `반영 ${data.updated_file_count ?? 0}건`,
         `오류 ${data.failed_file_count ?? 0}건`,
         `반영 대상 파일 ${data.matched_file_count ?? 0}개`,
-        data.download_url ? "다운로드 준비됨" : "다운로드 없음",
+        data.dump_root ? "결과 폴더 유지됨" : "결과 폴더 없음",
       ].join(" · ");
       renderApplyReport(data);
     }

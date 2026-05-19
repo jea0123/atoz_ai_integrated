@@ -17,9 +17,20 @@ const generatedFileCount = document.querySelector("#generatedFileCount");
 
 const tcForm = document.querySelector("#tcForm");
 const tsForm = document.querySelector("#tsForm");
+const folderQaForm = document.querySelector("#folderQaForm");
+const qaDumpRoot = document.querySelector("#qaDumpRoot");
+const qaSourceRoot = document.querySelector("#qaSourceRoot");
+const tcSourceRoot = document.querySelector("#tcSourceRoot");
+const tsSourceRoot = document.querySelector("#tsSourceRoot");
+const uiDesignRoot = document.querySelector("#uiDesignRoot");
+const qaSourcePreview = document.querySelector("#qaSourcePreview");
+const uiDesignPreview = document.querySelector("#uiDesignPreview");
 const taskTabs = [...document.querySelectorAll("[data-task-tab]")];
 const taskPanels = [...document.querySelectorAll("[data-task-panel]")];
 const fileInputs = [...document.querySelectorAll("input[type='file']")];
+const LAST_DUMP_ROOT_KEY = "atoz:lastDumpRoot";
+const DESIGN_DOCUMENT_EXTENSIONS = new Set([".hwp", ".hwpx", ".pdf"]);
+const QA_SOURCE_EXTENSIONS = new Set([".hwp", ".hwpx", ".pdf", ".xlsx"]);
 const initialFileLabels = new Map(
   fileInputs.map((input) => {
     const label = document.querySelector(`[data-file-label="${input.id}"]`);
@@ -87,21 +98,98 @@ function setActiveTask(taskName) {
   resultMeta.textContent = "파일을 업로드한 뒤 생성 버튼을 누르세요.";
 }
 
+function fileDisplayPath(file) {
+  return file.webkitRelativePath || file.name;
+}
+
+function fileExtension(file) {
+  const name = file.name || "";
+  const dotIndex = name.lastIndexOf(".");
+  return dotIndex >= 0 ? name.slice(dotIndex).toLowerCase() : "";
+}
+
+function fileSizeLabel(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 KB";
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${Math.max(1, Math.round(kb))} KB`;
+  return `${(kb / 1024).toFixed(1)} MB`;
+}
+
+function renderFolderPreview(input, preview, allowedExtensions, emptyText) {
+  if (!preview) return;
+
+  const files = [...(input?.files || [])];
+  if (!files.length) {
+    preview.hidden = true;
+    preview.replaceChildren();
+    return;
+  }
+
+  const rootName = fileDisplayPath(files[0]).includes("/")
+    ? fileDisplayPath(files[0]).split("/")[0]
+    : "";
+  const targetFiles = files
+    .filter((file) => allowedExtensions.has(fileExtension(file)))
+    .sort((left, right) => fileDisplayPath(left).localeCompare(fileDisplayPath(right), "ko"));
+  const skippedCount = files.length - targetFiles.length;
+
+  preview.hidden = false;
+  preview.innerHTML = `
+    <div class="selected-folder-preview-head">
+      <strong>${escapeHtml(rootName || "선택된 폴더")}</strong>
+      <span>${targetFiles.length}개 대상${skippedCount ? ` · ${skippedCount}개 제외` : ""}</span>
+    </div>
+    ${targetFiles.length ? `
+      <div class="selected-folder-file-list">
+        ${targetFiles.map((file) => `
+          <article class="selected-folder-file">
+            <span>${escapeHtml(fileDisplayPath(file))}</span>
+            <small>${escapeHtml(fileSizeLabel(file.size))}</small>
+          </article>
+        `).join("")}
+      </div>
+    ` : `
+      <p class="selected-folder-empty">${escapeHtml(emptyText)}</p>
+    `}
+  `;
+}
+
+function renderUiDesignPreview(input) {
+  renderFolderPreview(input, uiDesignPreview, DESIGN_DOCUMENT_EXTENSIONS, "HWP, HWPX, PDF 파일이 없습니다.");
+}
+
+function renderQaSourcePreview(input) {
+  renderFolderPreview(input, qaSourcePreview, QA_SOURCE_EXTENSIONS, "HWP, HWPX, PDF, XLSX 파일이 없습니다.");
+}
+
 function updateFileLabel(input) {
   const label = document.querySelector(`[data-file-label="${input.id}"]`);
   if (!label) return;
 
   if (!input.files.length) {
     label.textContent = initialFileLabels.get(input.id) || "파일 선택";
+    if (input.id === "qaSourceFiles") renderQaSourcePreview(input);
+    if (input.id === "uiDesignFiles") renderUiDesignPreview(input);
     return;
   }
 
-  if (input.files.length === 1) {
-    label.textContent = input.files[0].name;
+  const firstPath = input.files[0].webkitRelativePath || input.files[0].name;
+  const folderName = input.hasAttribute("webkitdirectory") && firstPath.includes("/")
+    ? firstPath.split("/")[0]
+    : "";
+
+  if (folderName) {
+    label.textContent = `${folderName} · ${input.files.length}개`;
+    if (input.id === "qaSourceFiles") renderQaSourcePreview(input);
+    if (input.id === "uiDesignFiles") renderUiDesignPreview(input);
     return;
   }
 
-  label.textContent = `${input.files.length}개 선택됨`;
+  label.textContent = input.files.length > 1
+    ? `${input.files[0].name} 외 ${input.files.length - 1}개`
+    : input.files[0].name;
+  if (input.id === "qaSourceFiles") renderQaSourcePreview(input);
+  if (input.id === "uiDesignFiles") renderUiDesignPreview(input);
 }
 
 function buildFormData(form) {
@@ -110,7 +198,7 @@ function buildFormData(form) {
     if (!element.name) continue;
     if (element.type === "file") {
       for (const file of element.files) {
-        body.append(element.name, file, file.name);
+        body.append(element.name, file, file.webkitRelativePath || file.name);
       }
       continue;
     }
@@ -221,7 +309,9 @@ function selectedFileName(inputId) {
 
 function friendlyErrorInfo(message, taskName) {
   const rawMessage = String(message || "").trim();
-  const fallback = taskName === "ts"
+  const fallback = taskName === "folder"
+    ? "결과폴더 QA 생성 중 문제가 발생했습니다. 결과 폴더 안의 대상 문서를 확인하세요."
+    : taskName === "ts"
     ? "통합시험 시나리오 생성 중 문제가 발생했습니다. 업로드한 파일을 다시 확인하세요."
     : "단위시험 케이스 생성 중 문제가 발생했습니다. 업로드한 파일을 다시 확인하세요.";
 
@@ -231,6 +321,30 @@ function friendlyErrorInfo(message, taskName) {
       checks: ["업로드한 파일 형식과 위치가 올바른지 확인하세요."],
       detail: "",
     };
+  }
+
+  if (taskName === "folder") {
+    if (rawMessage.includes("찾지 못했습니다") || rawMessage.includes("요구사항 ID 기준")) {
+      return {
+        summary: rawMessage.split("\n")[0],
+        checks: [
+          "check.html의 '덤프 후 반영' 결과 폴더 경로인지 확인하세요.",
+          "세 문서가 함께 있다면 'QA 원천 폴더'를 선택하거나 QA 원천 폴더 경로를 입력하세요.",
+          "화면/사용자인터페이스설계서는 HWP, HWPX, PDF 중 하나를 직접 업로드하세요.",
+          "여러 건이면 '화면설계서 폴더'에 전체 폴더 경로를 입력하면 하위 파일을 일괄 탐색합니다.",
+          "업로드한 설계서와 결과 폴더의 단위시험케이스/통합시험시나리오 파일명이 같은 SFR 요구사항 ID를 포함하는지 확인하세요.",
+          "결과 폴더 안에 단위시험케이스 양식이 없으면 TC HWPX를 기존 위치에 배치할 수 없습니다.",
+          "예: SFR-ESS-001 설계서는 SFR-ESS-001 단위시험케이스, SFR-ESS-001 통합시험시나리오와 매칭됩니다.",
+        ],
+      detail: [
+        qaDumpRoot?.value ? `현재 결과 폴더: ${qaDumpRoot.value}` : "",
+        qaSourceRoot?.value ? `현재 QA 원천 폴더: ${qaSourceRoot.value}` : "",
+        uiDesignRoot?.value ? `현재 화면설계서 폴더: ${uiDesignRoot.value}` : "",
+        tcSourceRoot?.value ? `현재 단위시험 폴더: ${tcSourceRoot.value}` : "",
+        tsSourceRoot?.value ? `현재 통합시험 폴더: ${tsSourceRoot.value}` : "",
+      ].filter(Boolean).join("\n"),
+      };
+    }
   }
 
   const selectedTcMatch = rawMessage.match(/선택된 단위시험 케이스 파일:\s*(.+)$/m);
@@ -255,13 +369,13 @@ function friendlyErrorInfo(message, taskName) {
       };
     }
 
-    if (rawMessage.includes("사용자인터페이스 설계서 PDF를 선택하세요") || rawMessage.includes("ui_pdf") || rawMessage.includes("PDF 파일을 찾을 수 없습니다")) {
+    if (rawMessage.includes("사용자인터페이스 설계서 문서를 선택하세요") || rawMessage.includes("사용자인터페이스 설계서 PDF를 선택하세요") || rawMessage.includes("ui_pdf") || rawMessage.includes("PDF 파일을 찾을 수 없습니다")) {
       return {
         summary: "'사용자인터페이스설계서' 파일을 확인하세요.",
         checks: [
-          "1단계의 '사용자인터페이스설계서' 칸에는 PDF 파일을 넣어야 합니다.",
-          "PDF 안에 화면 ID, 화면명, 처리흐름 정보가 포함되어 있어야 단위시험 케이스를 만들 수 있습니다.",
-          "파일이 비어 있거나 잘못된 PDF라면 다른 파일로 다시 선택하세요.",
+          "1단계의 '사용자인터페이스설계서' 칸에는 HWP, HWPX, PDF 중 하나를 넣어야 합니다.",
+          "문서 안에 화면 ID, 화면명, 처리흐름 정보가 포함되어 있어야 단위시험 케이스를 만들 수 있습니다.",
+          "파일이 비어 있거나 텍스트를 추출할 수 없는 문서라면 다른 파일로 다시 선택하세요.",
         ],
         detail,
       };
@@ -283,8 +397,8 @@ function friendlyErrorInfo(message, taskName) {
       return {
         summary: "사용자인터페이스설계서에서 생성할 테스트 케이스를 찾지 못했습니다.",
         checks: [
-          "PDF에 화면 ID와 처리흐름이 포함되어 있는지 확인하세요.",
-          "스캔 이미지 위주의 PDF라면 텍스트 추출이 되지 않아 생성 결과가 없을 수 있습니다.",
+          "문서에 화면 ID와 처리흐름이 포함되어 있는지 확인하세요.",
+          "스캔 이미지 위주의 PDF나 이미지형 문서라면 텍스트 추출이 되지 않아 생성 결과가 없을 수 있습니다.",
           "Ollama 서버와 모델이 정상 동작 중인지 확인한 뒤 다시 시도하세요.",
         ],
         detail,
@@ -358,7 +472,9 @@ function renderErrorPanel(info) {
 }
 
 function showGenerationError(error, taskName) {
-  const title = taskName === "ts" ? "통합시험 시나리오 생성 실패" : "단위시험 케이스 생성 실패";
+  const title = taskName === "folder"
+    ? "결과폴더 QA 생성 실패"
+    : taskName === "ts" ? "통합시험 시나리오 생성 실패" : "단위시험 케이스 생성 실패";
   const info = friendlyErrorInfo(error.message, taskName);
   resultTitle.textContent = title;
   resultMeta.textContent = "아래 안내를 확인한 뒤 파일을 다시 선택하세요.";
@@ -371,16 +487,156 @@ async function postForm(endpoint, body) {
   const response = await fetch(endpoint, { method: "POST", body });
   const data = await response.json().catch(() => ({ error: "서버 응답을 읽지 못했습니다." }));
   if (!response.ok) {
+    const error = new Error(data.error || "처리 실패");
+    error.data = data;
+    throw error;
+  }
+  return data;
+}
+
+async function postJson(endpoint, payload) {
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => ({ error: "서버 응답을 읽지 못했습니다." }));
+  if (!response.ok) {
     throw new Error(data.error || "처리 실패");
   }
   return data;
+}
+
+function initializeDumpRoot() {
+  if (!qaDumpRoot) return;
+
+  const params = new URLSearchParams(window.location.search);
+  const queryDumpRoot = params.get("dump_root") || "";
+  let storedDumpRoot = "";
+  try {
+    storedDumpRoot = localStorage.getItem(LAST_DUMP_ROOT_KEY) || "";
+  } catch {
+    storedDumpRoot = "";
+  }
+
+  qaDumpRoot.value = queryDumpRoot || storedDumpRoot;
+}
+
+function renderFolderQaResult(data) {
+  const placedFiles = Array.isArray(data.placed_files) ? data.placed_files : [];
+  const sourceFiles = Array.isArray(data.source_files) ? data.source_files : [];
+  const requirementItems = Array.isArray(data.requirement_items) ? data.requirement_items : [];
+  const missingRequirements = Array.isArray(data.missing_requirements) ? data.missing_requirements : [];
+  const roleCounts = data.role_counts || {};
+  generatedFileCount.textContent = placedFiles.length || "-";
+  emptyState.hidden = placedFiles.length > 0;
+  clearError();
+
+  downloadPanel.hidden = false;
+  downloadPanel.innerHTML = `
+    <div class="download-panel-head">
+      <strong>${data.ok === false ? "검출 현황" : "배치 결과"}</strong>
+      <span>${data.processed_requirement_count ?? 0}/${data.requirement_count ?? 0}개 요구사항</span>
+    </div>
+    <div class="role-count-list">
+      <article>
+        <span>화면설계서</span>
+        <strong>${escapeHtml(roleCounts.ui_design ?? "-")}</strong>
+      </article>
+      <article>
+        <span>단위시험케이스</span>
+        <strong>${escapeHtml(roleCounts.tc_template ?? "-")}</strong>
+      </article>
+      <article>
+        <span>통합시험시나리오</span>
+        <strong>${escapeHtml(roleCounts.ts_template ?? "-")}</strong>
+      </article>
+    </div>
+    <div class="requirement-list">
+      ${requirementItems.map((item) => `
+        <article class="requirement-item ${item.status === "error" ? "has-errors" : ""}">
+          <span>${escapeHtml(item.requirement_id || "-")}</span>
+          <strong>${escapeHtml(item.status === "error" ? item.error || "오류" : `TC ${item.tc_count ?? 0}행 · TS ${item.ts_count ?? 0}행`)}</strong>
+        </article>
+      `).join("") || `<article class="requirement-item has-errors"><span>매칭된 요구사항 없음</span><strong>아래 누락 항목을 확인하세요.</strong></article>`}
+    </div>
+    <div class="placed-list">
+      ${placedFiles.map((file) => `
+        <article class="placed-file">
+          <span>${escapeHtml(file.requirement_id ? `${file.requirement_id} · ${file.label || file.kind || "파일"}` : file.label || file.kind || "파일")}</span>
+          <strong>${escapeHtml(file.path || "-")}</strong>
+          <small>${escapeHtml(file.backup_path ? `bak: ${file.backup_path}` : "bak 없음")}</small>
+        </article>
+      `).join("")}
+    </div>
+    ${missingRequirements.length ? `
+      <div class="missing-list">
+        ${missingRequirements.map((item) => `
+          <article>
+            <span>${escapeHtml(item.requirement_id || "-")}</span>
+            <strong>${escapeHtml((item.missing || []).join(", "))}</strong>
+          </article>
+        `).join("")}
+      </div>
+    ` : ""}
+    <div class="source-list">
+      ${sourceFiles.map((file) => `
+        <div>
+          <span>${escapeHtml(file.requirement_id ? `${file.requirement_id} · ${file.label || file.role || "-"}` : file.label || file.role || "-")}</span>
+          <code>${escapeHtml(file.path || "-")}</code>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+async function runFolderQa(event) {
+  event.preventDefault();
+  const dumpRoot = qaDumpRoot?.value?.trim() || "";
+  if (!dumpRoot) {
+    showGenerationError(new Error("check 결과 폴더 경로를 입력하세요."), "folder");
+    return;
+  }
+
+  try {
+    localStorage.setItem(LAST_DUMP_ROOT_KEY, dumpRoot);
+  } catch {
+    // 저장 실패는 실행을 막지 않는다.
+  }
+
+  setBadge("처리중", "busy");
+  setProcessStatus("생성 중");
+  setLoading(true, "결과폴더 QA 생성 중", "QA 원천 폴더와 결과 폴더를 요구사항 ID 기준으로 매칭하고 있습니다.");
+  clearDownloads();
+  clearError();
+  resultTitle.textContent = "결과폴더 QA 생성";
+  resultMeta.textContent = "요청 처리 중입니다.";
+
+  try {
+    const data = await postForm("/api/run-qa-folder", buildFormData(folderQaForm));
+    setBadge("완료", "done");
+    setProcessStatus("완료");
+    tcCount.textContent = data.tc_count ?? 0;
+    tsCount.textContent = data.ts_count ?? 0;
+    resultMeta.textContent = `결과 폴더: ${data.dump_root || dumpRoot}\n요구사항 ${data.processed_requirement_count ?? 0}/${data.requirement_count ?? 0}개 · TC ${data.tc_count ?? 0}행 · TS ${data.ts_count ?? 0}행`;
+    renderFolderQaResult(data);
+  } catch (error) {
+    showGenerationError(error, "folder");
+    if (error.data?.source_files || error.data?.missing_requirements) {
+      renderFolderQaResult(error.data);
+    }
+  } finally {
+    setLoading(false);
+  }
 }
 
 async function runTcGeneration(event) {
   event.preventDefault();
   if (!validateFiles(tcForm, [
     ["#tcTemplateHwpx", "기존 단위시험 케이스 HWPX를 선택하세요."],
-    ["#tcUiPdf", "사용자인터페이스 설계서 PDF를 선택하세요."],
+    ["#tcUiPdf", "사용자인터페이스 설계서 문서를 선택하세요."],
   ])) return;
 
   setBadge("처리중", "busy");
@@ -413,7 +669,7 @@ async function runTsGeneration(event) {
   if (!validateFiles(tsForm, [
     ["#tsTemplateXlsx", "기존 통합시험 시나리오 XLSX를 선택하세요."],
     ["#tsTcXlsx", "단위시험 케이스 XLSX를 선택하세요."],
-    ["#tsUiPdf", "사용자인터페이스설계서 PDF를 선택하세요."],
+    ["#tsUiPdf", "사용자인터페이스설계서 문서를 선택하세요."],
   ])) return;
 
   setBadge("처리중", "busy");
@@ -440,9 +696,11 @@ async function runTsGeneration(event) {
 
 taskTabs.forEach((tab) => tab.addEventListener("click", () => setActiveTask(tab.dataset.taskTab)));
 fileInputs.forEach((input) => input.addEventListener("change", () => updateFileLabel(input)));
+folderQaForm?.addEventListener("submit", runFolderQa);
 tcForm.addEventListener("submit", runTcGeneration);
 tsForm.addEventListener("submit", runTsGeneration);
 
+initializeDumpRoot();
 setBadge("대기", "");
 setProcessStatus("대기");
 loadRuntimeMode();

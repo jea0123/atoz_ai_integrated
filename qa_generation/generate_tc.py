@@ -11,6 +11,8 @@ from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 from pathlib import Path
 import time
 
+from document_update.hwpx_text import extract_document_text
+
 try:
   from pyhwpx import Hwp
   import pythoncom
@@ -36,20 +38,14 @@ REQUIRED_TC_KEYS = [
 CIRCLED_NUMBERS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 
 def extract_text_from_pdf(pdf_path):
-  if not os.path.exists(pdf_path):
-    raise FileNotFoundError(f"PDF 파일을 찾을 수 없습니다: {pdf_path}")
-  
-  print(f"\n*** 사용자인터페이스설계서에서 텍스트 추출 중: {pdf_path}")
-  text_content = ""
-  with fitz.open(pdf_path) as doc:
-    for page_num in range(len(doc)): 
-      page = doc.load_page(page_num)
-      page_text = page.get_text()
-      text_content += page_text
+  return extract_text_from_design_document(pdf_path)
 
-  extracted_text = text_content.strip()
+def extract_text_from_design_document(document_path):
+  if not os.path.exists(document_path):
+    raise FileNotFoundError(f"사용자인터페이스설계서 파일을 찾을 수 없습니다: {document_path}")
 
-  return extracted_text
+  print(f"\n*** 사용자인터페이스설계서에서 텍스트 추출 중: {document_path}")
+  return extract_document_text(Path(document_path)).strip()
 
 def extract_screen_blocks(extracted_text):
   screen_pattern = re.compile(r"\bUI-[A-Z0-9]+(?:-[A-Z0-9]+)+\b")
@@ -1010,7 +1006,7 @@ def generate_test_cases(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    extract_text = extracted_text if extracted_text is not None else extract_text_from_pdf(pdf_path)
+    extract_text = extracted_text if extracted_text is not None else extract_text_from_design_document(pdf_path)
     tc_data = build_test_cases_from_text(extract_text, model_name, ollama_url, screen_blocks=screen_blocks)
 
     if not tc_data:

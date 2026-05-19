@@ -77,7 +77,7 @@ def extract_preserved_tail(stem: str) -> str:
 
 def copy_folder_to_dump(source_root: Path, dump_parent: Path) -> Path:
     # 원본 폴더를 건드리지 않기 위해 덤프 위치에 복사본을 만든다.
-    dump_root = unique_directory_path(dump_parent / source_root.name)
+    dump_root = next_versioned_dump_path(dump_parent, source_root.name)
     shutil.copytree(source_root, dump_root, ignore=ignore_dump_backup_dirs)
     return dump_root
 
@@ -158,12 +158,12 @@ def apply_dumped_folder(
 
 
 def resolve_dump_parent(raw_path: str, request_id: str) -> Path:
-    # 사용자가 입력한 덤프 경로가 없으면 web_runtime 아래 임시 결과 위치를 만든다.
+    # 사용자가 입력한 덤프 경로가 없으면 web_runtime 아래 공식 결과 위치를 만든다.
     value = raw_path.strip()
     if value:
         path = Path(value).expanduser()
     else:
-        path = RESULT_DIR / "folder-dumps" / request_id
+        path = RESULT_DIR / "folder-dumps"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -178,17 +178,22 @@ def effective_uploaded_root(folder_dir: Path) -> Path:
     return folder_dir
 
 
-def unique_directory_path(path: Path) -> Path:
-    # 같은 이름의 덤프 폴더가 있으면 뒤에 번호를 붙여 충돌을 피한다.
-    if not path.exists():
-        return path
+def next_versioned_dump_path(parent: Path, folder_name: str) -> Path:
+    # 반복 실행 결과가 한눈에 보이도록 폴더명 뒤에 v0.1, v0.2 순번을 붙인다.
+    pattern = re.compile(rf"^{re.escape(folder_name)}_v0\.(\d+)$", re.IGNORECASE)
+    highest_minor = 0
+    for child in parent.iterdir():
+        if not child.is_dir():
+            continue
+        match = pattern.fullmatch(child.name)
+        if match:
+            highest_minor = max(highest_minor, int(match.group(1)))
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    candidate = path.with_name(f"{path.name}_{timestamp}")
-    index = 1
+    index = highest_minor + 1
+    candidate = parent / f"{folder_name}_v0.{index}"
     while candidate.exists():
-        candidate = path.with_name(f"{path.name}_{timestamp}_{index}")
         index += 1
+        candidate = parent / f"{folder_name}_v0.{index}"
     return candidate
 
 

@@ -602,6 +602,41 @@ h2 {
   font-weight: 800;
 }
 
+.apply-folder-result {
+  display: grid;
+  gap: 5px;
+  border: 1px solid #91c4aa;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 9px 11px;
+}
+
+.apply-folder-result span {
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 950;
+}
+
+.apply-folder-result code {
+  min-width: 0;
+  color: #334155;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.apply-folder-result a {
+  width: fit-content;
+  color: var(--blue-dark);
+  font-size: 12px;
+  font-weight: 950;
+  text-decoration: none;
+}
+
+.apply-folder-result a:hover {
+  text-decoration: underline;
+}
+
 .apply-error-list {
   display: grid;
   gap: 8px;

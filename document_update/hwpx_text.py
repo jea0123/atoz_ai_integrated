@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import importlib.util
 import re
 import shutil
 import struct
 import sys
 import tempfile
+import winreg
 import zipfile
 import zlib
 
@@ -33,6 +35,12 @@ except ImportError:
 OOXML_TEXT_SUFFIXES = {
     ".xlsx", ".xlsm", ".xltx", ".xltm",
 }
+HWP_SECURITY_MODULE_NAME = "FilePathCheckerModule"
+HWP_SECURITY_MODULE_DLL = "FilePathCheckerModule.dll"
+HWP_SECURITY_REGISTRY_KEYS = (
+    r"Software\HNC\HwpAutomation\Modules",
+    r"Software\HNC\HwpCtrl\Modules",
+)
 
 
 def is_hwpx_zip(file_path: Path) -> bool:
@@ -352,7 +360,7 @@ def extract_text_from_hwp(file_path: Path) -> str:
             is_hwpx_zip=is_hwpx_zip(file_path),
         )
         hwp = create_hwp_object()
-        hwp.RegisterModule("FilePathCheckDLL", "FilePathCheckerModule")
+        register_hwp_file_path_checker(hwp)
         open_hwp_document(hwp, file_path)
         return hwp.GetTextFile("TEXT", "")
     finally:
@@ -416,6 +424,69 @@ def create_hwp_object() -> object:
             raise
         clear_win32com_gen_cache()
         return win32.DispatchEx("HWPFrame.HwpObject")
+
+
+def find_hwp_security_module_path() -> Path | None:
+    # pyhwpx에 포함된 한글 자동화 보안 승인 모듈 DLL을 찾는다.
+    spec = importlib.util.find_spec("pyhwpx")
+    if spec and spec.origin:
+        candidate = Path(spec.origin).resolve().parent / HWP_SECURITY_MODULE_DLL
+        if candidate.exists():
+            return candidate
+
+    for base in sys.path:
+        candidate = Path(base) / "pyhwpx" / HWP_SECURITY_MODULE_DLL
+        if candidate.exists():
+            return candidate.resolve()
+
+    return None
+
+
+def ensure_hwp_security_module_registry() -> Path | None:
+    # RegisterModule이 참조할 수 있도록 현재 사용자 레지스트리에 보안 모듈 DLL 경로를 등록한다.
+    module_path = find_hwp_security_module_path()
+    if module_path is None:
+        log_event("hwp_security.module_missing", module=HWP_SECURITY_MODULE_NAME)
+        return None
+
+    for key_path in HWP_SECURITY_REGISTRY_KEYS:
+        try:
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+                winreg.SetValueEx(key, HWP_SECURITY_MODULE_NAME, 0, winreg.REG_SZ, str(module_path))
+        except OSError as exc:
+            log_event(
+                "hwp_security.registry_error",
+                key=key_path,
+                module=HWP_SECURITY_MODULE_NAME,
+                error=str(exc),
+            )
+
+    return module_path
+
+
+def register_hwp_file_path_checker(hwp: object) -> bool:
+    # 한글 자동화의 외부 파일 접근 확인 팝업을 보안 모듈로 자동 승인한다.
+    module_path = ensure_hwp_security_module_registry()
+    if module_path is None:
+        return False
+
+    try:
+        result = hwp.RegisterModule("FilePathCheckDLL", HWP_SECURITY_MODULE_NAME)
+        log_event(
+            "hwp_security.register",
+            module=HWP_SECURITY_MODULE_NAME,
+            dll=str(module_path),
+            result=result,
+        )
+        return bool(result) or result is None
+    except Exception as exc:
+        log_event(
+            "hwp_security.register_error",
+            module=HWP_SECURITY_MODULE_NAME,
+            dll=str(module_path),
+            error=str(exc),
+        )
+        return False
 
 
 def open_hwp_document(hwp: object, file_path: Path) -> None:
