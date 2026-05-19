@@ -56,6 +56,7 @@ function setBadge(text, mode) {
 }
 
 function setProcessStatus(text) {
+  if (!processStatus) return;
   processStatus.textContent = text;
 }
 
@@ -211,7 +212,7 @@ function clearDownloads() {
   downloadPanel.hidden = true;
   downloadPanel.replaceChildren();
   emptyState.hidden = false;
-  generatedFileCount.textContent = "-";
+  if (generatedFileCount) generatedFileCount.textContent = "-";
 }
 
 function clearError() {
@@ -220,9 +221,9 @@ function clearError() {
   errorPanel.replaceChildren();
 }
 
-function renderDownloads(files, title) {
+function renderDownloads(files, title, options = {}) {
   const downloadFiles = (files || []).filter((file) => file && file.download_url);
-  generatedFileCount.textContent = downloadFiles.length || "-";
+  if (generatedFileCount) generatedFileCount.textContent = downloadFiles.length || "-";
 
   if (!downloadFiles.length) {
     clearDownloads();
@@ -232,24 +233,45 @@ function renderDownloads(files, title) {
   emptyState.hidden = true;
   clearError();
   downloadPanel.hidden = false;
+  downloadPanel.className = `download-panel ${options.plainPanel ? "plain" : ""}`.trim();
   downloadPanel.innerHTML = `
-    <div class="download-panel-head">
-      <strong>${escapeHtml(title)}</strong>
-      <span>${downloadFiles.length}개</span>
-    </div>
-    <div class="download-list">
-      ${downloadFiles.map((file) => `
-        <a class="download-button" href="${escapeHtml(file.download_url)}" download="${escapeHtml(file.download_name || file.name || "")}">
-          <span>${escapeHtml((file.kind || "file").toUpperCase())}</span>
-          <strong>${escapeHtml(file.download_name || file.name || "download")}</strong>
-        </a>
-      `).join("")}
+    <div class="download-output-card">
+      <div class="download-panel-head">
+        <strong>${escapeHtml(title)}</strong>
+        <span>${downloadFiles.length}개</span>
+      </div>
+      <div class="download-list">
+        ${downloadFiles.map((file) => `
+          <a class="download-button" href="${escapeHtml(file.download_url)}" download="${escapeHtml(file.download_name || file.name || "")}">
+            <span>${escapeHtml((file.kind || "file").toUpperCase())}</span>
+            <strong>${escapeHtml(file.download_name || file.name || "download")}</strong>
+          </a>
+        `).join("")}
+      </div>
     </div>
   `;
 }
 
-function renderSourceResults(sourceResults) {
+function renderSourceResults(sourceResults, options = {}) {
   if (!sourceResults?.length || downloadPanel.hidden) return;
+
+  const title = options.title || "사전 분석 요약";
+  const itemLabel = options.itemLabel || "항목";
+  const countLabel = options.countLabel || "생성 행";
+  const fileLabel = options.fileLabel || "파일";
+  const primaryTotalLabel = options.primaryTotalLabel || "화면";
+  const showCountMetric = options.showCountMetric !== false;
+  const showPrimaryTotal = options.showPrimaryTotal !== false;
+  const countedResults = sourceResults.filter((item) => !item.is_summary);
+
+  const okCount = countedResults.filter((item) => item.ok).length;
+  const warningCount = countedResults.length - okCount;
+  const totalScreens = countedResults.reduce((sum, item) => {
+    const analysis = item.analysis || {};
+    return sum + Number(analysis.screen_count || 0);
+  }, 0);
+  const totalRows = countedResults.reduce((sum, item) => sum + Number(item.count || 0), 0);
+  const totalFiles = countedResults.reduce((sum, item) => sum + Number(item.file_count || 0), 0);
 
   const rows = sourceResults.map((item) => {
     const analysis = item.analysis || {};
@@ -257,24 +279,77 @@ function renderSourceResults(sourceResults) {
     const recommendations = analysis.recommendations || [];
     const screens = analysis.screens || [];
     const quality = analysis.quality || (item.ok ? "good" : "warning");
+    const statusText = item.ok ? "완료" : "확인 필요";
+    const statusClass = item.ok ? quality : "poor";
+    const showStatus = !item.is_summary;
+    const primaryMetricLabel = analysis.metric_label || "화면";
+    const primaryMetricCount = analysis.metric_count ?? analysis.screen_count ?? screens.length ?? 0;
+    const noteLabel = item.is_summary ? "매칭된 세트" : "권장 조치";
+    const screenIds = screens
+      .map((screen) => typeof screen === "string" ? screen : screen?.screen_id)
+      .filter(Boolean);
+    const visibleScreenIds = screenIds.slice(0, 12);
+    const hiddenScreenCount = Math.max(0, screenIds.length - visibleScreenIds.length);
+    const isMatchedSet = Boolean(item.source_tc || item.source_ui);
+    const cardTitle = item.source_tc || item.source_ui
+      ? "매칭 완료 세트"
+      : (item.source_pdf || "-");
+    const metricItems = showCountMetric
+      ? [
+        `<span>${escapeHtml(primaryMetricLabel)} <strong>${escapeHtml(primaryMetricCount)}</strong></span>`,
+        `<span>${escapeHtml(countLabel)} <strong>${escapeHtml(item.count ?? 0)}</strong></span>`,
+        `<span>${escapeHtml(fileLabel)} <strong>${escapeHtml(item.file_count ?? 0)}</strong></span>`,
+      ].join("")
+      : "";
 
     return `
-      <article class="source-result-card">
+      <article class="source-result-card ${escapeHtml(statusClass)} ${item.is_summary ? "summary" : ""} ${isMatchedSet ? "matched" : ""}">
         <div class="source-result-head">
-          <strong>${escapeHtml(item.source_pdf || "-")}</strong>
-          <span class="${escapeHtml(quality)}">${item.ok ? "생성 완료" : "확인 필요"}</span>
+          <div>
+            <strong>${escapeHtml(cardTitle)}</strong>
+            ${isMatchedSet ? "" : `<small>${escapeHtml(analysis.summary || "분석 요약이 없습니다.")}</small>`}
+          </div>
+          ${showStatus ? `<span class="${escapeHtml(statusClass)}">${statusText}</span>` : ""}
         </div>
-        <p>${escapeHtml(analysis.summary || `${analysis.screen_count ?? 0}개 화면 분석 · ${item.count ?? 0}개 생성`)}</p>
-        <small>화면 ${escapeHtml(analysis.screen_count ?? screens.length ?? 0)}개 · 생성 행 ${escapeHtml(item.count ?? 0)}개</small>
+        ${isMatchedSet ? `
+          <div class="source-set-summary">
+            <span><b>${escapeHtml(primaryMetricLabel)}</b><strong>${escapeHtml(primaryMetricCount)}</strong></span>
+            <span><b>화면ID</b><strong>${escapeHtml(analysis.summary || `${primaryMetricCount}개 일치`)}</strong></span>
+            <span><b>${escapeHtml(fileLabel)}</b><strong>${escapeHtml(item.file_count ?? 0)}</strong></span>
+          </div>
+        ` : ""}
+        ${item.source_tc || item.source_ui ? `
+          <div class="source-section-label">매칭 파일</div>
+          <div class="source-match-files">
+            <div><b>TC 파일</b><span>${escapeHtml(item.source_tc || "-")}</span></div>
+            <div><b>UI 설계서</b><span>${escapeHtml(item.source_ui || "-")}</span></div>
+          </div>
+        ` : ""}
+        ${metricItems ? `<div class="source-result-metrics">
+          ${metricItems}
+        </div>` : ""}
+        ${visibleScreenIds.length ? `
+          <div class="source-section-label">포함 화면ID</div>
+          <div class="source-screen-list" aria-label="화면ID 목록">
+            ${visibleScreenIds.map((screenId) => `<span>${escapeHtml(screenId)}</span>`).join("")}
+            ${hiddenScreenCount ? `<span>+${hiddenScreenCount}</span>` : ""}
+          </div>
+        ` : ""}
         ${risks.length ? `
-          <ul>
+          <div class="source-result-notes">
+            <b>확인할 점</b>
+            <ul>
             ${risks.map((risk) => `<li>${escapeHtml(risk)}</li>`).join("")}
-          </ul>
+            </ul>
+          </div>
         ` : ""}
         ${recommendations.length ? `
-          <ul>
+          <div class="source-result-notes">
+            <b>${escapeHtml(noteLabel)}</b>
+            <ul>
             ${recommendations.map((recommendation) => `<li>${escapeHtml(recommendation)}</li>`).join("")}
-          </ul>
+            </ul>
+          </div>
         ` : ""}
       </article>
     `;
@@ -283,8 +358,13 @@ function renderSourceResults(sourceResults) {
   downloadPanel.insertAdjacentHTML("beforeend", `
     <div class="source-result-list">
       <div class="download-panel-head">
-        <strong>사전 분석 요약</strong>
-        <span>${sourceResults.length}개</span>
+        <strong>${escapeHtml(title)}</strong>
+      </div>
+      <div class="source-result-overview">
+        <span>처리 ${escapeHtml(itemLabel)} <strong>${countedResults.length}</strong></span>
+        <span>확인 필요 <strong>${warningCount}</strong></span>
+        ${showPrimaryTotal ? `<span>${escapeHtml(primaryTotalLabel)} <strong>${totalScreens}</strong></span>` : ""}
+        <span>${escapeHtml(fileLabel)} <strong>${totalFiles}</strong></span>
       </div>
       ${rows}
     </div>
@@ -530,7 +610,7 @@ function renderFolderQaResult(data) {
   const requirementItems = Array.isArray(data.requirement_items) ? data.requirement_items : [];
   const missingRequirements = Array.isArray(data.missing_requirements) ? data.missing_requirements : [];
   const roleCounts = data.role_counts || {};
-  generatedFileCount.textContent = placedFiles.length || "-";
+  if (generatedFileCount) generatedFileCount.textContent = placedFiles.length || "-";
   emptyState.hidden = placedFiles.length > 0;
   clearError();
 
@@ -618,8 +698,8 @@ async function runFolderQa(event) {
     const data = await postForm("/api/run-qa-folder", buildFormData(folderQaForm));
     setBadge("완료", "done");
     setProcessStatus("완료");
-    tcCount.textContent = data.tc_count ?? 0;
-    tsCount.textContent = data.ts_count ?? 0;
+    if (tcCount) tcCount.textContent = data.tc_count ?? 0;
+    if (tsCount) tsCount.textContent = data.ts_count ?? 0;
     resultMeta.textContent = `결과 폴더: ${data.dump_root || dumpRoot}\n요구사항 ${data.processed_requirement_count ?? 0}/${data.requirement_count ?? 0}개 · TC ${data.tc_count ?? 0}행 · TS ${data.ts_count ?? 0}행`;
     renderFolderQaResult(data);
   } catch (error) {
@@ -651,12 +731,17 @@ async function runTcGeneration(event) {
     const data = await postForm("/api/generate-tc", buildFormData(tcForm));
     setBadge("완료", "done");
     setProcessStatus("완료");
-    tcCount.textContent = data.count ?? 0;
+    if (tcCount) tcCount.textContent = data.count ?? 0;
     const sourceCount = data.source_count ?? data.source_results?.length ?? 1;
     const failedCount = data.failed_count ?? 0;
     resultMeta.textContent = `처리 설계서 ${sourceCount}개 · 생성 행 수 ${data.count ?? 0}개 · 다운로드 ${data.download_files?.length || 0}개${failedCount ? ` · 실패 ${failedCount}개` : ""}`;
     renderDownloads(data.download_files || data.files, "단위시험 케이스 파일");
-    renderSourceResults(data.source_results || []);
+    renderSourceResults(data.source_results || [], {
+      title: "단위시험 케이스 사전 분석",
+      itemLabel: "설계서",
+      countLabel: "생성 행",
+      fileLabel: "생성 파일",
+    });
   } catch (error) {
     showGenerationError(error, "tc");
   } finally {
@@ -684,9 +769,19 @@ async function runTsGeneration(event) {
     const data = await postForm("/api/generate-ts", buildFormData(tsForm));
     setBadge("완료", "done");
     setProcessStatus("완료");
-    tsCount.textContent = data.count ?? 0;
-    resultMeta.textContent = `생성 행 수 ${data.count ?? 0}개 · 다운로드 ${data.download_files?.length || 0}개`;
-    renderDownloads(data.download_files || data.files, "통합시험 시나리오 파일");
+    if (tsCount) tsCount.textContent = data.count ?? 0;
+    const setCount = data.set_count ?? data.source_results?.length ?? 1;
+    const failedCount = data.failed_count ?? 0;
+    resultMeta.textContent = `처리 세트 ${setCount}개 · 다운로드 ${data.download_files?.length || 0}개${failedCount ? ` · 확인 필요 ${failedCount}개` : ""}`;
+    renderDownloads(data.download_files || data.files, "통합시험 시나리오 파일", { plainPanel: true });
+    renderSourceResults(data.source_results || [], {
+      title: "통합시험 시나리오 세트 분석",
+      itemLabel: "세트",
+      fileLabel: "생성 파일",
+      primaryTotalLabel: "화면",
+      showPrimaryTotal: false,
+      showCountMetric: false,
+    });
   } catch (error) {
     showGenerationError(error, "ts");
   } finally {

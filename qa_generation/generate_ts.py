@@ -129,13 +129,14 @@ def extract_scenario_case_name(title, unit_test_name):
     return unit_test_name.strip()
   return ""
 
-def build_test_scenarios_from_unit_tests(unit_test_data):
+def build_test_scenarios_from_unit_tests(unit_test_data, log_progress=True):
   scenarios = []
   sequence_by_scenario = {}
   scenario_name_by_id = {}
 
-  for row in unit_test_data:
+  if log_progress:
     print("[통합시험 시나리오] 단위시험 데이터 기반 변환 중...")
+  for row in unit_test_data:
     screen_id = row.get("화면_ID", "")
     scenario_id = build_scenario_id(screen_id)
     sequence_by_scenario[scenario_id] = sequence_by_scenario.get(scenario_id, 0) + 1
@@ -194,7 +195,15 @@ def copy_worksheet_template(source_ws, target_ws):
         new_cell.protection = copy.copy(cell.protection)
         new_cell.alignment = copy.copy(cell.alignment)
 
-def save_test_scenarios_to_excel(test_scenarios, base_workbook_path, output_dir: Path, scenario_sheet_form_path, base_filename="generated_TS"):
+def save_test_scenarios_to_excel(
+    test_scenarios,
+    base_workbook_path,
+    output_dir: Path,
+    scenario_sheet_form_path,
+    base_filename="generated_TS",
+    log_loads=True,
+    log_save=True,
+):
   if not test_scenarios:
     print("저장할 데이터가 없습니다.")
     return
@@ -222,10 +231,12 @@ def save_test_scenarios_to_excel(test_scenarios, base_workbook_path, output_dir:
       break
     counter += 1
 
-  print(f"기존 파일 로드 중: {base_workbook_path}")
+  if log_loads:
+    print(f"기존 파일 로드 중: {base_workbook_path}")
   wb = openpyxl.load_workbook(base_workbook_path)
 
-  print(f"외부 표준 양식 로드 중: {scenario_sheet_form_path}")
+  if log_loads:
+    print(f"외부 표준 양식 로드 중: {scenario_sheet_form_path}")
   form_wb = openpyxl.load_workbook(scenario_sheet_form_path)
   source_ws = form_wb.active
 
@@ -315,7 +326,8 @@ def save_test_scenarios_to_excel(test_scenarios, base_workbook_path, output_dir:
         cell.alignment = align
 
   wb.save(full_path)
-  print(f"통합시험 시나리오 저장 완료: {full_path.resolve()}")
+  if log_save:
+    print(f"통합시험 시나리오 저장 완료: {full_path.resolve()}")
   return full_path
 
 def generate_test_scenarios(
@@ -324,6 +336,9 @@ def generate_test_scenarios(
     ui_pdf_path: Path | None,
     output_dir: Path,
     form_path: Path,
+    req_mapping: dict | None = None,
+    unit_test_data: list | None = None,
+    log_progress: bool = True,
 ) -> dict:
     template_xlsx_path = Path(template_xlsx_path)
     tc_xlsx_path = Path(tc_xlsx_path)
@@ -332,13 +347,15 @@ def generate_test_scenarios(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    req_mapping = {}
-    if ui_pdf_path:
+    if req_mapping is None:
+      req_mapping = {}
+    if not req_mapping and ui_pdf_path:
         ui_pdf_path = Path(ui_pdf_path)
         if ui_pdf_path.exists():
             req_mapping = extract_req_mapping_from_pdf(ui_pdf_path)
 
-    unit_test_data = extract_unit_test_from_excel(tc_xlsx_path)
+    if unit_test_data is None:
+      unit_test_data = extract_unit_test_from_excel(tc_xlsx_path)
     if not unit_test_data:
         return {
             "ok": False,
@@ -365,7 +382,7 @@ def generate_test_scenarios(
         screen_id = data.get("화면_ID", "").strip()
         data["요구사항_ID"] = req_mapping.get(screen_id, "")
 
-    ts_result = build_test_scenarios_from_unit_tests(unit_test_data)
+    ts_result = build_test_scenarios_from_unit_tests(unit_test_data, log_progress=log_progress)
 
     if not ts_result:
         return {
@@ -379,6 +396,8 @@ def generate_test_scenarios(
         base_workbook_path=template_xlsx_path,
         output_dir=output_dir,
         scenario_sheet_form_path=form_path,
+        log_loads=log_progress,
+        log_save=log_progress,
     )
 
     files = []
