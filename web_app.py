@@ -652,6 +652,7 @@ class WebHandler(BaseHTTPRequestHandler):
                     split_excluded_paths(fields.get("excluded_paths", "")),
                     temp_parent=temp_dir,
                 )
+                attach_folder_download(payload)
             else:
                 wbs_path, standard_path, folder_root, _uploaded = save_metadata_inputs(temp_dir, file_items)
                 payload = run_metadata_apply(
