@@ -17,6 +17,7 @@ if (header) {
     `<div class="topbar-actions">`,
     `  <nav class="app-nav-tabs" aria-label="${text("screenSelect")}" style="display:flex;align-items:center;gap:6px;">`,
     `    <a href="/check.html" style="${tabStyle(active === "check")}">${text("mappingTab")}</a>`,
+    `    <a href="/metadata.html" style="${tabStyle(active === "metadata")}">${text("metadataTab")}</a>`,
     `    <a href="/qa.html" style="${tabStyle(active === "qa")}">QA ${text("generation")}</a>`,
     `  </nav>`,
     `  <div class="status-pill" id="${escapeHeaderHtml(statusId)}">${text("standby")}</div>`,
@@ -28,6 +29,7 @@ function text(key) {
   const labels = {
     screenSelect: "\uD654\uBA74 \uC120\uD0DD",
     mappingTab: "\uC0B0\uCD9C\uBB3C \uB9E4\uD551",
+    metadataTab: "\uBA54\uD0C0\uB370\uC774\uD130",
     generation: "\uC0DD\uC131",
     standby: "\uB300\uAE30",
   };
