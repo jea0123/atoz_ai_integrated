@@ -30,6 +30,15 @@ from app_runtime import (
 )
 from output_file_check.folder_workflow import run_web_check, run_web_folder_apply
 from web_uploads import parse_multipart_items, safe_upload_filename
+from document_update.metadata_workflow import (
+    apply_metadata_to_existing_dump,
+    run_metadata_apply,
+    run_metadata_preview,
+    resolve_existing_dump_root,
+    save_metadata_inputs,
+    save_metadata_required_files,
+    split_excluded_paths,
+)
 from qa_generation.generate_tc import (
     call_ollama,
     extract_process_flow_steps,
@@ -547,6 +556,10 @@ class WebHandler(BaseHTTPRequestHandler):
             self.serve_file(WEB_DIR / "qa.html")
             return
 
+        if request_path in {"/metadata", "/metadata.html"}:
+            self.serve_file(WEB_DIR / "metadata.html")
+            return
+
         if request_path.startswith("/static/"):
             relative_path = unquote(request_path.removeprefix("/static/"))
             self.serve_file(WEB_DIR / "static" / relative_path)
@@ -582,7 +595,80 @@ class WebHandler(BaseHTTPRequestHandler):
             self.handle_run_qa_folder_post()
             return
 
+        if request_path == "/api/metadata-preview":
+            self.handle_metadata_preview_post()
+            return
+
+        if request_path == "/api/metadata-apply":
+            self.handle_metadata_apply_post()
+            return
+
         self.send_error(404)
+
+    def handle_metadata_preview_post(self) -> None:
+        temp_dir: Path | None = None
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            content_type = self.headers.get("Content-Type", "")
+            body = self.rfile.read(content_length)
+            log_event("metadata.preview.post", content_length=content_length, content_type=content_type)
+            fields, file_items = parse_multipart_items(content_type, body)
+            request_id = uuid4().hex[:8]
+            temp_dir = TEMP_DIR / f"metadata-preview-{request_id}"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            if fields.get("dump_root", "").strip():
+                wbs_path, standard_path = save_metadata_required_files(temp_dir, file_items)
+                folder_root = resolve_existing_dump_root(fields.get("dump_root", ""))
+            else:
+                wbs_path, standard_path, folder_root, _uploaded = save_metadata_inputs(temp_dir, file_items)
+            payload = run_metadata_preview(wbs_path, standard_path, folder_root, request_id)
+            self.send_json(payload)
+        except Exception as exc:
+            log_event("metadata.preview.error", error=str(exc), traceback=traceback.format_exc())
+            self.send_json({"ok": False, "error": str(exc), "targets": []}, status=400)
+        finally:
+            if temp_dir is not None:
+                remove_runtime_path(temp_dir)
+
+    def handle_metadata_apply_post(self) -> None:
+        temp_dir: Path | None = None
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            content_type = self.headers.get("Content-Type", "")
+            body = self.rfile.read(content_length)
+            log_event("metadata.apply.post", content_length=content_length, content_type=content_type)
+            fields, file_items = parse_multipart_items(content_type, body)
+            request_id = uuid4().hex[:8]
+            temp_dir = TEMP_DIR / f"metadata-apply-{request_id}"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            if fields.get("dump_root", "").strip():
+                wbs_path, standard_path = save_metadata_required_files(temp_dir, file_items)
+                folder_root = resolve_existing_dump_root(fields.get("dump_root", ""))
+                payload = apply_metadata_to_existing_dump(
+                    wbs_path,
+                    standard_path,
+                    folder_root,
+                    request_id,
+                    split_excluded_paths(fields.get("excluded_paths", "")),
+                    temp_parent=temp_dir,
+                )
+            else:
+                wbs_path, standard_path, folder_root, _uploaded = save_metadata_inputs(temp_dir, file_items)
+                payload = run_metadata_apply(
+                    wbs_path,
+                    standard_path,
+                    folder_root,
+                    request_id,
+                    split_excluded_paths(fields.get("excluded_paths", "")),
+                )
+                attach_folder_download(payload)
+            self.send_json(payload, status=200 if payload.get("ok") else 400)
+        except Exception as exc:
+            log_event("metadata.apply.error", error=str(exc), traceback=traceback.format_exc())
+            self.send_json({"ok": False, "error": str(exc), "apply_items": []}, status=400)
+        finally:
+            if temp_dir is not None:
+                remove_runtime_path(temp_dir)
 
     def handle_check_post(self) -> None:
         # /api/check 요청 본문을 파싱하고 폴더 매칭만 실행한다.
