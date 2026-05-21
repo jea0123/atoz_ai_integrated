@@ -101,6 +101,7 @@ function setSummary(data) {
 function statusLabel(status) {
   const labels = {
     matched: "반영 가능",
+    no_change: "수정 위치 없음",
     ambiguous: "확인 필요",
     unmatched: "매칭 없음",
     error: "오류",
@@ -111,6 +112,7 @@ function statusLabel(status) {
 function targetStatusRank(status) {
   const ranks = {
     unmatched: 0,
+    no_change: 1,
     ambiguous: 1,
     matched: 2,
   };
