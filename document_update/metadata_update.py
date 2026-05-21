@@ -34,8 +34,10 @@ WBS_START_COL = 16
 WBS_AUTHOR_COL = 28
 WBS_OUTPUT_COL = 29
 WBS_TASK_COLS = (5, 6, 7, 8, 9, 10)
+DOCUMENT_VERSION_VALUE = "V0.1"
 DATE_LABELS = {"개정일자"}
 AUTHOR_LABELS = {"작성자", "작성 자", "작 성 자"}
+VERSION_LABELS = {"문서버전", "문 서 버 전", "Version"}
 REVISION_DATE_HEADER_LABELS = {"개정일자", "변경일", "변경일자"}
 APPROVAL_LABELS = {"승인", "승인자"}
 LABEL_LIKE_VALUES = {
@@ -639,6 +641,7 @@ def write_updated_excel_metadata(path: Path, author: str, revision_date: str, ap
                         {
                             **{label: revision_date for label in DATE_LABELS},
                             **{label: author for label in AUTHOR_LABELS},
+                            **{label: DOCUMENT_VERSION_VALUE for label in VERSION_LABELS},
                         },
                     )
                     header_count = 0
@@ -715,12 +718,13 @@ def write_updated_ppt_metadata(path: Path, author: str, revision_date: str, appr
                         changed_count = 0
                         xml, count = update_ppt_label_cells_xml(
                             xml,
-                            {
-                                **{label: revision_date for label in DATE_LABELS},
-                                **{label: author for label in AUTHOR_LABELS},
-                                **{label: approval_author for label in APPROVAL_LABELS},
-                            },
-                        )
+                        {
+                            **{label: revision_date for label in DATE_LABELS},
+                            **{label: author for label in AUTHOR_LABELS},
+                            **{label: approval_author for label in APPROVAL_LABELS},
+                            **{label: DOCUMENT_VERSION_VALUE for label in VERSION_LABELS},
+                        },
+                    )
                         cover_count += count
                         changed_count += count
                         xml, count = update_ppt_revision_history_xml(
@@ -952,7 +956,7 @@ def update_unlabeled_excel_header_metadata_xml(
     count = 0
     metadata_labels = {
         normalize_label(label)
-        for label in DATE_LABELS | AUTHOR_LABELS | APPROVAL_LABELS | LABEL_LIKE_VALUES
+        for label in DATE_LABELS | AUTHOR_LABELS | VERSION_LABELS | APPROVAL_LABELS | LABEL_LIKE_VALUES
     }
 
     for row_index in sorted(rows):
@@ -983,9 +987,15 @@ def update_unlabeled_excel_header_metadata_xml(
         )
         if author_cell is None:
             continue
-        has_document_context = any(has_embedded_output_id(value) for value in row_values) and any(
-            VERSION_PATTERN.fullmatch(value.strip()) for value in row_values
+        version_cell = next(
+            (
+                cell
+                for cell in row_cells
+                if cell.col < date_cell.col and VERSION_PATTERN.fullmatch(clean_text(cell.text))
+            ),
+            None,
         )
+        has_document_context = any(has_embedded_output_id(value) for value in row_values) and version_cell is not None
         if not has_document_context and not looks_like_compact_unlabeled_metadata_row(row_values):
             continue
 
@@ -994,6 +1004,8 @@ def update_unlabeled_excel_header_metadata_xml(
             (date_cell.ref, date_cell.row, date_cell.col, formatted_date),
             (author_cell.ref, author_cell.row, author_cell.col, author),
         ]
+        if version_cell is not None:
+            updates.insert(0, (version_cell.ref, version_cell.row, version_cell.col, DOCUMENT_VERSION_VALUE))
         for cell_ref, row, col, value in updates:
             updated_xml = replace_or_insert_cell_xml(updated_xml, cell_ref, row, col, value)
             count += 1
@@ -1027,6 +1039,7 @@ def update_excel_drawing_metadata_xml(xml: str, revision_date: str, author: str)
     date_match = select_excel_drawing_metadata_date(combined)
     if date_match is None:
         return xml, 0
+    version_match = select_excel_drawing_metadata_version(combined, date_match.start())
 
     date_start, date_end = date_match.span()
     date_run_indexes = [
@@ -1049,13 +1062,10 @@ def update_excel_drawing_metadata_xml(xml: str, revision_date: str, author: str)
         return xml, 0
 
     new_texts: dict[int, str] = {}
+    if version_match is not None:
+        add_drawing_text_span_update(new_texts, texts, spans, version_match.span(), DOCUMENT_VERSION_VALUE)
     formatted_date = format_date_like_existing(revision_date, date_match.group(0))
-    for index in date_run_indexes:
-        run_start, run_end = spans[index]
-        text = texts[index]
-        prefix = text[: max(0, date_start - run_start)] if index == date_run_indexes[0] else ""
-        suffix = text[max(0, date_end - run_start):] if index == date_run_indexes[-1] and date_end < run_end else ""
-        new_texts[index] = f"{prefix}{formatted_date if index == date_run_indexes[0] else ''}{suffix}"
+    add_drawing_text_span_update(new_texts, texts, spans, (date_start, date_end), formatted_date)
     new_texts[author_run_index] = author
 
     pieces: list[str] = []
@@ -1068,6 +1078,37 @@ def update_excel_drawing_metadata_xml(xml: str, revision_date: str, author: str)
         last = match.end("text")
     pieces.append(xml[last:])
     return "".join(pieces), len(new_texts)
+
+
+def add_drawing_text_span_update(
+    new_texts: dict[int, str],
+    texts: list[str],
+    spans: list[tuple[int, int]],
+    target_span: tuple[int, int],
+    replacement: str,
+) -> None:
+    target_start, target_end = target_span
+    run_indexes = [
+        index
+        for index, (start, end) in enumerate(spans)
+        if start < target_end and end > target_start
+    ]
+    for index in run_indexes:
+        run_start, run_end = spans[index]
+        text = texts[index]
+        prefix = text[: max(0, target_start - run_start)] if index == run_indexes[0] else ""
+        suffix = text[max(0, target_end - run_start):] if index == run_indexes[-1] and target_end < run_end else ""
+        new_texts[index] = f"{prefix}{replacement if index == run_indexes[0] else ''}{suffix}"
+
+
+def select_excel_drawing_metadata_version(text: str, before_index: int) -> re.Match[str] | None:
+    prefix = text[:before_index]
+    candidates = [
+        match
+        for match in re.finditer(r"[vV]?\d+(?:\.\d+)+", prefix)
+        if has_embedded_output_id(prefix[max(0, match.start() - 200):match.start()])
+    ]
+    return candidates[-1] if candidates else None
 
 
 def select_excel_drawing_metadata_date(text: str) -> re.Match[str] | None:
@@ -1238,17 +1279,29 @@ def write_updated_hwpx_metadata(path: Path, author: str, revision_date: str, app
                     data = zin.read(item.filename)
                     if item.filename.lower().endswith(".xml"):
                         xml = data.decode("utf-8", errors="ignore")
+                        changed_count = 0
                         xml, count = update_label_right_rows_in_xml(xml, DATE_LABELS, revision_date)
                         cover_count += count
+                        changed_count += count
                         xml, count = update_label_right_rows_in_xml(xml, AUTHOR_LABELS, author)
                         cover_count += count
+                        changed_count += count
+                        xml, count = update_label_right_rows_in_xml(xml, VERSION_LABELS, DOCUMENT_VERSION_VALUE)
+                        cover_count += count
+                        changed_count += count
                         xml, count = update_unlabeled_header_metadata_xml(xml, revision_date, author)
                         cover_count += count
+                        changed_count += count
                         xml, count = update_revision_history_xml(xml, revision_date, author, approval_author)
                         revision_count += count
-                        data = xml.encode("utf-8")
+                        changed_count += count
+                        if changed_count:
+                            data = xml.encode("utf-8")
                     zout.writestr(item, data)
-        temp_path.replace(path)
+        if cover_count or revision_count:
+            temp_path.replace(path)
+        else:
+            temp_path.unlink(missing_ok=True)
     except Exception:
         if temp_path.exists():
             temp_path.unlink()
@@ -1337,7 +1390,7 @@ def update_unlabeled_header_metadata_block(
             continue
 
         header_revision_date = format_date_like_existing(revision_date, values[2])
-        updates = [(2, header_revision_date), (3, author)]
+        updates = [(1, DOCUMENT_VERSION_VALUE), (2, header_revision_date), (3, author)]
         updated_row = row_xml
         offset = 0
         count = 0
