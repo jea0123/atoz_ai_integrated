@@ -116,7 +116,11 @@ def split_output_names(value: object) -> list[str]:
     text = clean_text(value)
     if not text:
         return []
-    return [part.strip() for part in re.split(r"[,;\n]+", text) if part.strip()]
+    return [
+        part.strip()
+        for part in re.split(r"\s*(?:[,;\n&＆]|(?:\band\b))\s*", text, flags=re.IGNORECASE)
+        if part.strip()
+    ]
 
 
 def format_revision_date(value: object) -> str:
@@ -510,6 +514,14 @@ def write_updated_excel_metadata(path: Path, author: str, revision_date: str, ap
                             **{label: author for label in AUTHOR_LABELS},
                         },
                     )
+                    header_count = 0
+                    updated_xml, header_count = update_unlabeled_excel_header_metadata_xml(
+                        updated_xml,
+                        shared_strings,
+                        revision_date,
+                        author,
+                    )
+                    label_count += header_count
                 sheet_revision_count = 0
                 if is_revision_history_sheet:
                     updated_xml, sheet_revision_count = update_excel_revision_history_xml(
@@ -573,6 +585,87 @@ def update_excel_label_cells_xml(
     for cell_ref, (row, col, value) in updates.items():
         updated_xml = replace_or_insert_cell_xml(updated_xml, cell_ref, row, col, value)
     return updated_xml, len(updates)
+
+
+def update_unlabeled_excel_header_metadata_xml(
+    sheet_xml: str,
+    shared_strings: list[str],
+    revision_date: str,
+    author: str,
+) -> tuple[str, int]:
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(sheet_xml)
+    rows: dict[int, list[CellInfo]] = {}
+    for cell in iter_cells(root, shared_strings):
+        if cell.row in {1, 2}:
+            rows.setdefault(cell.row, []).append(cell)
+
+    updated_xml = sheet_xml
+    count = 0
+    metadata_labels = {
+        normalize_label(label)
+        for label in DATE_LABELS | AUTHOR_LABELS | APPROVAL_LABELS | LABEL_LIKE_VALUES
+    }
+
+    for row_index in sorted(rows):
+        row_cells = sorted(rows[row_index], key=lambda item: item.col)
+        row_values = [clean_text(cell.text) for cell in row_cells]
+        normalized_values = {normalize_label(value) for value in row_values if value}
+        if normalized_values & metadata_labels:
+            continue
+        if not any(OUTPUT_ID_PATTERN.search(value) for value in row_values):
+            continue
+        if not any(VERSION_PATTERN.fullmatch(value.strip()) for value in row_values):
+            continue
+
+        date_cell = next(
+            (
+                cell
+                for cell in row_cells
+                if DATE_VALUE_PATTERN.fullmatch(clean_text(cell.text))
+            ),
+            None,
+        )
+        if date_cell is None:
+            continue
+
+        author_cell = next(
+            (
+                cell
+                for cell in row_cells
+                if cell.col > date_cell.col and looks_like_unlabeled_author_value(clean_text(cell.text))
+            ),
+            None,
+        )
+        if author_cell is None:
+            continue
+
+        formatted_date = format_date_like_existing(revision_date, clean_text(date_cell.text))
+        updates = [
+            (date_cell.ref, date_cell.row, date_cell.col, formatted_date),
+            (author_cell.ref, author_cell.row, author_cell.col, author),
+        ]
+        for cell_ref, row, col, value in updates:
+            updated_xml = replace_or_insert_cell_xml(updated_xml, cell_ref, row, col, value)
+            count += 1
+        break
+
+    return updated_xml, count
+
+
+def looks_like_unlabeled_author_value(value: str) -> bool:
+    text = clean_text(value)
+    if not text:
+        return False
+    normalized = normalize_label(text)
+    if normalized in {normalize_label(item) for item in LABEL_LIKE_VALUES}:
+        return False
+    if OUTPUT_ID_PATTERN.search(text) or VERSION_PATTERN.fullmatch(text) or DATE_VALUE_PATTERN.fullmatch(text):
+        return False
+    if re.search(r"\d", text):
+        return False
+    return 2 <= len(text) <= 20
 
 
 def update_excel_revision_history_xml(
