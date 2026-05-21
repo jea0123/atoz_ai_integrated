@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import re
 import shutil
@@ -190,7 +191,7 @@ def run_metadata_apply(
     dump_parent = RESULT_DIR / "metadata-dumps"
     dump_parent.mkdir(parents=True, exist_ok=True)
     dump_root = next_dump_path(dump_parent, source_root.name)
-    shutil.copytree(source_root, dump_root, ignore=ignore_metadata_dirs)
+    shutil.copytree(windows_long_path(source_root), windows_long_path(dump_root), ignore=ignore_metadata_dirs)
 
     payload = apply_metadata_to_existing_dump(
         wbs_path,
@@ -288,6 +289,22 @@ def split_excluded_paths(raw: str) -> set[str]:
 
 def ignore_metadata_dirs(_directory: str, names: list[str]) -> set[str]:
     return {name for name in names if name in IGNORED_FOLDER_NAMES}
+
+
+def windows_long_path(path: Path) -> str:
+    if os.name != "nt":
+        return str(path)
+
+    text = str(path)
+    if text.startswith("\\\\?\\"):
+        return text
+
+    absolute = str(path.resolve(strict=False))
+    if absolute.startswith("\\\\?\\"):
+        return absolute
+    if absolute.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + absolute.lstrip("\\")
+    return "\\\\?\\" + absolute
 
 
 def next_dump_path(parent: Path, folder_name: str) -> Path:

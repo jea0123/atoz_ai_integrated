@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 import re
 
+from document_update.patterns import NUMBER_OUTPUT_ID_PATTERN_TEXT, OUTPUT_ID_PATTERN_TEXT, split_output_id_and_name
 from document_update.hwpx_text import add_bundled_site_packages, extract_document_text
 
 from .models import StandardOutput
@@ -17,7 +18,9 @@ from .normalization import (
 )
 
 
-OUTPUT_ID_IN_LINE_PATTERN = re.compile(r"\bMFDS-[^\s]+|(?<![A-Za-z0-9])\d{4,}(?:\([^)]*\))?(?![A-Za-z0-9])")
+OUTPUT_ID_IN_LINE_PATTERN = re.compile(
+    rf"\b(?:{OUTPUT_ID_PATTERN_TEXT}|{NUMBER_OUTPUT_ID_PATTERN_TEXT})(?:-[^\s]+)?(?![A-Za-z0-9])"
+)
 MANAGEMENT_SECTION_START_PATTERN = re.compile(r"\*\s*관리문서\s*ID")
 OUTPUT_SECTION_START_PATTERN = re.compile(r"\*\s*산출물\s*코드")
 SECTION_END_PATTERN = re.compile(r"3\.1\.2\s*파일명")
@@ -25,6 +28,11 @@ HEADER_OR_FOOTER_PATTERN = re.compile(
     r"수입식품통합정보시스템|에이투지시스템|V\d+\.\d+|\d{4}\.\d{2}\.\d{2}"
 )
 TABLE_HEADER_PATTERN = re.compile(r"구분|프로세스|산출물명|산출물ID|폴더명|활동명|작업명")
+OUTPUT_NAME_ALIASES = {
+    "현행아키텍처분석서": ("아키텍처분석서",),
+    "총괄시험계획서": ("총괄시험계획",),
+    "성능시험계획서": ("성능시험계획", "성능(부하)시험계획"),
+}
 
 
 def extract_pdf_text_with_layout(file_path: Path) -> str:
@@ -101,21 +109,22 @@ def parse_output_line(raw_line: str) -> StandardOutput | None:
     if is_page_header_or_table_header(cleaned_line):
         return None
 
-    output_id = clean_text(id_match.group(0))
+    output_id, id_name = split_output_id_and_name(clean_text(id_match.group(0)))
+    id_name = clean_text(id_name or output_name_from_id(output_id))
     before = line[: id_match.start()].strip()
     after = line[id_match.end() :].strip()
 
     before_parts = split_columns(before)
     after_parts = split_columns(after)
-    id_name = output_name_from_id(output_id)
-    output_name = before_parts[-1] if before_parts else id_name
+    table_output_name = before_parts[-1] if before_parts else ""
+    output_name = id_name or table_output_name or output_name_from_id(output_id)
 
     if not output_name or TABLE_HEADER_PATTERN.fullmatch(output_name):
-        output_name = id_name
+        output_name = id_name or output_name_from_id(output_id)
 
     output_name = clean_text(output_name)
     folder_name = clean_text(" ".join(after_parts)) if after_parts else None
-    aliases = unique_clean_values((output_name, id_name))
+    aliases = aliases_for_output_name(output_name, id_name, table_output_name)
 
     if not output_name and aliases:
         output_name = aliases[0]
@@ -130,6 +139,15 @@ def parse_output_line(raw_line: str) -> StandardOutput | None:
         aliases=aliases,
         source_line=cleaned_line,
     )
+
+
+def aliases_for_output_name(output_name: str, id_name: str = "", table_output_name: str = "") -> tuple[str, ...]:
+    # 산출물ID에 문서명이 붙어 있으면 그 값을 기준으로만 매칭한다.
+    # 산출물 컬럼 값은 ID에 문서명이 없을 때만 보조명으로 쓴다.
+    extra_aliases = OUTPUT_NAME_ALIASES.get(output_name, ())
+    if id_name:
+        return unique_clean_values((output_name, id_name, *extra_aliases))
+    return unique_clean_values((output_name, table_output_name, *extra_aliases))
 
 
 def split_columns(value: str) -> list[str]:
@@ -149,7 +167,12 @@ def deduplicate_outputs(outputs: list[StandardOutput]) -> list[StandardOutput]:
     by_key: dict[tuple[str, str], StandardOutput] = {}
 
     for output in outputs:
-        aliases = output.aliases or unique_clean_values((output.output_name, output_name_from_id(output.output_id)))
+        aliases = unique_clean_values(
+            (
+                *(output.aliases or ()),
+                *aliases_for_output_name(output.output_name, output_name_from_id(output.output_id)),
+            )
+        )
         name_key = normalize_for_match(aliases[0] if aliases else output.output_name)
         key = (output_id_prefix(output.output_id), name_key)
         current = by_key.get(key)

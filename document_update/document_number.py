@@ -19,6 +19,7 @@ from .patterns import (
     RUN_SELF_CLOSING_PATTERN,
     TEXT_NODE_PATTERN,
 )
+from .ppt_ooxml import PPT_DOCUMENT_SUFFIXES, write_updated_ppt_document
 
 
 DOCUMENT_NUMBER_LABEL = "\ubb38\uc11c\ubc88\ud638"
@@ -217,9 +218,20 @@ def write_updated_document(
             output_path,
         )
 
+    if suffix in PPT_DOCUMENT_SUFFIXES:
+        return write_updated_ppt_document(
+            file_path,
+            new_document_number,
+            old_title,
+            new_title,
+            old_project_title,
+            new_project_title,
+            output_path,
+        )
+
     raise RuntimeError(
         "지원하지 않는 대상 파일 형식입니다. "
-        "대상 파일은 HWP/HWPX 또는 XLSX/XLSM 계열을 사용해주세요."
+        "대상 파일은 HWP/HWPX, XLSX/XLSM 또는 PPT/PPTX 계열을 사용해주세요."
     )
 
 

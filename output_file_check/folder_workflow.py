@@ -25,7 +25,7 @@ def run_web_check(fields: dict[str, str], file_items: dict[str, list[tuple[str, 
     """업로드된 폴더와 문서관리표준을 대조하고 웹 화면용 결과를 만든다."""
     WORK_DIR.mkdir(exist_ok=True)
     request_id = uuid4().hex[:8]
-    temp_dir = WORK_DIR / f"folder-check-{request_id}"
+    temp_dir = WORK_DIR / f"c-{request_id}"
     temp_dir.mkdir()
 
     log_event(
@@ -88,7 +88,7 @@ def run_web_folder_apply(fields: dict[str, str], file_items: dict[str, list[tupl
     WORK_DIR.mkdir(exist_ok=True)
     RESULT_DIR.mkdir(exist_ok=True)
     request_id = uuid4().hex[:8]
-    temp_dir = WORK_DIR / f"folder-apply-{request_id}"
+    temp_dir = WORK_DIR / f"a-{request_id}"
     temp_dir.mkdir()
 
     log_event(
@@ -101,7 +101,7 @@ def run_web_folder_apply(fields: dict[str, str], file_items: dict[str, list[tupl
     try:
         standard_file, uploaded_folder = save_check_uploads(temp_dir, file_items, fallback_folder=DEFAULT_CHECK_FOLDER)
         folder_policy = build_folder_policy_from_fields(fields)
-        dump_parent = resolve_dump_parent(fields.get("dump_path", ""), request_id)
+        dump_parent = resolve_dump_parent(fields.get("dump_path", ""))
         source_root = effective_uploaded_root(uploaded_folder)
         dump_root = copy_folder_to_dump(source_root, dump_parent)
         payload = apply_dumped_folder(
@@ -139,7 +139,7 @@ def run_folder_apply_paths(
     WORK_DIR.mkdir(exist_ok=True)
     RESULT_DIR.mkdir(exist_ok=True)
     request_id = request_id or uuid4().hex[:8]
-    temp_dir = WORK_DIR / f"folder-apply-{request_id}"
+    temp_dir = WORK_DIR / f"a-{request_id}"
     temp_dir.mkdir()
     fields = fields or {}
 
@@ -158,7 +158,7 @@ def run_folder_apply_paths(
             raise ValueError(f"검사 폴더를 찾지 못했습니다: {source_folder}")
 
         folder_policy = build_folder_policy_from_fields(fields)
-        target_parent = dump_parent or resolve_dump_parent("", request_id)
+        target_parent = dump_parent or resolve_dump_parent("")
         target_parent.mkdir(parents=True, exist_ok=True)
         dump_root = copy_folder_to_dump(source_folder, target_parent)
         payload = apply_dumped_folder(

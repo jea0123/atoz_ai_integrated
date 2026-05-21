@@ -132,7 +132,13 @@ function setSummary(data) {
       label: modeLabel(data.match_mode),
     });
   }
-  resultMeta.textContent = `${data.standard_project_title || "-"} · ${modeLabel(data.match_mode || currentRuntimeMode?.mode)} · 반영 대상 파일 ${data.matched_file_count ?? 0}개`;
+  resultMeta.textContent = [
+    "검사 성공",
+    "오류 0건",
+    data.standard_project_title || "-",
+    modeLabel(data.match_mode || currentRuntimeMode?.mode),
+    `반영 대상 파일 ${data.matched_file_count ?? 0}개`,
+  ].join(" · ");
 }
 
 function renderMatches(matches) {
@@ -185,6 +191,7 @@ function renderApplyReport(data) {
   const failed = items.filter((item) => item.status === "error");
   const updated = items.filter((item) => item.status === "updated");
   const skipped = Number(data.skipped_file_count || 0);
+  const filenameUnchanged = Number(data.filename_unchanged_count || 0);
   const dumpRoot = data.dump_root || "";
   if (dumpRoot) {
     try {
@@ -200,7 +207,7 @@ function renderApplyReport(data) {
     <div class="apply-report-head">
       <div>
         <strong>반영 결과</strong>
-        <span>성공 ${updated.length}건 · 오류 ${failed.length}건 · 건너뜀 ${skipped}건</span>
+        <span>성공 ${updated.length}건 · 오류 ${failed.length}건 · 건너뜀 ${skipped}건 · 파일명 미변경 ${filenameUnchanged}건</span>
       </div>
       <span class="apply-report-badge">${failed.length ? "확인 필요" : "오류 없음"}</span>
     </div>
@@ -210,6 +217,7 @@ function renderApplyReport(data) {
             <span>결과 폴더</span>
             <code>${escapeHtml(dumpRoot)}</code>
             <a href="/qa.html?dump_root=${encodeURIComponent(dumpRoot)}">QA 생성으로 이동</a>
+            <a href="/metadata.html?dump_root=${encodeURIComponent(dumpRoot)}">메타데이터 반영으로 이동</a>
           </div>`
         : ""
     }
@@ -440,10 +448,9 @@ async function runRequest({ endpoint, busyText, preparingText, doneText, applyMo
     setSummary(data);
     if (applyMode) {
       resultMeta.textContent = [
-        `반영 ${data.updated_file_count ?? 0}건`,
-        `오류 ${data.failed_file_count ?? 0}건`,
-        `반영 대상 파일 ${data.matched_file_count ?? 0}개`,
-        data.dump_root ? "결과 폴더 유지됨" : "결과 폴더 없음",
+        data.standard_project_title || "-",
+        modeLabel(data.match_mode || currentRuntimeMode?.mode),
+        `매칭 파일 ${data.matched_file_count ?? 0}개 표시 중`,
       ].join(" · ");
       renderApplyReport(data);
     }

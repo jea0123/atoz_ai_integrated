@@ -571,37 +571,6 @@ h2 {
   color: var(--green);
 }
 
-.apply-download-button {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 42px;
-  border: 1px solid #91c4aa;
-  border-radius: 10px;
-  background: #ffffff;
-  color: var(--green);
-  padding: 0 12px;
-  text-decoration: none;
-  font-size: 13px;
-  font-weight: 950;
-}
-
-.apply-download-button:hover {
-  border-color: var(--green);
-  background: #effcf6;
-}
-
-.apply-download-button small {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1 1 auto;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 800;
-}
-
 .apply-folder-result {
   display: grid;
   gap: 5px;

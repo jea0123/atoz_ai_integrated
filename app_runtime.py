@@ -87,7 +87,7 @@ def cleanup_runtime() -> None:
         return
 
     for root, patterns in (
-        (WORK_DIR, ("doc-update-*", "folder-check-*", "folder-apply-*")),
+        (WORK_DIR, ("doc-update-*", "folder-check-*", "folder-apply-*", "c-*", "a-*")),
         (TEMP_DIR, ("qa-tc-*", "qa-ts-*")),
     ):
         if not root.exists():

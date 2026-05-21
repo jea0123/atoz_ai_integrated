@@ -14,6 +14,8 @@ from document_update.hwpx_text import (
     is_zip_container,
 )
 from document_update.excel_ooxml import EXCEL_DOCUMENT_SUFFIXES, extract_excel_cover_text, find_excel_cover_identity
+from document_update.patterns import OUTPUT_ID_PATTERN
+from document_update.ppt_ooxml import PPT_DOCUMENT_SUFFIXES, PPT_OOXML_SUFFIXES, read_ppt_cover_identity
 
 from .models import FileIdentity
 from .normalization import clean_text, compact_space, normalize_for_match
@@ -51,6 +53,16 @@ TITLE_KEYWORDS = (
     "추적표",
     "회의록",
     "WBS",
+)
+PPT_STRONG_DOCUMENT_TITLES = (
+    "운영자매뉴얼",
+    "사용자매뉴얼",
+    "교육계획서",
+    "교육결과서",
+)
+PPT_PROJECT_BREAK_TITLES = PPT_STRONG_DOCUMENT_TITLES + (
+    "교육자료",
+    "매뉴얼",
 )
 NOISE_PREFIXES = (
     "식품의약품안전처",
@@ -94,20 +106,26 @@ def read_standard_project_title(standard_file: Path) -> str:
 def read_file_identity(file_path: Path) -> FileIdentity:
     # 후보 파일 첫 장/표지에서 프로젝트명, 문서명, 짧은 표지 텍스트를 만든다.
     """파일 내부 텍스트에서 프로젝트명/사업명과 문서명을 추정한다."""
-    if file_path.suffix.lower() not in TEXT_READ_SUFFIXES:
+    suffix = file_path.suffix.lower()
+    if suffix in PPT_DOCUMENT_SUFFIXES:
+        return read_ppt_file_identity(file_path)
+
+    if suffix not in TEXT_READ_SUFFIXES:
         return FileIdentity(error=f"지원하지 않는 내부 읽기 형식: {file_path.suffix}")
 
     cover_project_title = ""
     cover_document_title = ""
-    if file_path.suffix.lower() in EXCEL_DOCUMENT_SUFFIXES:
+    if suffix in EXCEL_DOCUMENT_SUFFIXES:
         try:
             cover_project_title, cover_document_title = find_excel_cover_identity(file_path)
         except Exception:
             cover_project_title, cover_document_title = "", ""
         if cover_project_title or cover_document_title:
+            cover_text = extract_excel_cover_text(file_path, max_chars=1000)
             return FileIdentity(
                 project_title=cover_project_title,
                 document_title=cover_document_title,
+                document_number=find_document_number(cover_text),
                 preview_text=compact_space(f"{cover_project_title}\n{cover_document_title}"),
             )
 
@@ -123,8 +141,137 @@ def read_file_identity(file_path: Path) -> FileIdentity:
     return FileIdentity(
         project_title=cover_project_title or project_title,
         document_title=cover_document_title or document_title,
+        document_number=find_document_number(text),
         preview_text=compact_space(text[:COVER_TEXT_CHARS]),
     )
+
+
+def read_ppt_file_identity(file_path: Path) -> FileIdentity:
+    # PPT는 표지 레이아웃이 자유로워 파일명을 함께 넣어 매칭 힌트를 보강한다.
+    filename_project_title, filename_document_title = infer_ppt_identity_from_filename(file_path)
+    if file_path.suffix.lower() not in PPT_OOXML_SUFFIXES:
+        return FileIdentity(
+            project_title=filename_project_title,
+            document_title=filename_document_title,
+            document_number=find_document_number(file_path.name),
+            preview_text=compact_space(file_path.name),
+        )
+
+    try:
+        cover_identity = read_ppt_cover_identity(file_path)
+    except Exception as exc:
+        if filename_project_title or filename_document_title:
+            return FileIdentity(
+                project_title=filename_project_title,
+                document_title=filename_document_title,
+                document_number=find_document_number(file_path.name),
+                preview_text=compact_space(file_path.name),
+            )
+        return FileIdentity(error=str(exc))
+
+    text = cover_identity.preview_text
+    fallback_project_title, fallback_document_title = parse_identity_from_text(text)
+    if cover_identity.project_title:
+        project_title = choose_ppt_project_title(cover_identity.project_title, filename_project_title)
+    else:
+        project_title = filename_project_title or clean_project_title(fallback_project_title)
+    document_title = choose_ppt_document_title(
+        cover_identity.document_title,
+        filename_document_title,
+        fallback_document_title,
+    )
+    preview_text = compact_space(f"{file_path.name}\n{text[:COVER_TEXT_CHARS]}")
+
+    if not preview_text:
+        preview_text = compact_space(file_path.name)
+
+    return FileIdentity(
+        project_title=project_title,
+        document_title=document_title,
+        document_number=cover_identity.document_number or find_document_number(preview_text),
+        preview_text=preview_text,
+    )
+
+
+def find_document_number(value: str) -> str:
+    match = OUTPUT_ID_PATTERN.search(value)
+    return match.group(0) if match else ""
+
+
+def infer_ppt_identity_from_filename(file_path: Path) -> tuple[str, str]:
+    # '[사용자매뉴얼] 시스템명...' 또는 'MFDS-...-운영자매뉴얼...' 같은 PPT 파일명 힌트를 읽는다.
+    stem = strip_ppt_filename_noise(file_path.stem)
+    bracket_match = re.match(r"^\[(?P<title>[^\]]+)\]\s*(?P<project>.+)$", stem)
+    if bracket_match:
+        document_title = clean_ppt_document_title(bracket_match.group("title"))
+        return (
+            trim_repeated_ppt_title(
+                clean_project_title(strip_ppt_filename_noise(bracket_match.group("project"))),
+                document_title,
+            ),
+            document_title,
+        )
+
+    for title in PPT_PROJECT_BREAK_TITLES:
+        if title not in stem:
+            continue
+        before, _, _after = stem.partition(title)
+        return clean_project_title(strip_ppt_filename_noise(before)), clean_ppt_document_title(title)
+
+    return "", ""
+
+
+def trim_repeated_ppt_title(project_title: str, document_title: str) -> str:
+    if not project_title or not document_title:
+        return project_title
+
+    project_key = normalize_for_match(project_title)
+    title_key = normalize_for_match(document_title)
+    if project_key.endswith(title_key):
+        return clean_project_title(project_title[: -len(document_title)])
+    return project_title
+
+
+def strip_ppt_filename_noise(value: str) -> str:
+    text = clean_text(value)
+    text = OUTPUT_ID_PATTERN.sub(" ", text)
+    text = re.sub(r"^\d{4,}(?:\([^)]*\))?\s*[-_]\s*", " ", text)
+    text = re.sub(r"\([^)]*(?:\d{2,4}[./년-]\s*\d{1,2}|\d{6,8})[^)]*\)", " ", text)
+    text = re.sub(r"[_-][vV]\d+(?:\.\d+)*\b", " ", text)
+    text = re.sub(r"\b\d{6,8}\b", " ", text)
+    return clean_text(text)
+
+
+def choose_ppt_project_title(parsed_project_title: str, filename_project_title: str) -> str:
+    parsed = clean_project_title(parsed_project_title)
+    filename = clean_project_title(filename_project_title)
+    if filename and (not parsed or looks_like_ppt_date_or_version(parsed)):
+        return filename
+    if looks_like_ppt_date_or_version(parsed):
+        return filename
+    return parsed or filename
+
+
+def clean_ppt_document_title(value: str) -> str:
+    text = clean_document_title(value)
+    if text in PPT_STRONG_DOCUMENT_TITLES:
+        return text
+    return text if any(keyword in text for keyword in TITLE_KEYWORDS) else ""
+
+
+def choose_ppt_document_title(cover_title: str, filename_title: str, fallback_title: str) -> str:
+    cover = clean_document_title(cover_title)
+    filename = clean_ppt_document_title(filename_title)
+    fallback = clean_ppt_document_title(fallback_title)
+    if filename and cover and normalize_for_match(filename) in normalize_for_match(cover):
+        return filename
+    return cover or filename or fallback
+
+
+def looks_like_ppt_date_or_version(value: str) -> bool:
+    text = clean_text(value)
+    compact = re.sub(r"[\s.년월/-]+", "", text)
+    return bool(re.fullmatch(r"(?:20)?\d{2}(?:\d{1,2})?", compact))
 
 
 def clean_identity_value(value: str) -> str:
