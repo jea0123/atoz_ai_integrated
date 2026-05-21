@@ -29,8 +29,6 @@ def serialize_check_result(
         "matched_output_count": len(matched),
         "matched_file_count": matched_file_count,
         "unmatched_reference_output_count": len(unmatched_reference),
-        # 예전 화면/CLI 호환용 이름이다. 표준 산출물이 필수라는 뜻은 아니다.
-        "missing_output_count": len(unmatched_reference),
         "matches": [
             {
                 "output_id": item.output.output_id,
@@ -44,15 +42,6 @@ def serialize_check_result(
             for item in matched
         ],
         "unmatched_reference": [
-            {
-                "output_id": item.output.output_id,
-                "output_name": item.output.output_name,
-                "folder_name": item.output.folder_name,
-            }
-            for item in unmatched_reference
-        ],
-        # 예전 응답 호환용 이름이다. 표준 산출물이 필수라는 뜻은 아니다.
-        "missing": [
             {
                 "output_id": item.output.output_id,
                 "output_name": item.output.output_name,
@@ -81,6 +70,7 @@ def serialize_check_candidate(candidate: object, folder_dir: Path) -> dict[str, 
         "identity": {
             "project_title": identity.project_title,
             "document_title": identity.document_title,
+            "document_number": identity.document_number,
             "error": identity.error,
         } if identity else None,
     }

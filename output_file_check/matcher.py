@@ -4,7 +4,7 @@ from __future__ import annotations
 from difflib import SequenceMatcher
 
 from .models import MatchCandidate, ScannedFile, StandardOutput
-from .normalization import STANDARD_ID_IN_NAME_PATTERN, normalize_for_match, output_id_prefix
+from .normalization import STANDARD_ID_IN_NAME_PATTERN, normalize_for_match, output_id_prefix, strip_attachment_tail
 
 
 DEFAULT_MATCH_THRESHOLD = 0.72
@@ -14,11 +14,11 @@ def score_file(
     output: StandardOutput,
     scanned_file: ScannedFile,
 ) -> MatchCandidate | None:
-    file_stem = scanned_file.stem
+    file_stem = strip_attachment_tail(scanned_file.stem)
     file_stem_upper = file_stem.upper()
     file_normalized = normalize_for_match(file_stem)
 
-    if has_document_title_conflict(output, scanned_file):
+    if has_document_title_conflict(output, scanned_file) and not filename_matches_output(output, file_stem):
         return None
 
     if output.output_id.upper() in file_stem_upper:
@@ -63,6 +63,23 @@ def score_file(
         return None
 
     return MatchCandidate(output, scanned_file, best_score, best_reason)
+
+
+def filename_matches_output(output: StandardOutput, file_stem: str) -> bool:
+    file_stem_upper = file_stem.upper()
+    if output.output_id.upper() in file_stem_upper:
+        return True
+
+    prefix = output_id_prefix(output.output_id)
+    if prefix and prefix.upper() in file_stem_upper:
+        return True
+
+    file_normalized = normalize_for_match(file_stem)
+    return any(
+        alias_key and alias_key in file_normalized
+        for alias in output.aliases or (output.output_name,)
+        for alias_key in [normalize_for_match(alias)]
+    )
 
 
 def has_conflicting_output_id(file_stem: str, output: StandardOutput) -> bool:

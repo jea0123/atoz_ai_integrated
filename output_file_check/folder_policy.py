@@ -3,8 +3,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 from .normalization import normalize_for_match
+
+
+ARCHIVE_FOLDER_NAMES = {"2024", "0.1", "0.0", "구버전", "old"}
+REVIEW_FOLDER_NAMES = {"양식", "회신용"}
+PATH_REVIEW_KEYWORDS = {"검토표시", "자체테스트"}
+ARCHIVE_FILENAME_PREFIXES = ("(2024)", "（2024）")
+LOW_VERSION_FILENAME_PATTERN = re.compile(r"(?:^|[_-])v0\.9(?=$|[^0-9])", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -17,7 +25,7 @@ class FolderPolicy:
 
     def should_scan(self, path: Path, root_folder: Path) -> bool:
         parts = relative_parent_parts(path, root_folder)
-        if is_default_excluded_path(parts):
+        if is_default_excluded_path(parts, path.name):
             return False
 
         normalized_parts = {normalize_for_match(part) for part in parts}
@@ -63,12 +71,40 @@ def has_contiguous_path(parts: tuple[str, ...], target: tuple[str, ...]) -> bool
     return False
 
 
-def is_default_excluded_path(parts: tuple[str, ...]) -> bool:
+def is_default_excluded_path(parts: tuple[str, ...], filename: str = "") -> bool:
     if has_contiguous_path(parts, ("05.시험", "02.시험단계점검", "02.데이터값진단")):
+        return True
+
+    if is_archive_or_review_path(parts, filename):
         return True
 
     manual_root = ("06.인도", "01.인수인계", "02.매뉴얼작성")
     if has_contiguous_path(parts, manual_root):
         return not any(normalize_for_match(part) == normalize_for_match("운영자매뉴얼") for part in parts)
+
+    return False
+
+
+def is_archive_or_review_path(parts: tuple[str, ...], filename: str) -> bool:
+    normalized_parts = {normalize_for_match(part) for part in parts}
+    archive_names = {normalize_for_match(part) for part in ARCHIVE_FOLDER_NAMES}
+    review_names = {normalize_for_match(part) for part in REVIEW_FOLDER_NAMES}
+    if normalized_parts & (archive_names | review_names):
+        return True
+
+    joined_path = normalize_for_match("\\".join(parts))
+    if any(normalize_for_match(keyword) in joined_path for keyword in PATH_REVIEW_KEYWORDS):
+        return True
+
+    name = filename.strip()
+    if any(name.startswith(prefix) for prefix in ARCHIVE_FILENAME_PREFIXES):
+        return True
+
+    normalized_name = normalize_for_match(name)
+    if "검토표시" in normalized_name or "회신용" in normalized_name:
+        return True
+
+    if LOW_VERSION_FILENAME_PATTERN.search(name):
+        return True
 
     return False

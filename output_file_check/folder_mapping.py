@@ -21,9 +21,13 @@ from output_file_check.folder_matching import (
 from output_file_check.folder_policy import FolderPolicy
 from output_file_check.folder_scanner import scan_folder
 from output_file_check.matcher import DEFAULT_MATCH_THRESHOLD
-from output_file_check.models import OutputMatch, PathTemplate, ScannedFile, StandardOutput
+from output_file_check.models import MatchCandidate, OutputMatch, PathTemplate, ScannedFile, StandardOutput
+from output_file_check.normalization import normalize_for_match
 from output_file_check.path_template_reader import read_path_templates
 from output_file_check.standard_reader import read_standard_outputs
+
+
+BACKUP_FALLBACK_FOLDER_NAMES = ("bak", "backup", "백업")
 
 
 @dataclass(frozen=True)
@@ -96,35 +100,168 @@ def build_folder_mapping(
         read_contents=match_strategy != "ai_first",
     )
 
+    matches = match_files(
+        outputs,
+        files,
+        path_templates,
+        folder_dir,
+        match_strategy=match_strategy,
+        threshold=threshold,
+        expected_project_title=standard_project_title,
+        folder_policy=folder_policy,
+        ollama_url=ollama_url,
+        model=model,
+    )
+
+    missing_outputs = [match.output for match in matches if not match.candidates]
+    backup_files: list[ScannedFile] = []
+    if missing_outputs:
+        backup_policy = backup_fallback_policy(folder_policy)
+        backup_files = scan_backup_template_files(
+            folder_dir,
+            path_templates,
+            backup_policy,
+            read_contents=match_strategy != "ai_first",
+        )
+        if backup_files:
+            backup_matches = match_files(
+                missing_outputs,
+                backup_files,
+                path_templates,
+                folder_dir,
+                match_strategy=match_strategy,
+                threshold=threshold,
+                expected_project_title=standard_project_title,
+                folder_policy=backup_policy,
+                ollama_url=ollama_url,
+                model=model,
+            )
+            matches = merge_backup_fallback_matches(matches, backup_matches)
+
+    return FolderMappingResult(
+        standard_project_title=standard_project_title,
+        outputs=outputs,
+        path_templates=path_templates,
+        files=files + backup_files,
+        matches=matches,
+        match_mode=match_mode,
+    )
+
+
+def match_files(
+    outputs: list[StandardOutput],
+    files: list[ScannedFile],
+    path_templates: list[PathTemplate],
+    folder_dir: Path,
+    *,
+    match_strategy: str,
+    threshold: float,
+    expected_project_title: str,
+    folder_policy: FolderPolicy,
+    ollama_url: str,
+    model: str,
+) -> list[OutputMatch]:
     if match_strategy == "ai_first" and ollama_url:
-        matches = match_files_by_ai_first(
+        return match_files_by_ai_first(
             outputs,
             files,
             path_templates,
             folder_dir,
             threshold=threshold,
-            expected_project_title=standard_project_title,
+            expected_project_title=expected_project_title,
             folder_policy=folder_policy,
             ollama_url=ollama_url,
             model=model,
         )
-    else:
-        matches = match_files_by_folder_path(
-            outputs,
-            files,
+
+    return match_files_by_folder_path(
+        outputs,
+        files,
         path_templates,
         folder_dir,
         threshold=threshold,
         folder_policy=folder_policy,
     )
 
-    return FolderMappingResult(
-        standard_project_title=standard_project_title,
-        outputs=outputs,
-        path_templates=path_templates,
-        files=files,
-        matches=matches,
-        match_mode=match_mode,
+
+def backup_fallback_policy(folder_policy: FolderPolicy) -> FolderPolicy:
+    backup_names = {normalize_for_match(name) for name in BACKUP_FALLBACK_FOLDER_NAMES}
+    return FolderPolicy(
+        ignore_folder_names=tuple(
+            name for name in folder_policy.ignore_folder_names
+            if normalize_for_match(name) not in backup_names
+        ),
+        transparent_folder_names=folder_policy.transparent_folder_names,
+        map_only_under=folder_policy.map_only_under,
+    )
+
+
+def scan_backup_template_files(
+    folder_dir: Path,
+    path_templates: list[PathTemplate],
+    folder_policy: FolderPolicy,
+    *,
+    read_contents: bool = True,
+) -> list[ScannedFile]:
+    backup_files = [
+        file
+        for file in scan_folder(folder_dir, read_contents=False, folder_policy=folder_policy)
+        if is_backup_fallback_path(file.path, folder_dir)
+    ]
+    if not read_contents:
+        return backup_files
+
+    matched_paths = [
+        file
+        for file in backup_files
+        if find_templates_for_file_path(file.path, folder_dir, path_templates, folder_policy)
+    ]
+    files_to_read = matched_paths or backup_files
+
+    return [
+        ScannedFile(file.path, read_file_identity(file.path))
+        for file in files_to_read
+    ]
+
+
+def is_backup_fallback_path(file_path: Path, root_folder: Path) -> bool:
+    backup_names = {normalize_for_match(name) for name in BACKUP_FALLBACK_FOLDER_NAMES}
+    try:
+        parts = file_path.parent.resolve().relative_to(root_folder.resolve()).parts
+    except ValueError:
+        parts = file_path.parent.parts
+    return bool({normalize_for_match(part) for part in parts} & backup_names)
+
+
+def merge_backup_fallback_matches(
+    primary_matches: list[OutputMatch],
+    backup_matches: list[OutputMatch],
+) -> list[OutputMatch]:
+    backup_by_name = {
+        normalize_for_match(match.output.output_name): match
+        for match in backup_matches
+        if match.candidates
+    }
+    merged: list[OutputMatch] = []
+    for match in primary_matches:
+        if match.candidates:
+            merged.append(match)
+            continue
+        backup_match = backup_by_name.get(normalize_for_match(match.output.output_name))
+        if backup_match is None:
+            merged.append(match)
+            continue
+        merged.append(OutputMatch(match.output, tuple(mark_backup_candidate(candidate) for candidate in backup_match.candidates)))
+    return merged
+
+
+def mark_backup_candidate(candidate: MatchCandidate) -> MatchCandidate:
+    return MatchCandidate(
+        candidate.output,
+        candidate.file,
+        candidate.score,
+        f"bak 보조 후보 / {candidate.reason}",
+        candidate.ai_confidence,
     )
 
 
