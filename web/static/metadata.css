@@ -1,5 +1,5 @@
 .metadata-layout {
-  grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
+  grid-template-columns: minmax(300px, 328px) minmax(0, 1fr);
 }
 
 .metadata-layout .audit-table-shell {

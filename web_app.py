@@ -6,6 +6,7 @@ import json
 import mimetypes
 from pathlib import Path
 import re
+import shutil
 import sys
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,6 +16,7 @@ from uuid import uuid4
 from app_runtime import (
     WEB_DIR,
     TEMP_DIR,
+    RESULT_DIR,
     TS_TEMPLATE_PATH,
     cleanup_runtime,
     ensure_runtime_dirs,
@@ -96,6 +98,25 @@ def attach_file_downloads(
         for item in files
         if isinstance(item, dict) and item.get("download_url")
     ]
+
+
+def attach_folder_zip_download(payload: dict[str, object], *, prefix: str) -> None:
+    dump_root = Path(str(payload.get("dump_root") or ""))
+    if not dump_root.exists() or not dump_root.is_dir():
+        return
+
+    RESULT_DIR.mkdir(parents=True, exist_ok=True)
+    token = uuid4().hex
+    base_name = f"{token}_{dump_root.name}_{prefix}"
+    zip_base = RESULT_DIR / base_name
+    zip_path = Path(shutil.make_archive(str(zip_base), "zip", root_dir=dump_root))
+    download_name = f"{dump_root.name}_{prefix}.zip"
+
+    RESULT_FILES[token] = zip_path
+    RESULT_DOWNLOAD_NAMES[token] = download_name
+    RESULT_DELETE_AFTER_DOWNLOAD[token] = True
+    payload["download_url"] = f"/download/{token}"
+    payload["download_name"] = download_name
 
 
 def cleanup_sent_download(token: str, path: Path) -> None:
@@ -614,6 +635,7 @@ class WebHandler(BaseHTTPRequestHandler):
                     request_id,
                     split_excluded_paths(fields.get("excluded_paths", "")),
                 )
+            attach_folder_zip_download(payload, prefix="메타데이터_결과")
             self.send_json(payload, status=200 if payload.get("ok") else 400)
         except Exception as exc:
             log_event("metadata.apply.error", error=str(exc), traceback=traceback.format_exc())

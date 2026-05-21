@@ -20,7 +20,21 @@ from .metadata_update import (
 
 WBS_SUFFIXES = {".xlsx", ".xlsm"}
 STANDARD_SUFFIXES = {".pdf", ".hwp", ".hwpx"}
-METADATA_UPLOAD_SUFFIXES = {".hwp", ".hwpx", ".xlsx", ".xlsm", ".xltx", ".xltm"}
+METADATA_UPLOAD_SUFFIXES = {
+    ".hwp",
+    ".hwpx",
+    ".xlsx",
+    ".xlsm",
+    ".xltx",
+    ".xltm",
+    ".ppt",
+    ".pptx",
+    ".pptm",
+    ".potx",
+    ".potm",
+    ".ppsx",
+    ".ppsm",
+}
 
 
 def effective_uploaded_root(folder_dir: Path) -> Path:
@@ -161,7 +175,7 @@ def serialize_target(target: MetadataTarget) -> dict[str, object]:
 def run_metadata_preview(wbs_path: Path, standard_path: Path, folder_root: Path, request_id: str) -> dict[str, object]:
     records = read_wbs_metadata(wbs_path)
     approval_author = read_standard_cover_author(standard_path)
-    targets = build_metadata_targets(folder_root, records)
+    targets = build_metadata_targets(folder_root, records, approval_author=approval_author)
     matched = [target for target in targets if target.status == "matched"]
     ambiguous = [target for target in targets if target.status == "ambiguous"]
     unmatched = [target for target in targets if target.status == "unmatched"]
@@ -223,7 +237,7 @@ def apply_metadata_to_existing_dump(
 
     records = read_wbs_metadata(wbs_path)
     approval_author = read_standard_cover_author(standard_path)
-    targets = build_metadata_targets(dump_root, records)
+    targets = build_metadata_targets(dump_root, records, approval_author=approval_author)
     apply_targets = [
         target
         for target in targets
@@ -263,6 +277,7 @@ def apply_metadata_to_existing_dump(
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     failed = [item for item in items if item["status"] == "error"]
+    skipped_apply_items = [item for item in items if item["status"] == "skipped"]
     return {
         "ok": not failed and bool(items),
         "request_id": request_id,
@@ -272,7 +287,7 @@ def apply_metadata_to_existing_dump(
         "metadata_copy_created": False,
         "updated_file_count": sum(1 for item in items if item["status"] == "updated"),
         "failed_file_count": len(failed),
-        "skipped_file_count": len(targets) - len(apply_targets),
+        "skipped_file_count": len(targets) - len(apply_targets) + len(skipped_apply_items),
         "apply_target_file_count": len(apply_targets),
         "apply_items": items,
         "targets": [serialize_target(target) for target in targets],
