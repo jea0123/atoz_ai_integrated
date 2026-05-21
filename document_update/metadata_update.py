@@ -117,7 +117,7 @@ def split_output_names(value: object) -> list[str]:
         return []
     names: list[str] = []
     seen: set[str] = set()
-    for part in re.split(r"[,;\n]+", text):
+    for part in re.split(r"\s*(?:[,;\n&＆]|(?:\band\b))\s*", text, flags=re.IGNORECASE):
         raw = part.strip()
         _output_id, output_name = split_output_id_and_name(raw)
         for name in (raw, output_name):
