@@ -18,6 +18,13 @@ DEFAULT_FILE_SUFFIXES = {
     ".xltm",
     ".doc",
     ".docx",
+    ".ppt",
+    ".pptx",
+    ".pptm",
+    ".potx",
+    ".potm",
+    ".ppsx",
+    ".ppsm",
 }
 
 

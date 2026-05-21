@@ -9,6 +9,7 @@ from .normalization import clean_text, normalize_for_match
 from .standard_reader import extract_standard_text
 
 
+FOLDER_ONLY_OUTPUT_NAMES: tuple[str, ...] = ()
 RUN_PATTERN = re.compile(r"\S(?:.*?\S)?(?=\s{2,}\S|$)")
 NUMBERED_NAME_PATTERN = re.compile(r"^\d{2}\.(?P<name>.+)$")
 NOISE_PATTERN = re.compile(
@@ -109,6 +110,18 @@ def build_known_stage_templates(document_text: str) -> list[PathTemplate]:
             ]
         )
 
+    if "02.분석" in compact:
+        templates.extend(
+            [
+                make_template("인터뷰계획서", "02.분석", "01.요구사항분석", "01.인터뷰계획서"),
+                make_template("인터뷰결과서", "02.분석", "01.요구사항분석", "02.인터뷰결과서"),
+                make_template("업무정의서", "02.분석", "02.현행시스템분석", "01.업무정의서"),
+                make_template("현행아키텍처분석서", "02.분석", "02.현행시스템분석", "02.아키텍처분석"),
+                make_template("총괄시험계획서", "02.분석", "03.분석단계시험계획", "01.총괄시험계획"),
+                make_template("성능시험계획서", "02.분석", "03.분석단계시험계획", "02.성능(부하)시험계획"),
+            ]
+        )
+
     if "06.인도" in compact:
         templates.extend(
             [
@@ -152,7 +165,7 @@ def deduplicate_templates(
 
     for template in templates:
         key = normalize_for_match(template.output_name)
-        if not key or key not in output_names:
+        if not key or (key not in output_names and not is_folder_only_output_name(template.output_name)):
             continue
 
         current = by_name.get(key)
@@ -160,6 +173,12 @@ def deduplicate_templates(
             by_name[key] = template
 
     return list(by_name.values())
+
+
+def is_folder_only_output_name(output_name: str) -> bool:
+    # 산출물 코드 표에는 없지만 폴더명/문서명 표에는 독립 문서로 있는 항목이다.
+    key = normalize_for_match(output_name)
+    return any(key == normalize_for_match(name) for name in FOLDER_ONLY_OUTPUT_NAMES)
 
 
 def strip_number_prefix(value: str) -> str:

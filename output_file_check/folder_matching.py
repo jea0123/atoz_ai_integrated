@@ -6,11 +6,11 @@ import re
 
 from app_runtime import log_event, parse_json_object
 from document_update.ollama_client import generate
-from output_file_check.content_identity import extract_file_cover_text, read_file_identity
+from output_file_check.content_identity import extract_file_cover_text, find_document_number, read_file_identity
 from output_file_check.folder_policy import FolderPolicy, relative_parent_parts
 from output_file_check.matcher import score_file
 from output_file_check.models import FileIdentity, MatchCandidate, OutputMatch, PathTemplate, ScannedFile, StandardOutput
-from output_file_check.normalization import normalize_for_match
+from output_file_check.normalization import normalize_for_match, strip_attachment_tail
 
 
 AI_PREVIEW_CHARS = 900
@@ -29,13 +29,16 @@ def build_outputs_from_path_templates(
     seen: set[str] = set()
     for template in path_templates:
         key = normalize_for_check_key(template.output_name)
-        if not key or key in seen:
+        if not key:
             continue
         output = output_by_name.get(key)
         if output is None:
             continue
+        output_key = normalize_for_check_key(output.output_name)
+        if output_key in seen:
+            continue
         selected.append(output)
-        seen.add(key)
+        seen.add(output_key)
 
     return selected
 
@@ -311,6 +314,7 @@ def file_with_cover_text(file: ScannedFile) -> ScannedFile:
         FileIdentity(
             project_title=identity.project_title,
             document_title=identity.document_title,
+            document_number=identity.document_number or find_document_number(cover_text),
             preview_text=cover_text,
             error=identity.error,
         ),
@@ -386,6 +390,10 @@ def output_match_alias_keys(output: StandardOutput) -> list[str]:
 
 def normalize_text_variants_for_match(value: str) -> list[str]:
     variants = [value]
+    without_attachment_tail = strip_attachment_tail(value)
+    if without_attachment_tail and without_attachment_tail != value:
+        variants.append(without_attachment_tail)
+
     without_parenthetical = remove_parenthetical_text(value)
     if without_parenthetical != value:
         variants.append(without_parenthetical)
@@ -495,11 +503,11 @@ def file_with_cover_identity(file: ScannedFile, output: StandardOutput) -> Scann
         FileIdentity(
             project_title=current.project_title,
             document_title=current.document_title or output.output_name,
+            document_number=current.document_number,
             preview_text=current.preview_text,
             error=current.error,
         ),
     )
-
 
 def ask_ai_for_output_file_matches(
     output: StandardOutput,
@@ -648,6 +656,9 @@ def cover_text_matches_output(
     if title_outputs:
         title_keys = {normalize_for_check_key(item.output_name) for item in title_outputs}
         return output_key in title_keys
+
+    if outputs_matching_file_name(file, [output]):
+        return True
 
     cover_keys = normalize_text_variants_for_match(identity.preview_text)
     if not cover_keys:

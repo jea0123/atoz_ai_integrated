@@ -5,15 +5,19 @@ from pathlib import Path
 import re
 import unicodedata
 
+from document_update.patterns import OUTPUT_ID_PATTERN_TEXT, split_output_id_and_name
 
-ID_PREFIX_PATTERN = re.compile(
-    r"^(?P<prefix>[A-Za-z]{2,10}(?:-[A-Za-z0-9]{1,12})*-\d{2})(?:-(?P<name>.+))?$"
-)
+
 STANDARD_ID_IN_NAME_PATTERN = re.compile(
-    r"[A-Za-z]{2,10}(?:-[A-Za-z0-9]{1,12}){2,6}(?:-[가-힣A-Za-z0-9()]+)?"
+    rf"{OUTPUT_ID_PATTERN_TEXT}(?:-[가-힣A-Za-z0-9()]+)?(?![A-Za-z0-9])"
 )
 VERSION_TOKEN_PATTERN = re.compile(r"[_-]?[vV]\d+(?:\.\d+)*")
 REQUEST_ID_PATTERN = re.compile(r"SFR-[A-Za-z0-9-]+", re.IGNORECASE)
+ATTACHMENT_BRACKET_TAIL_PATTERN = re.compile(
+    r"[\s_-]*[\[\(（［｛]\s*(?:별첨|첨부)\s*\d*[^)\]\}）］｝]*[\)\]\}）］｝].*$",
+    re.IGNORECASE,
+)
+ATTACHMENT_WORD_TAIL_PATTERN = re.compile(r"[\s_-]*(?:별첨|첨부)\s*\d+.*$", re.IGNORECASE)
 
 
 def compact_space(value: str) -> str:
@@ -38,14 +42,24 @@ def normalize_for_match(value: str) -> str:
     return text.casefold()
 
 
+def strip_attachment_tail(value: str) -> str:
+    text = str(value)
+    stem = Path(text).stem if "." in text else text
+    for pattern in (ATTACHMENT_BRACKET_TAIL_PATTERN, ATTACHMENT_WORD_TAIL_PATTERN):
+        trimmed = pattern.sub("", stem).strip(" -_\t\r\n")
+        if trimmed != stem:
+            return trimmed
+    return stem
+
+
 def output_id_prefix(output_id: str) -> str:
-    match = ID_PREFIX_PATTERN.match(output_id)
-    return match.group("prefix") if match else output_id
+    prefix, _name = split_output_id_and_name(clean_text(output_id))
+    return prefix or output_id
 
 
 def output_name_from_id(output_id: str) -> str:
-    match = ID_PREFIX_PATTERN.match(output_id)
-    return clean_text(match.group("name") or "") if match else ""
+    _prefix, name = split_output_id_and_name(clean_text(output_id))
+    return clean_text(name)
 
 
 def unique_clean_values(values: list[str] | tuple[str, ...]) -> tuple[str, ...]:

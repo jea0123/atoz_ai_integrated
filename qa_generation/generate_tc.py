@@ -1,4 +1,3 @@
-import fitz
 import requests
 import json
 import os
@@ -9,7 +8,6 @@ import zipfile
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 from pathlib import Path
-import time
 
 from document_update.hwpx_text import extract_document_text
 

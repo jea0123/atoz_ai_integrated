@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-import fitz
 import re
 import copy
 import openpyxl

@@ -6,7 +6,6 @@ import json
 import mimetypes
 from pathlib import Path
 import re
-import shutil
 import sys
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,7 +13,6 @@ from urllib.parse import quote, unquote, urlparse
 from uuid import uuid4
 
 from app_runtime import (
-    RESULT_DIR,
     WEB_DIR,
     TEMP_DIR,
     TS_TEMPLATE_PATH,
@@ -56,29 +54,6 @@ RESULT_DOWNLOAD_NAMES: dict[str, str] = {}
 RESULT_DELETE_AFTER_DOWNLOAD: dict[str, bool] = {}
 RESULT_CLEANUP_ROOTS: dict[str, Path] = {}
 TS_SET_KEY_PATTERN = re.compile(r"\bSFR-[A-Z0-9]+-\d{3}\b", re.IGNORECASE)
-
-
-def attach_folder_download(payload: dict[str, object]) -> None:
-    # 폴더 반영 결과를 브라우저에서 받을 수 있도록 덤프 폴더를 ZIP으로 묶어 다운로드 토큰을 붙인다.
-    dump_root = Path(str(payload.get("dump_root") or ""))
-    if not dump_root.is_dir():
-        log_event("folder_download.missing_dump", dump_root=str(dump_root))
-        return
-
-    token = uuid4().hex
-    download_name = f"{dump_root.name}_결과.zip"
-    zip_path = Path(shutil.make_archive(str(RESULT_DIR / f"{token}_{dump_root.name}_결과"), "zip", dump_root.parent, dump_root.name))
-
-    RESULT_FILES[token] = zip_path
-    RESULT_DOWNLOAD_NAMES[token] = download_name
-    payload["download_url"] = f"/download/{token}"
-    payload["download_name"] = download_name
-    log_event(
-        "folder_download.ready",
-        token=token,
-        dump_root=str(dump_root),
-        zip_path=str(zip_path),
-    )
 
 
 def attach_file_downloads(
@@ -183,28 +158,6 @@ def save_uploaded_file(
     path = temp_dir / safe_name
     path.write_bytes(payload)
     return path, filename
-
-
-def uploaded_stem(filename: str, field_name: str) -> str:
-    # 다운로드 이름에 쓸 원본 파일명 stem을 안전한 형태로 만든다.
-    suffix = Path(filename).suffix
-    safe_name = safe_upload_filename(filename, field_name, suffix)
-    return Path(safe_name).stem or field_name
-
-
-def apply_download_stem(payload: dict[str, object], stem: str) -> None:
-    # 실제 저장 파일명은 유지하고 브라우저 다운로드 파일명만 업로드 원본 stem으로 맞춘다.
-    files = payload.get("files")
-    if not isinstance(files, list):
-        return
-
-    for item in files:
-        if not isinstance(item, dict):
-            continue
-
-        path = Path(str(item.get("path") or ""))
-        suffix = path.suffix or f".{item.get('kind') or 'file'}"
-        item["name"] = f"{stem}{suffix}"
 
 
 def unique_download_name(existing_names: set[str], name: str) -> str:
@@ -652,7 +605,6 @@ class WebHandler(BaseHTTPRequestHandler):
                     split_excluded_paths(fields.get("excluded_paths", "")),
                     temp_parent=temp_dir,
                 )
-                attach_folder_download(payload)
             else:
                 wbs_path, standard_path, folder_root, _uploaded = save_metadata_inputs(temp_dir, file_items)
                 payload = run_metadata_apply(
@@ -662,7 +614,6 @@ class WebHandler(BaseHTTPRequestHandler):
                     request_id,
                     split_excluded_paths(fields.get("excluded_paths", "")),
                 )
-                attach_folder_download(payload)
             self.send_json(payload, status=200 if payload.get("ok") else 400)
         except Exception as exc:
             log_event("metadata.apply.error", error=str(exc), traceback=traceback.format_exc())
@@ -694,7 +645,6 @@ class WebHandler(BaseHTTPRequestHandler):
             log_event("http.post", path=self.path, content_length=content_length, content_type=content_type)
             fields, file_items = parse_multipart_items(content_type, body)
             payload = run_web_folder_apply(fields, file_items)
-            payload["output_mode"] = "folder"
             if isinstance(payload.get("dump_root"), str):
                 log_event("folder_result.ready", dump_root=str(payload["dump_root"]))
             self.send_json(payload)

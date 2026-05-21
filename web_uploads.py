@@ -7,22 +7,6 @@ from pathlib import Path
 import re
 
 
-CHECK_UPLOAD_SUFFIXES = {
-    ".hwp",
-    ".hwpx",
-    ".pdf",
-    ".xls",
-    ".xlsx",
-    ".xlsm",
-    ".xltx",
-    ".xltm",
-    ".doc",
-    ".docx",
-    ".ppt",
-    ".pptx",
-}
-
-
 def parse_multipart_items(content_type: str, body: bytes) -> tuple[dict[str, str], dict[str, list[tuple[str, bytes]]]]:
     # multipart/form-data 본문을 일반 필드와 파일 목록으로 분리한다.
     """웹 프레임워크 없이 브라우저 폼 데이터를 파싱한다."""
@@ -95,7 +79,7 @@ def save_check_uploads(
     standard_path = temp_dir / safe_upload_filename(standard_name, "standard_file", ".pdf")
     standard_path.write_bytes(standard_payload)
 
-    folder_dir = temp_dir / "uploaded-folder"
+    folder_dir = temp_dir / "u"
     folder_dir.mkdir()
     folder_items = file_items.get("folder_files") or []
     if not folder_items and fallback_folder is not None:
@@ -108,8 +92,6 @@ def save_check_uploads(
         if not payload:
             continue
         suffix = Path(filename).suffix.lower()
-        if suffix not in CHECK_UPLOAD_SUFFIXES:
-            continue
 
         relative_path = safe_relative_upload_path(filename, f"file-{index}{suffix}")
         target_path = folder_dir / relative_path
@@ -118,6 +100,6 @@ def save_check_uploads(
         saved_count += 1
 
     if saved_count == 0:
-        raise ValueError("검사할 폴더에서 지원 형식의 파일을 찾지 못했습니다.")
+        raise ValueError("업로드된 폴더에서 저장할 파일을 찾지 못했습니다.")
 
     return standard_path, folder_dir

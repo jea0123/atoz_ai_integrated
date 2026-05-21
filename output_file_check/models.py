@@ -31,6 +31,7 @@ class FileIdentity:
 
     project_title: str = ""
     document_title: str = ""
+    document_number: str = ""
     preview_text: str = ""
     error: str = ""
 

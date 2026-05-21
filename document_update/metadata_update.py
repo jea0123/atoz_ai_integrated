@@ -14,7 +14,6 @@ from .document_number import get_cell_text, replace_cell_text
 from .excel_ooxml import (
     EXCEL_DOCUMENT_SUFFIXES,
     CellInfo,
-    cell_ref_to_col,
     col_to_name,
     iter_cells,
     read_shared_strings,
@@ -22,7 +21,7 @@ from .excel_ooxml import (
     workbook_sheets,
 )
 from .hwpx_text import extract_document_text, is_hwpx_zip
-from .patterns import CELL_PATTERN, OUTPUT_ID_PATTERN, ROW_PATTERN
+from .patterns import CELL_PATTERN, OUTPUT_ID_PATTERN, ROW_PATTERN, split_output_id_and_name
 from .runtime_conversion import prepare_target_file
 
 
@@ -116,11 +115,18 @@ def split_output_names(value: object) -> list[str]:
     text = clean_text(value)
     if not text:
         return []
-    return [
-        part.strip()
-        for part in re.split(r"\s*(?:[,;\n&＆]|(?:\band\b))\s*", text, flags=re.IGNORECASE)
-        if part.strip()
-    ]
+    names: list[str] = []
+    seen: set[str] = set()
+    for part in re.split(r"[,;\n]+", text):
+        raw = part.strip()
+        _output_id, output_name = split_output_id_and_name(raw)
+        for name in (raw, output_name):
+            key = normalize_key(name)
+            if not key or key in seen:
+                continue
+            names.append(name)
+            seen.add(key)
+    return names
 
 
 def format_revision_date(value: object) -> str:
@@ -560,8 +566,6 @@ def update_excel_label_cells_xml(
     values_by_label: dict[str, str],
 ) -> tuple[str, int]:
     import xml.etree.ElementTree as ET
-
-    from .excel_ooxml import qn
 
     root = ET.fromstring(sheet_xml)
     cells = iter_cells(root, shared_strings)
