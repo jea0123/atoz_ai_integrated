@@ -10,7 +10,7 @@ import zipfile
 from xml.sax.saxutils import escape, unescape
 
 from .excel_ooxml import EXCEL_DOCUMENT_SUFFIXES, build_updated_excel_cover_sheet
-from .hwpx_text import is_hwpx_zip
+from .hwpx_text import is_hwpx_zip, strip_hwpx_line_seg_arrays
 from .patterns import (
     CELL_PATTERN,
     OUTPUT_ID_PATTERN,
@@ -314,6 +314,7 @@ def write_updated_hwpx_document(
                                 changed = True
 
                         if changed:
+                            xml, _line_seg_count = strip_hwpx_line_seg_arrays(xml)
                             data = xml.encode("utf-8")
 
                     zout.writestr(item, data)

@@ -21,7 +21,7 @@ from .excel_ooxml import (
     replace_or_insert_cell_xml,
     workbook_sheets,
 )
-from .hwpx_text import extract_document_text, is_hwpx_zip
+from .hwpx_text import extract_document_text, is_hwpx_zip, strip_hwpx_line_seg_arrays
 from .patterns import CELL_PATTERN, OUTPUT_ID_PATTERN, ROW_PATTERN, split_output_id_and_name
 from . import ppt_ooxml
 from .runtime_conversion import prepare_target_file
@@ -562,8 +562,6 @@ def update_metadata_in_document(
     approval_author: str,
     temp_dir: Path,
 ) -> MetadataWriteResult:
-    backup_path = backup_path_for(file_path)
-    shutil.copy2(file_path, backup_path)
     try:
         target_file, converted_to_hwpx = prepare_target_file(file_path, temp_dir)
         output_path = target_file
@@ -583,14 +581,11 @@ def update_metadata_in_document(
                 file_path.unlink()
 
         no_change_ppt = target_file.suffix.lower() in ppt_ooxml.PPT_DOCUMENT_SUFFIXES and not sum(result)
-        if no_change_ppt and backup_path.exists():
-            backup_path.unlink()
-
         return MetadataWriteResult(
             status="skipped" if no_change_ppt else "updated",
             old_path=file_path,
             new_path=output_path,
-            backup_path=None if no_change_ppt else backup_path,
+            backup_path=None,
             converted_to_hwpx=converted_to_hwpx,
             cover_update_count=result[0],
             revision_history_update_count=result[1],
@@ -604,19 +599,9 @@ def update_metadata_in_document(
         return MetadataWriteResult(
             status="error",
             old_path=file_path,
-            backup_path=backup_path,
+            backup_path=None,
             error=str(exc),
         )
-
-
-def backup_path_for(file_path: Path) -> Path:
-    backup_dir = file_path.parent / "bak"
-    backup_dir.mkdir(exist_ok=True)
-    candidate = backup_dir / file_path.name
-    if not candidate.exists():
-        return candidate
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return backup_dir / f"{file_path.stem}_{timestamp}{file_path.suffix}"
 
 
 def write_updated_excel_metadata(path: Path, author: str, revision_date: str, approval_author: str) -> tuple[int, int]:
@@ -1296,6 +1281,7 @@ def write_updated_hwpx_metadata(path: Path, author: str, revision_date: str, app
                         revision_count += count
                         changed_count += count
                         if changed_count:
+                            xml, _line_seg_count = strip_hwpx_line_seg_arrays(xml)
                             data = xml.encode("utf-8")
                     zout.writestr(item, data)
         if cover_count or revision_count:
