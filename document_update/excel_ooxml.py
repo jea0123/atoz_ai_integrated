@@ -7,7 +7,7 @@ from pathlib import Path, PurePosixPath
 import re
 import zipfile
 import xml.etree.ElementTree as ET
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape, unescape
 
 from .patterns import OUTPUT_ID_PATTERN
 
@@ -19,6 +19,8 @@ XML_SPACE_ATTR = "{http://www.w3.org/XML/1998/namespace}space"
 DOCUMENT_NUMBER_LABEL = "\ubb38\uc11c\ubc88\ud638"
 EXCEL_DOCUMENT_SUFFIXES = {".xlsx", ".xlsm", ".xltx", ".xltm"}
 COVER_SHEET_HINT = "\ud45c\uc9c0"
+DRAWING_PARAGRAPH_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?p)\b[^>]*>.*?</(?P=tag)>", re.DOTALL)
+DRAWING_TEXT_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?t)\b[^>]*>(?P<text>.*?)</(?P=tag)>", re.DOTALL)
 
 ET.register_namespace("", MAIN_NS)
 ET.register_namespace("r", REL_NS)
@@ -430,3 +432,213 @@ def build_updated_excel_cover_sheet(
         project_count,
         document_number_count,
     )
+
+
+EXCEL_HEADER_SCAN_MAX_ROW = 8
+
+
+def replace_excel_sheet_header_values(
+    sheet_xml: str,
+    shared_strings: list[str],
+    old_project_title: str | None,
+    new_project_title: str | None,
+    old_document_numbers: list[str],
+    new_document_number: str,
+) -> tuple[bytes, int, int]:
+    root = ET.fromstring(sheet_xml)
+    replacements: dict[str, tuple[str, str]] = {}
+
+    old_project = clean_cover_value(old_project_title or "")
+    new_project = clean_cover_value(new_project_title or "")
+    if old_project and new_project and old_project != new_project:
+        replacements[old_project] = (new_project_title or "", "project")
+
+    for old_document_number in old_document_numbers:
+        old_document = clean_cover_value(old_document_number)
+        if old_document and old_document != clean_cover_value(new_document_number):
+            replacements[old_document] = (new_document_number, "document")
+
+    if not replacements:
+        return sheet_xml.encode("utf-8"), 0, 0
+
+    updates: dict[str, tuple[int, int, str, str]] = {}
+    for info in iter_cells(root, shared_strings):
+        if info.row > EXCEL_HEADER_SCAN_MAX_ROW:
+            continue
+        replacement = replacements.get(clean_cover_value(info.text))
+        if replacement:
+            updates[info.ref] = (info.row, info.col, replacement[0], replacement[1])
+
+    if not updates:
+        return sheet_xml.encode("utf-8"), 0, 0
+
+    updated_xml_text = sheet_xml
+    project_count = 0
+    document_number_count = 0
+    for cell_ref, (row_index, col_index, value, kind) in updates.items():
+        updated_xml_text = replace_or_insert_cell_xml(
+            updated_xml_text,
+            cell_ref,
+            row_index,
+            col_index,
+            value,
+        )
+        if kind == "project":
+            project_count += 1
+        elif kind == "document":
+            document_number_count += 1
+
+    return updated_xml_text.encode("utf-8"), project_count, document_number_count
+
+
+def replace_excel_drawing_header_values(
+    drawing_xml: str,
+    old_title: str | None,
+    new_title: str | None,
+    old_project_title: str | None,
+    new_project_title: str | None,
+    old_document_numbers: list[str],
+    new_document_number: str,
+) -> tuple[bytes, int, int, int]:
+    text_matches = list(DRAWING_TEXT_PATTERN.finditer(drawing_xml))
+    if not text_matches:
+        return drawing_xml.encode("utf-8"), 0, 0, 0
+
+    texts = [unescape(match.group("text")) for match in text_matches]
+    new_texts: dict[int, str] = {}
+    paragraphs = drawing_paragraph_text_runs(drawing_xml, text_matches, texts)
+
+    title_count = 0
+    project_count = 0
+    document_number_count = 0
+    old_title_clean = clean_cover_value(old_title or "")
+    new_title_clean = clean_cover_value(new_title or "")
+    old_project_clean = clean_cover_value(old_project_title or "")
+    new_project_clean = clean_cover_value(new_project_title or "")
+    for paragraph_index, (run_indexes, combined) in enumerate(paragraphs):
+        clean_combined = clean_cover_value(combined)
+        if old_title_clean and new_title_clean and old_title_clean != new_title_clean and clean_combined == old_title_clean:
+            replace_drawing_paragraph(new_texts, texts, run_indexes, new_title or "")
+            title_count += 1
+            continue
+
+        if (
+            old_project_clean
+            and new_project_clean
+            and old_project_clean != new_project_clean
+            and clean_combined == old_project_clean
+        ):
+            replace_drawing_paragraph(new_texts, texts, run_indexes, new_project_title or "")
+            project_count += 1
+            continue
+
+        id_matches = list(OUTPUT_ID_PATTERN.finditer(combined))
+        if not id_matches:
+            continue
+
+        for match in id_matches:
+            if match.group(0) == clean_cover_value(new_document_number):
+                continue
+            replace_drawing_text_span(new_texts, texts, run_indexes, match.span(), new_document_number)
+            document_number_count += 1
+
+        if not new_project_clean:
+            continue
+        previous = previous_non_empty_paragraph(paragraphs, paragraph_index)
+        if previous is None:
+            continue
+        previous_run_indexes, previous_text = previous
+        previous_clean = clean_cover_value(previous_text)
+        if (
+            previous_clean
+            and previous_clean != new_project_clean
+            and not any(run_index in new_texts for run_index in previous_run_indexes)
+        ):
+            replace_drawing_paragraph(new_texts, texts, previous_run_indexes, new_project_title or "")
+            project_count += 1
+
+    if not new_texts:
+        return drawing_xml.encode("utf-8"), 0, 0, 0
+
+    pieces: list[str] = []
+    last = 0
+    for index, match in enumerate(text_matches):
+        if index not in new_texts:
+            continue
+        pieces.append(drawing_xml[last:match.start("text")])
+        pieces.append(escape(new_texts[index]))
+        last = match.end("text")
+    pieces.append(drawing_xml[last:])
+    return "".join(pieces).encode("utf-8"), title_count, project_count, document_number_count
+
+
+def drawing_paragraph_text_runs(
+    drawing_xml: str,
+    text_matches: list[re.Match[str]],
+    texts: list[str],
+) -> list[tuple[list[int], str]]:
+    paragraphs: list[tuple[list[int], str]] = []
+    for paragraph_match in DRAWING_PARAGRAPH_PATTERN.finditer(drawing_xml):
+        run_indexes = [
+            index
+            for index, text_match in enumerate(text_matches)
+            if paragraph_match.start() <= text_match.start() and text_match.end() <= paragraph_match.end()
+        ]
+        if not run_indexes:
+            continue
+        combined = "".join(texts[index] for index in run_indexes)
+        if clean_cover_value(combined):
+            paragraphs.append((run_indexes, combined))
+    return paragraphs
+
+
+def previous_non_empty_paragraph(
+    paragraphs: list[tuple[list[int], str]],
+    current_index: int,
+) -> tuple[list[int], str] | None:
+    for index in range(current_index - 1, -1, -1):
+        if clean_cover_value(paragraphs[index][1]):
+            return paragraphs[index]
+    return None
+
+
+def replace_drawing_paragraph(
+    new_texts: dict[int, str],
+    texts: list[str],
+    run_indexes: list[int],
+    replacement: str,
+) -> None:
+    if not run_indexes:
+        return
+    combined = "".join(texts[index] for index in run_indexes)
+    leading = combined[: len(combined) - len(combined.lstrip())]
+    trailing = combined[len(combined.rstrip()):]
+    for position, run_index in enumerate(run_indexes):
+        new_texts[run_index] = f"{leading}{replacement}{trailing}" if position == 0 else ""
+
+
+def replace_drawing_text_span(
+    new_texts: dict[int, str],
+    texts: list[str],
+    run_indexes: list[int],
+    target_span: tuple[int, int],
+    replacement: str,
+) -> None:
+    target_start, target_end = target_span
+    spans: list[tuple[int, int, int]] = []
+    cursor = 0
+    for run_index in run_indexes:
+        start = cursor
+        cursor += len(texts[run_index])
+        spans.append((run_index, start, cursor))
+
+    matched_spans = [
+        (run_index, start, end)
+        for run_index, start, end in spans
+        if start < target_end and end > target_start
+    ]
+    for index, (run_index, start, end) in enumerate(matched_spans):
+        text = texts[run_index]
+        prefix = text[: max(0, target_start - start)] if index == 0 else ""
+        suffix = text[max(0, target_end - start):] if index == len(matched_spans) - 1 and target_end < end else ""
+        new_texts[run_index] = f"{prefix}{replacement if index == 0 else ''}{suffix}"

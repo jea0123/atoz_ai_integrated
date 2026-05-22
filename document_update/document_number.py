@@ -9,7 +9,14 @@ import shutil
 import zipfile
 from xml.sax.saxutils import escape, unescape
 
-from .excel_ooxml import EXCEL_DOCUMENT_SUFFIXES, build_updated_excel_cover_sheet
+from .excel_ooxml import (
+    EXCEL_DOCUMENT_SUFFIXES,
+    build_updated_excel_cover_sheet,
+    read_shared_strings,
+    replace_excel_drawing_header_values,
+    replace_excel_sheet_header_values,
+    workbook_sheets,
+)
 from .hwpx_text import is_hwpx_zip, strip_hwpx_line_seg_arrays
 from .patterns import (
     CELL_PATTERN,
@@ -363,6 +370,7 @@ def write_updated_excel_document(
 
     try:
         with zipfile.ZipFile(file_path, "r") as zin:
+            shared_strings = read_shared_strings(zin)
             (
                 cover_sheet_path,
                 updated_cover_sheet,
@@ -378,12 +386,58 @@ def write_updated_excel_document(
                 old_project_title,
                 new_project_title,
             )
+            document_numbers_to_scan = unique_scan_values(
+                old_document_number,
+                infer_document_number_from_filename(file_path),
+            )
+            updated_sheets: dict[str, bytes] = {}
+
+            for sheet in workbook_sheets(zin):
+                sheet_xml = (
+                    updated_cover_sheet.decode("utf-8", errors="ignore")
+                    if sheet.path == cover_sheet_path
+                    else zin.read(sheet.path).decode("utf-8", errors="ignore")
+                )
+                (
+                    updated_sheet,
+                    header_project_count,
+                    header_document_number_count,
+                ) = replace_excel_sheet_header_values(
+                    sheet_xml,
+                    shared_strings,
+                    old_project_title,
+                    new_project_title,
+                    document_numbers_to_scan,
+                    new_document_number,
+                )
+                if sheet.path == cover_sheet_path or header_project_count or header_document_number_count:
+                    updated_sheets[sheet.path] = updated_sheet
+                    project_title_replace_count += header_project_count
+                    document_number_replace_count += header_document_number_count
 
             with zipfile.ZipFile(write_path, "w", zipfile.ZIP_DEFLATED) as zout:
                 for item in zin.infolist():
                     data = zin.read(item.filename)
-                    if item.filename == cover_sheet_path:
-                        data = updated_cover_sheet
+                    if item.filename in updated_sheets:
+                        data = updated_sheets[item.filename]
+                    elif item.filename.startswith("xl/drawings/") and item.filename.endswith(".xml"):
+                        (
+                            data,
+                            drawing_title_count,
+                            drawing_project_count,
+                            drawing_document_number_count,
+                        ) = replace_excel_drawing_header_values(
+                            data.decode("utf-8", errors="ignore"),
+                            old_title,
+                            new_title,
+                            old_project_title,
+                            new_project_title,
+                            document_numbers_to_scan,
+                            new_document_number,
+                        )
+                        title_replace_count += drawing_title_count
+                        project_title_replace_count += drawing_project_count
+                        document_number_replace_count += drawing_document_number_count
                     zout.writestr(item, data)
 
         updated_path = write_path
