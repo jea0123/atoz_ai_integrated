@@ -216,7 +216,6 @@ function renderApplyReport(data) {
         ? `<div class="apply-folder-result">
             <span>결과 폴더</span>
             <code>${escapeHtml(dumpRoot)}</code>
-            <a href="/qa.html?dump_root=${encodeURIComponent(dumpRoot)}">QA 생성으로 이동</a>
             <a href="/metadata.html?dump_root=${encodeURIComponent(dumpRoot)}">메타데이터 반영으로 이동</a>
           </div>`
         : ""
