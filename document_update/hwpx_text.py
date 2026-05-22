@@ -41,6 +41,11 @@ HWP_SECURITY_REGISTRY_KEYS = (
     r"Software\HNC\HwpAutomation\Modules",
     r"Software\HNC\HwpCtrl\Modules",
 )
+LINESEG_ARRAY_PATTERN = re.compile(
+    r"<(?P<tag>(?:\w+:)?linesegarray)\b[^>]*/>|"
+    r"<(?P<tag2>(?:\w+:)?linesegarray)\b[^>]*>.*?</(?P=tag2)>",
+    re.DOTALL | re.IGNORECASE,
+)
 
 
 def is_hwpx_zip(file_path: Path) -> bool:
@@ -49,6 +54,11 @@ def is_hwpx_zip(file_path: Path) -> bool:
             return "Contents/section0.xml" in zf.namelist()
     except (OSError, zipfile.BadZipFile):
         return False
+
+
+def strip_hwpx_line_seg_arrays(xml: str) -> tuple[str, int]:
+    """텍스트 직접 수정 후 무효가 되는 HWPX 문단 레이아웃 캐시를 제거한다."""
+    return LINESEG_ARRAY_PATTERN.subn("", xml)
 
 
 def is_zip_container(file_path: Path) -> bool:

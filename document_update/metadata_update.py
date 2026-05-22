@@ -21,7 +21,7 @@ from .excel_ooxml import (
     replace_or_insert_cell_xml,
     workbook_sheets,
 )
-from .hwpx_text import extract_document_text, is_hwpx_zip
+from .hwpx_text import extract_document_text, is_hwpx_zip, strip_hwpx_line_seg_arrays
 from .patterns import CELL_PATTERN, OUTPUT_ID_PATTERN, ROW_PATTERN, split_output_id_and_name
 from . import ppt_ooxml
 from .runtime_conversion import prepare_target_file
@@ -60,6 +60,7 @@ REQUIREMENT_ID_PATTERN = re.compile(r"(?<![A-Z0-9])SFR-[A-Z0-9]+-\d{3}(?!\d)", r
 HEADER_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?header)\b[^>]*>.*?</(?P=tag)>", re.DOTALL)
 DATE_VALUE_PATTERN = re.compile(r"^\d{4}[-./]\d{1,2}[-./]\d{1,2}$")
 DRAWING_TEXT_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?t)\b[^>]*>(?P<text>.*?)</(?P=tag)>", re.DOTALL)
+HWPX_CARET_POSITION_PATTERN = re.compile(r"<(?:\w+:)?CaretPosition\b[^>]*/>", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -562,8 +563,6 @@ def update_metadata_in_document(
     approval_author: str,
     temp_dir: Path,
 ) -> MetadataWriteResult:
-    backup_path = backup_path_for(file_path)
-    shutil.copy2(file_path, backup_path)
     try:
         target_file, converted_to_hwpx = prepare_target_file(file_path, temp_dir)
         output_path = target_file
@@ -583,14 +582,11 @@ def update_metadata_in_document(
                 file_path.unlink()
 
         no_change_ppt = target_file.suffix.lower() in ppt_ooxml.PPT_DOCUMENT_SUFFIXES and not sum(result)
-        if no_change_ppt and backup_path.exists():
-            backup_path.unlink()
-
         return MetadataWriteResult(
             status="skipped" if no_change_ppt else "updated",
             old_path=file_path,
             new_path=output_path,
-            backup_path=None if no_change_ppt else backup_path,
+            backup_path=None,
             converted_to_hwpx=converted_to_hwpx,
             cover_update_count=result[0],
             revision_history_update_count=result[1],
@@ -604,19 +600,9 @@ def update_metadata_in_document(
         return MetadataWriteResult(
             status="error",
             old_path=file_path,
-            backup_path=backup_path,
+            backup_path=None,
             error=str(exc),
         )
-
-
-def backup_path_for(file_path: Path) -> Path:
-    backup_dir = file_path.parent / "bak"
-    backup_dir.mkdir(exist_ok=True)
-    candidate = backup_dir / file_path.name
-    if not candidate.exists():
-        return candidate
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return backup_dir / f"{file_path.stem}_{timestamp}{file_path.suffix}"
 
 
 def write_updated_excel_metadata(path: Path, author: str, revision_date: str, approval_author: str) -> tuple[int, int]:
@@ -661,6 +647,12 @@ def write_updated_excel_metadata(path: Path, author: str, revision_date: str, ap
                         author,
                         approval_author,
                     )
+                view_xml = set_excel_sheet_selected_state(
+                    updated_xml,
+                    selected=sheet_path == next(iter(sheet_map), ""),
+                )
+                if view_xml != updated_xml:
+                    updated_xml = view_xml
                 if label_count or sheet_revision_count:
                     updates_by_sheet[sheet_path] = (
                         updated_xml.encode("utf-8"),
@@ -669,6 +661,12 @@ def write_updated_excel_metadata(path: Path, author: str, revision_date: str, ap
                     )
                     cover_count += label_count
                     revision_count += sheet_revision_count
+                elif updated_xml != original_xml:
+                    updates_by_sheet[sheet_path] = (
+                        updated_xml.encode("utf-8"),
+                        0,
+                        0,
+                    )
 
             for item in zin.infolist():
                 if not item.filename.startswith("xl/drawings/") or not item.filename.endswith(".xml"):
@@ -692,6 +690,8 @@ def write_updated_excel_metadata(path: Path, author: str, revision_date: str, ap
                     data = zin.read(item.filename)
                     if item.filename in updates_by_sheet:
                         data = updates_by_sheet[item.filename][0]
+                    elif item.filename == "xl/workbook.xml":
+                        data = set_excel_first_sheet_active(data.decode("utf-8", errors="ignore")).encode("utf-8")
                     zout.writestr(item, data)
         temp_path.replace(path)
     except Exception:
@@ -905,6 +905,71 @@ def clear_ppt_revision_history_data_row(
         offset += len(updated_cell) - len(cell.group(0))
         count += 1
     return updated_row, count
+
+
+def set_excel_first_sheet_active(workbook_xml: str) -> str:
+    def update_workbook_view(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        tag = upsert_xml_attribute(tag, "activeTab", "0")
+        tag = upsert_xml_attribute(tag, "firstSheet", "0")
+        return tag
+
+    updated_xml, count = re.subn(
+        r"<(?:\w+:)?workbookView\b[^>]*/?>",
+        update_workbook_view,
+        workbook_xml,
+        count=1,
+    )
+    if count:
+        return updated_xml
+
+    insert_at = workbook_xml.find(">")
+    if insert_at < 0:
+        return workbook_xml
+    return (
+        workbook_xml[: insert_at + 1]
+        + '<bookViews><workbookView activeTab="0" firstSheet="0"/></bookViews>'
+        + workbook_xml[insert_at + 1:]
+    )
+
+
+def set_excel_sheet_selected_state(sheet_xml: str, selected: bool) -> str:
+    def update_sheet_view(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        if selected:
+            return upsert_xml_attribute(tag, "tabSelected", "1")
+        return remove_xml_attribute(tag, "tabSelected")
+
+    updated_xml, count = re.subn(
+        r"<(?:\w+:)?sheetView\b[^>]*/?>",
+        update_sheet_view,
+        sheet_xml,
+        count=1,
+    )
+    if count:
+        return updated_xml
+
+    insert_at = sheet_xml.find(">")
+    if insert_at < 0:
+        return sheet_xml
+    tab_selected = ' tabSelected="1"' if selected else ""
+    return (
+        sheet_xml[: insert_at + 1]
+        + f'<sheetViews><sheetView workbookViewId="0"{tab_selected}/></sheetViews>'
+        + sheet_xml[insert_at + 1:]
+    )
+
+
+def upsert_xml_attribute(tag: str, name: str, value: str) -> str:
+    updated, count = re.subn(rf'\s{name}="[^"]*"', f' {name}="{value}"', tag, count=1)
+    if count:
+        return updated
+    insert_at = -2 if tag.endswith("/>") else -1
+    return f"{tag[:insert_at]} {name}=\"{value}\"{tag[insert_at:]}"
+
+
+def remove_xml_attribute(tag: str, name: str) -> str:
+    return re.sub(rf'\s{name}="[^"]*"', "", tag, count=1)
 
 
 def update_excel_label_cells_xml(
@@ -1296,7 +1361,12 @@ def write_updated_hwpx_metadata(path: Path, author: str, revision_date: str, app
                         revision_count += count
                         changed_count += count
                         if changed_count:
+                            xml, _line_seg_count = strip_hwpx_line_seg_arrays(xml)
                             data = xml.encode("utf-8")
+                        elif item.filename.lower() == "settings.xml":
+                            xml, view_count = reset_hwpx_open_position(xml)
+                            if view_count:
+                                data = xml.encode("utf-8")
                     zout.writestr(item, data)
         if cover_count or revision_count:
             temp_path.replace(path)
@@ -1347,6 +1417,10 @@ def update_label_right_rows_in_xml(xml: str, labels: set[str], new_text: str) ->
         return xml, 0
     pieces.append(xml[last:])
     return "".join(pieces), count
+
+
+def reset_hwpx_open_position(xml: str) -> tuple[str, int]:
+    return HWPX_CARET_POSITION_PATTERN.subn("", xml)
 
 
 def update_unlabeled_header_metadata_xml(xml: str, revision_date: str, author: str) -> tuple[str, int]:
