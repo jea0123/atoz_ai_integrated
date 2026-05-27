@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>산출물 메타데이터 설정</title>
-  <link rel="stylesheet" href="/static/check.css?v=20260526-cancel">
+  <link rel="stylesheet" href="/static/check.css?v=20260527-metadata-progress">
   <link rel="stylesheet" href="/static/metadata.css?v=20260521-layout">
 </head>
 <body>
@@ -127,8 +127,9 @@
           <div class="loading-overlay" id="loadingOverlay" hidden>
             <div class="loading-card">
               <span class="loader"></span>
-              <strong>문서 메타데이터를 확인하는 중</strong>
-              <p>WBS 기준으로 산출물 문서를 대조하고 있습니다.</p>
+              <strong id="loadingTitle">문서 메타데이터를 확인하는 중</strong>
+              <p id="loadingMessage">WBS 기준으로 산출물 문서를 대조하고 있습니다.</p>
+              <ol class="loading-steps" id="loadingSteps" hidden></ol>
               <button class="loading-cancel-button" id="loadingCancelButton" type="button">취소</button>
             </div>
           </div>
@@ -138,6 +139,6 @@
   </main>
 
   <script src="/static/header.js?v=20260519-metadata"></script>
-  <script src="/static/metadata.js?v=20260526-cancel"></script>
+  <script src="/static/metadata.js?v=20260527-metadata-progress"></script>
 </body>
 </html>
