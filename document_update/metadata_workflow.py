@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+from typing import Callable
 
 from app_runtime import RESULT_DIR
 from output_file_check.standard_reader import extract_standard_text
@@ -35,6 +36,11 @@ METADATA_UPLOAD_SUFFIXES = {
     ".ppsx",
     ".ppsm",
 }
+
+
+def _check_cancel(cancel_check: Callable[[], None] | None) -> None:
+    if cancel_check:
+        cancel_check()
 
 
 def effective_uploaded_root(folder_dir: Path) -> Path:
@@ -172,10 +178,20 @@ def serialize_target(target: MetadataTarget) -> dict[str, object]:
     }
 
 
-def run_metadata_preview(wbs_path: Path, standard_path: Path, folder_root: Path, request_id: str) -> dict[str, object]:
+def run_metadata_preview(
+    wbs_path: Path,
+    standard_path: Path,
+    folder_root: Path,
+    request_id: str,
+    cancel_check: Callable[[], None] | None = None,
+) -> dict[str, object]:
+    _check_cancel(cancel_check)
     records = read_wbs_metadata(wbs_path)
+    _check_cancel(cancel_check)
     approval_author = read_standard_cover_author(standard_path)
+    _check_cancel(cancel_check)
     targets = build_metadata_targets(folder_root, records, approval_author=approval_author)
+    _check_cancel(cancel_check)
     matched = [target for target in targets if target.status == "matched"]
     ambiguous = [target for target in targets if target.status == "ambiguous"]
     unmatched = [target for target in targets if target.status == "unmatched"]
@@ -201,11 +217,14 @@ def run_metadata_apply(
     source_root: Path,
     request_id: str,
     excluded_paths: set[str],
+    cancel_check: Callable[[], None] | None = None,
 ) -> dict[str, object]:
+    _check_cancel(cancel_check)
     dump_parent = RESULT_DIR / "metadata-dumps"
     dump_parent.mkdir(parents=True, exist_ok=True)
     dump_root = next_dump_path(dump_parent, source_root.name)
     shutil.copytree(windows_long_path(source_root), windows_long_path(dump_root), ignore=ignore_metadata_dirs)
+    _check_cancel(cancel_check)
 
     payload = apply_metadata_to_existing_dump(
         wbs_path,
@@ -214,6 +233,7 @@ def run_metadata_apply(
         request_id,
         excluded_paths,
         temp_parent=dump_parent,
+        cancel_check=cancel_check,
     )
     payload["source_root"] = str(source_root)
     payload["metadata_copy_created"] = True
@@ -228,7 +248,9 @@ def apply_metadata_to_existing_dump(
     excluded_paths: set[str],
     *,
     temp_parent: Path | None = None,
+    cancel_check: Callable[[], None] | None = None,
 ) -> dict[str, object]:
+    _check_cancel(cancel_check)
     if not dump_root.is_dir():
         raise ValueError(f"후처리 대상 폴더를 찾지 못했습니다: {dump_root}")
 
@@ -236,8 +258,11 @@ def apply_metadata_to_existing_dump(
     temp_parent.mkdir(parents=True, exist_ok=True)
 
     records = read_wbs_metadata(wbs_path)
+    _check_cancel(cancel_check)
     approval_author = read_standard_cover_author(standard_path)
+    _check_cancel(cancel_check)
     targets = build_metadata_targets(dump_root, records, approval_author=approval_author)
+    _check_cancel(cancel_check)
     apply_targets = [
         target
         for target in targets
@@ -249,6 +274,7 @@ def apply_metadata_to_existing_dump(
     items = []
     try:
         for target in apply_targets:
+            _check_cancel(cancel_check)
             result = update_metadata_in_document(
                 target.path,
                 target.author,
@@ -256,6 +282,7 @@ def apply_metadata_to_existing_dump(
                 approval_author,
                 temp_dir,
             )
+            _check_cancel(cancel_check)
             items.append(
                 {
                     "status": result.status,

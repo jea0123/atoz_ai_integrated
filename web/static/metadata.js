@@ -19,11 +19,13 @@ const resultRows = document.querySelector("#resultRows");
 const visibleCount = document.querySelector("#visibleCount");
 const emptyState = document.querySelector("#emptyState");
 const loadingOverlay = document.querySelector("#loadingOverlay");
+const loadingCancelButton = document.querySelector("#loadingCancelButton");
 const applyReport = document.querySelector("#applyReport");
 const LAST_DUMP_ROOT_KEY = "atoz:lastDumpRoot";
 
 let lastTargets = [];
 let lastPreviewApprovalAuthor = "";
+let activeRequest = null;
 const excludedPaths = new Set();
 
 function escapeHtml(value) {
@@ -46,11 +48,50 @@ function setLoading(isLoading) {
   applyButton.disabled = isLoading;
   previewButton.classList.toggle("is-loading", isLoading);
   applyButton.classList.toggle("is-loading", isLoading);
+  if (loadingCancelButton) loadingCancelButton.disabled = !isLoading;
+}
+
+function beginCancelableRequest() {
+  if (activeRequest) activeRequest.controller.abort();
+  activeRequest = {
+    controller: new AbortController(),
+    requestId: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  };
+  return activeRequest;
+}
+
+function endCancelableRequest(request) {
+  if (activeRequest === request) activeRequest = null;
+}
+
+function isAbortError(error) {
+  return error?.name === "AbortError";
+}
+
+function markRequestCanceled() {
+  setBadge("취소됨", "");
+  resultMeta.textContent = "작업을 취소했습니다. 파일을 다시 선택한 뒤 실행할 수 있습니다.";
+}
+
+function sendCancelRequest(request) {
+  if (!request?.requestId) return;
+  fetch("/api/cancel-request", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ request_id: request.requestId }),
+    keepalive: true,
+  }).catch(() => {});
+}
+
+function buildRequestFormData(request) {
+  const body = buildFormData();
+  if (request?.requestId) body.append("request_id", request.requestId);
+  return body;
 }
 
 function updateFileLabels() {
-  wbsName.textContent = wbsFile.files.length ? wbsFile.files[0].name : "필수 선택 · .xlsx, .xlsm";
-  standardName.textContent = standardFile.files.length ? standardFile.files[0].name : "필수 선택 · .pdf, .hwp, .hwpx";
+  wbsName.textContent = wbsFile.files.length ? wbsFile.files[0].name : ".xlsx, .xlsm";
+  standardName.textContent = standardFile.files.length ? standardFile.files[0].name : ".pdf, .hwp, .hwpx";
   if (!documentFiles.files.length) {
     folderName.textContent = "직접 업로드할 때 선택";
     return;
@@ -245,9 +286,10 @@ async function requestPreview() {
   setLoading(true);
   setBadge("확인 중", "busy");
   applyReport.hidden = true;
+  const request = beginCancelableRequest();
   try {
     validateRequiredInputs();
-    const response = await fetch("/api/metadata-preview", { method: "POST", body: buildFormData() });
+    const response = await fetch("/api/metadata-preview", { method: "POST", body: buildRequestFormData(request), signal: request.controller.signal });
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || "미리보기에 실패했습니다.");
     lastTargets = data.targets || [];
@@ -256,9 +298,14 @@ async function requestPreview() {
     renderTargets();
     setBadge("완료", "done");
   } catch (error) {
+    if (isAbortError(error)) {
+      markRequestCanceled();
+      return;
+    }
     setBadge("오류", "error");
     resultMeta.textContent = error.message;
   } finally {
+    endCancelableRequest(request);
     setLoading(false);
   }
 }
@@ -270,9 +317,10 @@ async function requestApply() {
   }
   setLoading(true);
   setBadge("반영 중", "busy");
+  const request = beginCancelableRequest();
   try {
     validateRequiredInputs();
-    const response = await fetch("/api/metadata-apply", { method: "POST", body: buildFormData() });
+    const response = await fetch("/api/metadata-apply", { method: "POST", body: buildRequestFormData(request), signal: request.controller.signal });
     const data = await response.json();
     if (!response.ok || !data.ok) {
       renderApplyReport(data);
@@ -284,6 +332,8 @@ async function requestApply() {
     setBadge("확인 필요", "error");
     resultMeta.textContent = error.message;
   } finally {
+    if (request.controller.signal.aborted) markRequestCanceled();
+    endCancelableRequest(request);
     setLoading(false);
   }
 }
@@ -297,6 +347,10 @@ form.addEventListener("submit", (event) => {
   requestPreview();
 });
 applyButton.addEventListener("click", requestApply);
+loadingCancelButton?.addEventListener("click", () => {
+  sendCancelRequest(activeRequest);
+  activeRequest?.controller.abort();
+});
 
 function initializeDumpRootInput() {
   const params = new URLSearchParams(window.location.search);

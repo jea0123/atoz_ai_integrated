@@ -27,6 +27,67 @@
   font-size: 14px;
 }
 
+.metadata-folder-source {
+  display: grid;
+  gap: 12px;
+  margin: 0 14px;
+  padding: 12px;
+  border: 1px solid #d7e1ee;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.metadata-folder-source-head {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.metadata-folder-source-head strong {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.metadata-folder-source-head span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.metadata-folder-source .field {
+  margin: 0;
+}
+
+.metadata-auto-source {
+  gap: 8px;
+}
+
+.metadata-folder-section-title {
+  margin: 0;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.metadata-alternate-source {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  border-top: 1px solid #e6edf5;
+  padding-top: 12px;
+}
+
+.drop-zone.folder.metadata-source-folder {
+  margin: 0;
+  border-color: var(--line);
+  background: #ffffff;
+}
+
+.drop-zone.folder.metadata-source-folder .file-mark {
+  color: var(--blue-dark);
+}
+
 .metadata-table th:first-child,
 .metadata-table td:first-child {
   width: 7%;

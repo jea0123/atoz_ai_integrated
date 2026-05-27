@@ -18,6 +18,7 @@ if (header) {
     `  <nav class="app-nav-tabs" aria-label="${text("screenSelect")}" style="display:flex;align-items:center;gap:6px;">`,
     `    <a href="/check.html" style="${tabStyle(active === "check")}">${text("mappingTab")}</a>`,
     `    <a href="/metadata.html" style="${tabStyle(active === "metadata")}">${text("metadataTab")}</a>`,
+    `     <a href="/qa.html" style="${tabStyle(active === "qa")}">QA ${text("generation")}</a>`,
     `  </nav>`,
     `  <div class="status-pill" id="${escapeHeaderHtml(statusId)}">${text("standby")}</div>`,
     `</div>`,
