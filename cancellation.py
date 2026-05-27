@@ -18,16 +18,14 @@ def register_request(request_id: str) -> None:
     if not request_id:
         return
     with _lock:
-        _events[request_id] = Event()
+        _events.setdefault(request_id, Event())
 
 
 def cancel_request(request_id: str) -> bool:
     if not request_id:
         return False
     with _lock:
-        event = _events.get(request_id)
-    if event is None:
-        return False
+        event = _events.setdefault(request_id, Event())
     event.set()
     return True
 

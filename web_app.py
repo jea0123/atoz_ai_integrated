@@ -601,15 +601,32 @@ class WebHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=400)
 
+    def begin_cancelable_request(self, fields: dict[str, str]) -> tuple[str, object]:
+        request_id = str(fields.get("request_id") or "").strip() or uuid4().hex[:8]
+        register_request(request_id)
+        return request_id, cancel_checker(request_id)
+
+    def send_cancelled_json(self, request_id: str) -> None:
+        self.send_json(
+            {
+                "ok": False,
+                "cancelled": True,
+                "request_id": request_id,
+                "error": "요청이 취소되었습니다.",
+            },
+            status=499,
+        )
+
     def handle_metadata_preview_post(self) -> None:
         temp_dir: Path | None = None
+        request_id = ""
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
             content_type = self.headers.get("Content-Type", "")
             body = self.rfile.read(content_length)
             log_event("metadata.preview.post", content_length=content_length, content_type=content_type)
             fields, file_items = parse_multipart_items(content_type, body)
-            request_id = uuid4().hex[:8]
+            request_id, check_cancel = self.begin_cancelable_request(fields)
             temp_dir = TEMP_DIR / f"metadata-preview-{request_id}"
             temp_dir.mkdir(parents=True, exist_ok=True)
             if fields.get("dump_root", "").strip():
@@ -617,24 +634,30 @@ class WebHandler(BaseHTTPRequestHandler):
                 folder_root = resolve_existing_dump_root(fields.get("dump_root", ""))
             else:
                 wbs_path, standard_path, folder_root, _uploaded = save_metadata_inputs(temp_dir, file_items)
-            payload = run_metadata_preview(wbs_path, standard_path, folder_root, request_id)
+            check_cancel()
+            payload = run_metadata_preview(wbs_path, standard_path, folder_root, request_id, cancel_check=check_cancel)
             self.send_json(payload)
+        except CancelledRequest as exc:
+            log_event("metadata.preview.cancelled", request_id=exc.request_id)
+            self.send_cancelled_json(exc.request_id)
         except Exception as exc:
             log_event("metadata.preview.error", error=str(exc), traceback=traceback.format_exc())
             self.send_json({"ok": False, "error": str(exc), "targets": []}, status=400)
         finally:
+            unregister_request(request_id)
             if temp_dir is not None:
                 remove_runtime_path(temp_dir)
 
     def handle_metadata_apply_post(self) -> None:
         temp_dir: Path | None = None
+        request_id = ""
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
             content_type = self.headers.get("Content-Type", "")
             body = self.rfile.read(content_length)
             log_event("metadata.apply.post", content_length=content_length, content_type=content_type)
             fields, file_items = parse_multipart_items(content_type, body)
-            request_id = uuid4().hex[:8]
+            request_id, check_cancel = self.begin_cancelable_request(fields)
             temp_dir = TEMP_DIR / f"metadata-apply-{request_id}"
             temp_dir.mkdir(parents=True, exist_ok=True)
             if fields.get("dump_root", "").strip():
@@ -647,6 +670,7 @@ class WebHandler(BaseHTTPRequestHandler):
                     request_id,
                     split_excluded_paths(fields.get("excluded_paths", "")),
                     temp_parent=temp_dir,
+                    cancel_check=check_cancel,
                 )
             else:
                 wbs_path, standard_path, folder_root, _uploaded = save_metadata_inputs(temp_dir, file_items)
@@ -656,13 +680,19 @@ class WebHandler(BaseHTTPRequestHandler):
                     folder_root,
                     request_id,
                     split_excluded_paths(fields.get("excluded_paths", "")),
+                    cancel_check=check_cancel,
                 )
             attach_folder_zip_download(payload, prefix="메타데이터_결과")
+            check_cancel()
             self.send_json(payload, status=200 if payload.get("ok") else 400)
+        except CancelledRequest as exc:
+            log_event("metadata.apply.cancelled", request_id=exc.request_id)
+            self.send_cancelled_json(exc.request_id)
         except Exception as exc:
             log_event("metadata.apply.error", error=str(exc), traceback=traceback.format_exc())
             self.send_json({"ok": False, "error": str(exc), "apply_items": []}, status=400)
         finally:
+            unregister_request(request_id)
             if temp_dir is not None:
                 remove_runtime_path(temp_dir)
 
@@ -705,6 +735,7 @@ class WebHandler(BaseHTTPRequestHandler):
         """
         temp_dir: Path | None = None
         preserve_temp_dir = False
+        request_id = ""
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
             content_type = self.headers.get("Content-Type", "")
@@ -713,7 +744,7 @@ class WebHandler(BaseHTTPRequestHandler):
             fields, file_items = parse_multipart_items(content_type, body)
             model_name, ollama_url = runtime_ai_settings(fields)
 
-            request_id = uuid4().hex[:8]
+            request_id, check_cancel = self.begin_cancelable_request(fields)
             temp_dir = TEMP_DIR / f"qa-tc-{request_id}"
             temp_dir.mkdir(parents=True, exist_ok=True)
             output_dir = temp_dir / "output"
@@ -743,6 +774,7 @@ class WebHandler(BaseHTTPRequestHandler):
             total_count = 0
 
             for index, (pdf_filename, pdf_payload) in enumerate(ui_pdf_items, start=1):
+                check_cancel()
                 source_name = pdf_filename or f"ui_pdf_{index}.pdf"
                 pdf_path: Path | None = None
                 pdf_output_dir: Path | None = None
@@ -760,6 +792,7 @@ class WebHandler(BaseHTTPRequestHandler):
                     pdf_path = temp_dir / f"ui_pdf_{index}_{safe_pdf_name}"
                     pdf_path.write_bytes(pdf_payload)
                     analysis = analyze_tc_pdf(pdf_path, source_name, model_name, ollama_url)
+                    check_cancel()
                     extracted_text = None
                     screen_blocks = None
                     if isinstance(analysis, dict):
@@ -781,7 +814,9 @@ class WebHandler(BaseHTTPRequestHandler):
                         template_path=template_hwpx_path,
                         extracted_text=extracted_text,
                         screen_blocks=screen_blocks,
+                        cancel_check=check_cancel,
                     )
+                    check_cancel()
 
                     item_count = int(item_payload.get("count") or 0)
                     total_count += item_count
@@ -814,6 +849,8 @@ class WebHandler(BaseHTTPRequestHandler):
                             "analysis": analysis,
                         }
                     )
+                except CancelledRequest:
+                    raise
                 except Exception as exc:
                     source_results.append(
                         {
@@ -861,17 +898,23 @@ class WebHandler(BaseHTTPRequestHandler):
                 failed_count=payload.get("failed_count"),
                 file_count=len(payload.get("download_files") or []),
             )
+            check_cancel()
             self.send_json(payload, status=200 if payload.get("ok") else 400)
 
+        except CancelledRequest as exc:
+            log_event("qa.tc.cancelled", request_id=exc.request_id)
+            self.send_cancelled_json(exc.request_id)
         except Exception as exc:
             log_event("qa.tc.error", error=str(exc), traceback=traceback.format_exc())
             self.send_json({"ok": False, "error": str(exc), "files": []}, status=400)
         finally:
+            unregister_request(request_id)
             if temp_dir is not None and not preserve_temp_dir:
                 remove_runtime_path(temp_dir)
 
     def handle_run_qa_folder_post(self) -> None:
         # check.html의 결과 폴더를 기준으로 TC/TS 생성과 기존 파일 교체를 한 번에 실행한다.
+        request_id = ""
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
             content_type = self.headers.get("Content-Type", "")
@@ -885,7 +928,7 @@ class WebHandler(BaseHTTPRequestHandler):
             if not dump_root_value:
                 raise ValueError("check 결과 폴더 경로를 입력하세요.")
             model_name, ollama_url = runtime_ai_settings(fields)
-            request_id = uuid4().hex[:8]
+            request_id, check_cancel = self.begin_cancelable_request(fields)
 
             payload = run_folder_qa_pipeline(
                 Path(dump_root_value),
@@ -902,14 +945,21 @@ class WebHandler(BaseHTTPRequestHandler):
                 ts_source_root=Path(fields.get("ts_source_root", "")) if fields.get("ts_source_root") else None,
                 integration_result_root=Path(fields.get("integration_result_root", "")) if fields.get("integration_result_root") else None,
                 request_id=request_id,
+                cancel_check=check_cancel,
             )
+            check_cancel()
             self.send_json(payload, status=200 if payload.get("ok") else 400)
+        except CancelledRequest as exc:
+            log_event("qa.folder.post.cancelled", request_id=exc.request_id)
+            self.send_cancelled_json(exc.request_id)
         except QaFolderMatchingError as exc:
             log_event("qa.folder.post.matching_error", error=str(exc), payload=exc.payload)
             self.send_json(exc.payload, status=400)
         except Exception as exc:
             log_event("qa.folder.post.error", error=str(exc), traceback=traceback.format_exc())
             self.send_json({"ok": False, "error": str(exc), "files": []}, status=400)
+        finally:
+            unregister_request(request_id)
 
     def handle_generate_ts_post(self) -> None:
         # 통합시험 시나리오 생성 요청을 처리한다.
@@ -920,6 +970,7 @@ class WebHandler(BaseHTTPRequestHandler):
         """
         temp_dir: Path | None = None
         preserve_temp_dir = False
+        request_id = ""
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
             content_type = self.headers.get("Content-Type", "")
@@ -931,7 +982,7 @@ class WebHandler(BaseHTTPRequestHandler):
             except Exception:
                 model_name, ollama_url = "", ""
 
-            request_id = uuid4().hex[:8]
+            request_id, check_cancel = self.begin_cancelable_request(fields)
             temp_dir = TEMP_DIR / f"qa-ts-{request_id}"
             temp_dir.mkdir(parents=True, exist_ok=True)
             output_dir = temp_dir / "output"
@@ -972,19 +1023,23 @@ class WebHandler(BaseHTTPRequestHandler):
             pre_errors: list[dict[str, object]] = []
 
             for item in tc_items:
+                check_cancel()
                 try:
                     analyzed_tcs.append(analyze_ts_tc_file(item))
                 except Exception as exc:
                     pre_errors.append({"file": item.get("name"), "kind": "tc", "error": str(exc)})
 
             for item in ui_items:
+                check_cancel()
                 try:
                     analyzed_uis.append(analyze_ts_ui_file(item))
                 except Exception as exc:
                     pre_errors.append({"file": item.get("name"), "kind": "ui", "error": str(exc)})
 
             rule_matches, unmatched_tcs, unmatched_uis = rule_match_ts_sets(analyzed_tcs, analyzed_uis)
+            check_cancel()
             ai_matching = ai_refine_ts_sets(rule_matches, unmatched_tcs, unmatched_uis, model_name, ollama_url)
+            check_cancel()
 
             matches = list(rule_matches)
             matched_tc_names = {str(match["tc"].get("name") or "") for match in matches}
@@ -1019,6 +1074,7 @@ class WebHandler(BaseHTTPRequestHandler):
             total_count = 0
 
             for index, match in enumerate(matches, start=1):
+                check_cancel()
                 tc_item = match["tc"]
                 ui_item = match["ui"]
                 set_stem = str(tc_item.get("stem") or Path(str(tc_item.get("name") or f"set_{index}")).stem)
@@ -1034,7 +1090,9 @@ class WebHandler(BaseHTTPRequestHandler):
                         req_mapping=ui_item.get("req_mapping") if isinstance(ui_item.get("req_mapping"), dict) else None,
                         unit_test_data=tc_item.get("unit_test_data") if isinstance(tc_item.get("unit_test_data"), list) else None,
                         log_progress=index == 1,
+                        cancel_check=check_cancel,
                     )
+                    check_cancel()
                     item_count = int(item_payload.get("count") or 0)
                     total_count += item_count
                     item_files = item_payload.get("files") if isinstance(item_payload.get("files"), list) else []
@@ -1072,6 +1130,8 @@ class WebHandler(BaseHTTPRequestHandler):
                             },
                         }
                     )
+                except CancelledRequest:
+                    raise
                 except Exception as exc:
                     source_results.append(
                         {
@@ -1172,6 +1232,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 payload["error"] = "생성 가능한 통합시험 시나리오 세트를 찾지 못했습니다."
             payload["request_id"] = request_id
             attach_file_downloads(payload, delete_after_download=True, cleanup_root=temp_dir)
+            check_cancel()
             preserve_temp_dir = bool(payload.get("download_files"))
             remove_runtime_path(template_xlsx_path)
             for item in [*tc_items, *ui_items]:
@@ -1188,10 +1249,14 @@ class WebHandler(BaseHTTPRequestHandler):
             )
             self.send_json(payload, status=200 if payload.get("ok") else 400)
 
+        except CancelledRequest as exc:
+            log_event("qa.ts.cancelled", request_id=exc.request_id)
+            self.send_cancelled_json(exc.request_id)
         except Exception as exc:
             log_event("qa.ts.error", error=str(exc), traceback=traceback.format_exc())
             self.send_json({"ok": False, "error": str(exc), "files": []}, status=400)
         finally:
+            unregister_request(request_id)
             if temp_dir is not None and not preserve_temp_dir:
                 remove_runtime_path(temp_dir)
 
