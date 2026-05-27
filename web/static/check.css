@@ -1026,6 +1026,29 @@ h2 {
   line-height: 1.45;
 }
 
+.loading-cancel-button {
+  height: 34px;
+  margin-top: 4px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #334155;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 800;
+  padding: 0 16px;
+}
+
+.loading-cancel-button:hover {
+  border-color: #94a3b8;
+  background: #f8fafc;
+}
+
+.loading-cancel-button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
 .loader {
   width: 34px;
   height: 34px;
@@ -1241,7 +1264,7 @@ body {
 }
 
 .secondary-button {
-  margin: 0 14px 14px;
+  margin: 0 14px 22px;
   background: #f8fbff;
 }
 

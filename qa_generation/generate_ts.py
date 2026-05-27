@@ -1,27 +1,33 @@
 import os
 from pathlib import Path
+import fitz
 import re
 import copy
 import openpyxl
+from typing import Callable
 from openpyxl.styles import Alignment, Border, Side
-from document_update.hwpx_text import extract_document_text
+
+
+def _check_cancel(cancel_check: Callable[[], None] | None) -> None:
+  if cancel_check:
+    cancel_check()
 
 def extract_text_from_pdf(pdf_path):
-  return extract_text_from_design_document(pdf_path)
+  if not os.path.exists(pdf_path):
+    raise FileNotFoundError(f"PDF 파일을 찾을 수 없습니다: {pdf_path}")
+  
+  print(f"\n*** 사용자인터페이스설계서에서 텍스트 추출 중: {pdf_path}")
+  text_content = ""
+  with fitz.open(pdf_path) as doc:
+    for page_num in range(len(doc)):
+      page = doc.load_page(page_num)
+      text_content += page.get_text()
 
-def extract_text_from_design_document(document_path):
-  if not os.path.exists(document_path):
-    raise FileNotFoundError(f"사용자인터페이스설계서 파일을 찾을 수 없습니다: {document_path}")
-
-  print(f"\n*** 사용자인터페이스설계서에서 텍스트 추출 중: {document_path}")
-  return extract_document_text(Path(document_path)).strip()
+  return text_content.strip()
 
 def extract_req_mapping_from_pdf(pdf_path):
-  return extract_req_mapping_from_design_document(pdf_path)
-
-def extract_req_mapping_from_design_document(document_path):
   """사용자인터페이스설계서 PDF에서 {화면ID: 요구사항ID} 매핑을 만든다."""
-  text = extract_text_from_design_document(document_path)
+  text = extract_text_from_pdf(pdf_path)
   mapping = {}
 
   normalized = re.sub(r'[ \t]+', ' ', text)
@@ -128,13 +134,50 @@ def extract_scenario_case_name(title, unit_test_name):
     return unit_test_name.strip()
   return ""
 
-def build_test_scenarios_from_unit_tests(unit_test_data, log_progress=True):
+def normalize_label(value):
+  return re.sub(r"\s+", "", str(value or ""))
+
+def extract_cover_author_from_workbook(workbook_path):
+  try:
+    wb = openpyxl.load_workbook(workbook_path, data_only=True)
+  except Exception:
+    return ""
+
+  try:
+    cover_sheets = [ws for ws in wb.worksheets if "표지" in ws.title]
+    for ws in cover_sheets:
+      for row in ws.iter_rows():
+        cells = list(row)
+        for index, cell in enumerate(cells):
+          if normalize_label(cell.value) != "작성자":
+            continue
+          for next_cell in cells[index + 1:]:
+            if next_cell.value not in (None, ""):
+              return str(next_cell.value).strip()
+
+    for ws in wb.worksheets:
+      for row in ws.iter_rows():
+        cells = list(row)
+        for cell in cells:
+          if normalize_label(cell.value) != "작성자":
+            continue
+          for next_row in range(cell.row + 1, min(cell.row + 6, ws.max_row) + 1):
+            value = ws.cell(row=next_row, column=cell.column).value
+            if value not in (None, ""):
+              return str(value).strip()
+  finally:
+    wb.close()
+
+  return ""
+
+def build_test_scenarios_from_unit_tests(unit_test_data, author=""):
   scenarios = []
   sequence_by_scenario = {}
   scenario_name_by_id = {}
 
-  if log_progress:
-    print("[통합시험 시나리오] 단위시험 데이터 기반 변환 중...")
+  if unit_test_data:
+    print(f"[통합시험 시나리오] 단위시험 데이터 {len(unit_test_data)}건 변환 중...")
+
   for row in unit_test_data:
     screen_id = row.get("화면_ID", "")
     scenario_id = build_scenario_id(screen_id)
@@ -147,7 +190,7 @@ def build_test_scenarios_from_unit_tests(unit_test_data, log_progress=True):
 
     scenarios.append({
       "시스템": "",
-      "작성자": "",
+      "작성자": author,
       "테스트_기간": "",
       "시나리오ID": scenario_id,
       "시나리오명": scenario_name,
@@ -194,15 +237,7 @@ def copy_worksheet_template(source_ws, target_ws):
         new_cell.protection = copy.copy(cell.protection)
         new_cell.alignment = copy.copy(cell.alignment)
 
-def save_test_scenarios_to_excel(
-    test_scenarios,
-    base_workbook_path,
-    output_dir: Path,
-    scenario_sheet_form_path,
-    base_filename="generated_TS",
-    log_loads=True,
-    log_save=True,
-):
+def save_test_scenarios_to_excel(test_scenarios, base_workbook_path, output_dir: Path, scenario_sheet_form_path, base_filename="generated_TS"):
   if not test_scenarios:
     print("저장할 데이터가 없습니다.")
     return
@@ -230,12 +265,10 @@ def save_test_scenarios_to_excel(
       break
     counter += 1
 
-  if log_loads:
-    print(f"기존 파일 로드 중: {base_workbook_path}")
+  print(f"기존 파일 로드 중: {base_workbook_path}")
   wb = openpyxl.load_workbook(base_workbook_path)
 
-  if log_loads:
-    print(f"외부 표준 양식 로드 중: {scenario_sheet_form_path}")
+  print(f"외부 표준 양식 로드 중: {scenario_sheet_form_path}")
   form_wb = openpyxl.load_workbook(scenario_sheet_form_path)
   source_ws = form_wb.active
 
@@ -285,6 +318,7 @@ def save_test_scenarios_to_excel(
 
     # 상단 메타 정보 입력
     new_ws['B2'] = common.get("시스템", "")
+    new_ws['F2'] = common.get("작성자", "")
     new_ws['B4'] = common.get("시나리오ID", "")
     new_ws['F4'] = common.get("시나리오명", "")
     new_ws['I4'] = common.get("요구사항_ID", "")
@@ -325,8 +359,121 @@ def save_test_scenarios_to_excel(
         cell.alignment = align
 
   wb.save(full_path)
-  if log_save:
-    print(f"통합시험 시나리오 저장 완료: {full_path.resolve()}")
+  print(f"통합시험 시나리오 저장 완료: {full_path.resolve()}")
+  return full_path
+
+def find_workbook_section_indices(wb):
+  start_idx = -1
+  end_idx = -1
+  for i, name in enumerate(wb.sheetnames):
+    if "개정이력" in name:
+      start_idx = i
+    elif "작성방법" in name:
+      end_idx = i
+  return start_idx, end_idx
+
+def save_integration_test_results_to_excel(test_scenarios, base_workbook_path, output_dir: Path, result_sheet_form_path, base_filename="generated_TR"):
+  if not test_scenarios:
+    print("저장할 데이터가 없습니다.")
+    return
+
+  base_workbook_path = Path(base_workbook_path)
+  output_dir = Path(output_dir)
+  result_sheet_form_path = Path(result_sheet_form_path)
+
+  if not base_workbook_path.exists():
+    print(f"업로드된 기존 통합시험 결과서 파일을 찾을 수 없습니다: {base_workbook_path}")
+    return
+
+  if not result_sheet_form_path.exists():
+    print(f"서버에 통합시험 결과서 표준 양식 파일({result_sheet_form_path})이 없습니다.")
+    return
+
+  output_dir.mkdir(parents=True, exist_ok=True)
+
+  counter = 1
+  while True:
+    output_filename = f"{base_filename}_{counter}.xlsx"
+    full_path = output_dir / output_filename
+    if not full_path.exists():
+      break
+    counter += 1
+
+  print(f"기존 통합시험 결과서 파일 로드 중: {base_workbook_path}")
+  wb = openpyxl.load_workbook(base_workbook_path)
+
+  print(f"외부 통합시험 결과서 표준 양식 로드 중: {result_sheet_form_path}")
+  form_wb = openpyxl.load_workbook(result_sheet_form_path)
+  source_ws = form_wb.active
+
+  start_idx, end_idx = find_workbook_section_indices(wb)
+  sheet_names = wb.sheetnames
+  if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
+    sheets_to_remove = sheet_names[start_idx + 1 : end_idx]
+    for sheet_name in sheets_to_remove:
+      del wb[sheet_name]
+    insert_idx = start_idx + 1
+  else:
+    insert_idx = 1
+
+  border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+  center_align = Alignment(horizontal="center", vertical="center")
+  left_align = Alignment(horizontal="left", vertical="center", wrap_text=True)
+  max_result_column = max(source_ws.max_column, 13)
+
+  grouped = {}
+  for ts in test_scenarios:
+    ts_id = ts.get("시나리오ID", "미분류")
+    if ts_id not in grouped:
+      grouped[ts_id] = []
+    grouped[ts_id].append(ts)
+
+  for ts_id, group in grouped.items():
+    sheet_title = str(ts_id)[:31]
+    new_ws = wb.create_sheet(title=sheet_title, index=insert_idx)
+    insert_idx += 1
+
+    copy_worksheet_template(source_ws, new_ws)
+    common = group[0]
+
+    new_ws['B2'] = common.get("시스템", "")
+    new_ws['F2'] = common.get("작성자", "")
+    new_ws['B4'] = common.get("시나리오ID", "")
+    new_ws['F4'] = common.get("시나리오명", "")
+    new_ws['I4'] = common.get("요구사항_ID", "")
+
+    for i, ts in enumerate(group):
+      r = 7 + i
+
+      new_ws.cell(row=r, column=1, value=ts.get("케이스명", ""))
+      new_ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=2)
+
+      data_mapping = [
+        (3, i + 1, center_align),
+        (4, ts.get("업무처리내용", ""), left_align),
+        (5, ts.get("시험항목", ""), left_align),
+        (6, ts.get("사전조건", ""), left_align),
+        (7, "", left_align),
+        (8, ts.get("예상결과", ""), left_align),
+        (9, ts.get("화면ID", ""), left_align),
+      ]
+
+      for col in range(1, max_result_column + 1):
+        cell = new_ws.cell(row=r, column=col)
+        cell.border = border
+        reference_font = new_ws.cell(row=7, column=col).font
+        if reference_font:
+          cell.font = copy.copy(reference_font)
+        if col in [1, 2, 3]:
+          cell.alignment = center_align
+
+      for col, val, align in data_mapping:
+        cell = new_ws.cell(row=r, column=col, value=str(val) if val else "")
+        cell.alignment = align
+
+  form_wb.close()
+  wb.save(full_path)
+  print(f"통합시험 결과서 저장 완료: {full_path.resolve()}")
   return full_path
 
 def generate_test_scenarios(
@@ -335,10 +482,9 @@ def generate_test_scenarios(
     ui_pdf_path: Path | None,
     output_dir: Path,
     form_path: Path,
-    req_mapping: dict | None = None,
-    unit_test_data: list | None = None,
-    log_progress: bool = True,
+    cancel_check: Callable[[], None] | None = None,
 ) -> dict:
+    _check_cancel(cancel_check)
     template_xlsx_path = Path(template_xlsx_path)
     tc_xlsx_path = Path(tc_xlsx_path)
     output_dir = Path(output_dir)
@@ -346,15 +492,18 @@ def generate_test_scenarios(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if req_mapping is None:
-      req_mapping = {}
-    if not req_mapping and ui_pdf_path:
+    cover_author = extract_cover_author_from_workbook(template_xlsx_path)
+    _check_cancel(cancel_check)
+    _check_cancel(cancel_check)
+    req_mapping = {}
+    if ui_pdf_path:
         ui_pdf_path = Path(ui_pdf_path)
         if ui_pdf_path.exists():
             req_mapping = extract_req_mapping_from_pdf(ui_pdf_path)
+            _check_cancel(cancel_check)
 
-    if unit_test_data is None:
-      unit_test_data = extract_unit_test_from_excel(tc_xlsx_path)
+    unit_test_data = extract_unit_test_from_excel(tc_xlsx_path)
+    _check_cancel(cancel_check)
     if not unit_test_data:
         return {
             "ok": False,
@@ -381,7 +530,8 @@ def generate_test_scenarios(
         screen_id = data.get("화면_ID", "").strip()
         data["요구사항_ID"] = req_mapping.get(screen_id, "")
 
-    ts_result = build_test_scenarios_from_unit_tests(unit_test_data, log_progress=log_progress)
+    ts_result = build_test_scenarios_from_unit_tests(unit_test_data, author=cover_author)
+    _check_cancel(cancel_check)
 
     if not ts_result:
         return {
@@ -395,9 +545,8 @@ def generate_test_scenarios(
         base_workbook_path=template_xlsx_path,
         output_dir=output_dir,
         scenario_sheet_form_path=form_path,
-        log_loads=log_progress,
-        log_save=log_progress,
     )
+    _check_cancel(cancel_check)
 
     files = []
     if excel_path:
@@ -410,5 +559,87 @@ def generate_test_scenarios(
     return {
         "ok": True,
         "count": len(ts_result),
+        "files": files,
+    }
+
+def generate_integration_test_results(
+    template_xlsx_path: Path,
+    tc_xlsx_path: Path,
+    ui_pdf_path: Path | None,
+    output_dir: Path,
+    form_path: Path,
+    cancel_check: Callable[[], None] | None = None,
+) -> dict:
+    _check_cancel(cancel_check)
+    template_xlsx_path = Path(template_xlsx_path)
+    tc_xlsx_path = Path(tc_xlsx_path)
+    output_dir = Path(output_dir)
+    form_path = Path(form_path)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    cover_author = extract_cover_author_from_workbook(template_xlsx_path)
+    req_mapping = {}
+    if ui_pdf_path:
+        ui_pdf_path = Path(ui_pdf_path)
+        if ui_pdf_path.exists():
+            req_mapping = extract_req_mapping_from_pdf(ui_pdf_path)
+            _check_cancel(cancel_check)
+
+    unit_test_data = extract_unit_test_from_excel(tc_xlsx_path)
+    _check_cancel(cancel_check)
+    if not unit_test_data:
+        return {
+            "ok": False,
+            "error": "단위시험 케이스 엑셀에서 데이터를 찾지 못했습니다.",
+            "files": [],
+        }
+
+    missing_req_screen_ids = sorted({
+        str(data.get("화면_ID", "")).strip()
+        for data in unit_test_data
+        if str(data.get("화면_ID", "")).strip()
+        and str(data.get("화면_ID", "")).strip() not in req_mapping
+    })
+    if missing_req_screen_ids:
+        return {
+            "ok": False,
+            "error": "사용자인터페이스설계서에서 화면 ID에 해당하는 요구사항 ID를 찾지 못했습니다.",
+            "missing_screen_ids": missing_req_screen_ids[:10],
+            "missing_screen_count": len(missing_req_screen_ids),
+            "files": [],
+        }
+
+    for data in unit_test_data:
+        _check_cancel(cancel_check)
+        screen_id = data.get("화면_ID", "").strip()
+        data["요구사항_ID"] = req_mapping.get(screen_id, "")
+
+    result_rows = build_test_scenarios_from_unit_tests(unit_test_data, author=cover_author)
+    if not result_rows:
+        return {
+            "ok": False,
+            "error": "통합시험 결과서로 변환할 수 있는 단위시험 케이스 데이터가 없습니다.",
+            "files": [],
+        }
+
+    excel_path = save_integration_test_results_to_excel(
+        result_rows,
+        base_workbook_path=template_xlsx_path,
+        output_dir=output_dir,
+        result_sheet_form_path=form_path,
+    )
+
+    files = []
+    if excel_path:
+        files.append({
+            "kind": "xlsx",
+            "path": str(excel_path),
+            "name": excel_path.name,
+        })
+
+    return {
+        "ok": True,
+        "count": len(result_rows),
         "files": files,
     }

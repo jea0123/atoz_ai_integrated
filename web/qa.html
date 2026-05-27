@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>테스트 케이스/시나리오 생성</title>
-  <link rel="stylesheet" href="/static/qa.css?v=20260519-ts-focused-ui">
+  <link rel="stylesheet" href="/static/qa.css?v=20260526-cancel">
 </head>
 <body class="qa-page">
   <main class="app-shell">
@@ -19,101 +19,134 @@
       ></header>
 
       <section class="layout qa-layout">
-        <aside class="control-panel qa-controls">
-          <div class="panel-head">
-            <h2>작업</h2>
-            <span id="runtimeMode">실행 모드 확인 중</span>
-          </div>
+        <aside class="qa-sidebar qa-controls">
+          <section class="control-panel qa-input-card">
+            <div class="panel-head">
+              <h2>입력</h2>
+            </div>
 
-          <form id="folderQaForm" class="folder-qa-form">
-            <label class="field" for="qaDumpRoot">
-              <span>check 결과 폴더</span>
-              <input id="qaDumpRoot" name="dump_root" type="text" autocomplete="off" placeholder="결과 폴더 경로">
-            </label>
-            <label class="field" for="qaSourceRoot">
-              <span>QA 원천 폴더 경로</span>
-              <input id="qaSourceRoot" name="qa_source_root" type="text" autocomplete="off" placeholder="세 문서가 함께 있는 폴더 경로">
-            </label>
-            <label class="drop-zone compact" for="qaSourceFiles">
-              <input id="qaSourceFiles" name="qa_source_files" type="file" accept=".hwp,.hwpx,.pdf,.xlsx" webkitdirectory directory multiple>
-              <span class="file-mark">ALL</span>
-              <strong>QA 원천 폴더 선택</strong>
-              <small data-file-label="qaSourceFiles">화면/단위/통합 문서 일괄 업로드</small>
-            </label>
-            <section class="selected-folder-preview" id="qaSourcePreview" aria-live="polite" hidden></section>
-            <label class="field" for="uiDesignRoot">
-              <span>화면설계서 폴더 경로</span>
-              <input id="uiDesignRoot" name="ui_design_root" type="text" autocomplete="off" placeholder="직접 경로 입력 또는 아래 폴더 선택">
-            </label>
-            <label class="field" for="tcSourceRoot">
-              <span>단위시험 폴더 경로</span>
-              <input id="tcSourceRoot" name="tc_source_root" type="text" autocomplete="off" placeholder="선택 입력">
-            </label>
-            <label class="field" for="tsSourceRoot">
-              <span>통합시험 폴더 경로</span>
-              <input id="tsSourceRoot" name="ts_source_root" type="text" autocomplete="off" placeholder="선택 입력">
-            </label>
-            <label class="drop-zone compact" for="uiDesignFiles">
-              <input id="uiDesignFiles" name="ui_design_files" type="file" accept=".hwp,.hwpx,.pdf" webkitdirectory directory multiple>
-              <span class="file-mark">DIR</span>
-              <strong>화면설계서 폴더 선택</strong>
-              <small data-file-label="uiDesignFiles">하위 HWP/HWPX/PDF 일괄 업로드</small>
-            </label>
-            <section class="selected-folder-preview" id="uiDesignPreview" aria-live="polite" hidden></section>
-            <button class="secondary-button" id="folderQaButton" type="submit">결과폴더 QA 생성</button>
-          </form>
+            <form id="folderQaForm" class="folder-qa-form">
+              <section class="folder-source-group" aria-labelledby="folderSourceTitle">
+                <div class="folder-source-head">
+                  <strong id="folderSourceTitle">기준 폴더</strong>
+                  <span>산출물 매핑 결과 폴더를 기본으로 사용합니다.</span>
+                </div>
+                <label class="field auto-source" for="qaDumpRoot">
+                  <span class="field-title">
+                    산출물 매핑 결과 폴더
+                  </span>
+                  <input id="qaDumpRoot" name="dump_root" type="text" autocomplete="off" placeholder="산출물 매핑 결과 폴더가 자동으로 지정됩니다">
+                </label>
+                <div class="alternate-source-group" aria-labelledby="alternateSourceTitle">
+                  <div class="folder-section-title" id="alternateSourceTitle">다른 폴더를 사용할 경우</div>
+                  <label class="drop-zone optional-source" for="qaSourceFiles">
+                    <input id="qaSourceFiles" name="qa_source_files" type="file" accept=".hwp,.hwpx,.pdf,.xlsx" webkitdirectory directory multiple>
+                    <span class="file-mark">DIR</span>
+                    <strong>
+                      산출물 폴더
+                    </strong>
+                    <small data-file-label="qaSourceFiles">직접 업로드할 때 선택</small>
+                  </label>
+                </div>
+                <p class="folder-input-note">
+                  <strong>대상 문서</strong>
+                  <span class="target-document-list">
+                    <span>사용자인터페이스설계서</span>
+                    <span>단위시험케이스</span>
+                    <span>단위시험결과서</span>
+                    <span>통합시험시나리오</span>
+                    <span>통합시험결과서</span>
+                  </span>
+                </p>
+              </section>
+              <section class="selected-folder-preview" id="qaSourcePreview" aria-live="polite" hidden></section>
+              <details class="advanced-folder-inputs">
+                <summary>문서별 위치 따로 지정</summary>
+                <div class="advanced-folder-inputs-body">
+                  <p>문서가 서로 다른 위치에 있을 때만 사용하세요.</p>
+                  <label class="field" for="uiDesignRoot">
+                    <span>화면설계서 폴더 경로</span>
+                    <input id="uiDesignRoot" name="ui_design_root" type="text" autocomplete="off" placeholder="화면설계서 폴더 경로">
+                  </label>
+                  <label class="field" for="tcSourceRoot">
+                    <span>단위시험케이스 폴더 경로</span>
+                    <input id="tcSourceRoot" name="tc_source_root" type="text" autocomplete="off" placeholder="단위시험케이스 폴더 경로">
+                  </label>
+                  <label class="field" for="unitResultRoot">
+                    <span>단위시험결과서 폴더 경로</span>
+                    <input id="unitResultRoot" name="unit_result_root" type="text" autocomplete="off" placeholder="단위시험결과서 폴더 경로">
+                  </label>
+                  <label class="field" for="tsSourceRoot">
+                    <span>통합시험시나리오 폴더 경로</span>
+                    <input id="tsSourceRoot" name="ts_source_root" type="text" autocomplete="off" placeholder="통합시험시나리오 폴더 경로">
+                  </label>
+                  <label class="field" for="integrationResultRoot">
+                    <span>통합시험결과서 폴더 경로</span>
+                    <input id="integrationResultRoot" name="integration_result_root" type="text" autocomplete="off" placeholder="통합시험결과서 폴더 경로">
+                  </label>
+                </div>
+              </details>
+              <button class="secondary-button folder-submit-button" id="folderQaButton" type="submit">
+                <span>↯</span>
+                생성 및 배치
+              </button>
+            </form>
+          </section>
 
-          <nav class="task-tabs" aria-label="작업 선택">
-            <button type="button" class="task-tab active" data-task-tab="tc">
-              <span>1단계</span>
-              <strong>단위시험 케이스</strong>
-            </button>
-            <button type="button" class="task-tab" data-task-tab="ts">
-              <span>2단계</span>
-              <strong>통합시험 시나리오</strong>
-            </button>
-          </nav>
+          <details class="individual-tools">
+            <summary>개별 생성 도구 열기</summary>
+            <div class="individual-tools-body">
+              <nav class="task-tabs" aria-label="개별 생성 작업 선택">
+                <button type="button" class="task-tab active" data-task-tab="tc">
+                  <strong>단위시험케이스</strong>
+                </button>
+                <button type="button" class="task-tab" data-task-tab="ts">
+                  <strong>통합시험시나리오</strong>
+                </button>
+              </nav>
 
-          <form id="tcForm" class="task-form active" data-task-panel="tc">
-            <label class="drop-zone" for="tcTemplateHwpx">
-              <input id="tcTemplateHwpx" name="template_hwpx" type="file" accept=".hwpx">
-              <span class="file-mark">HWPX</span>
-              <strong>기존 단위시험 케이스</strong>
-              <small data-file-label="tcTemplateHwpx">HWPX 파일 선택</small>
-            </label>
+              <form id="tcForm" class="task-form active" data-task-panel="tc">
+                <label class="drop-zone" for="tcTemplateHwpx">
+                  <input id="tcTemplateHwpx" name="template_hwpx" type="file" accept=".hwpx">
+                  <span class="file-mark">HWPX</span>
+                  <strong>기존 단위시험 케이스</strong>
+                  <small data-file-label="tcTemplateHwpx">HWPX 파일 선택</small>
+                </label>
 
-            <label class="drop-zone" for="tcUiPdf">
-              <input id="tcUiPdf" name="ui_pdf" type="file" accept=".hwp,.hwpx,.pdf" multiple>
-              <span class="file-mark">DOC</span>
-              <strong>사용자인터페이스설계서</strong>
-              <small data-file-label="tcUiPdf">파일 선택</small>
-            </label>
-            <button class="primary-button" id="tcButton" type="submit">생성</button>
-          </form>
+                <label class="drop-zone" for="tcUiPdf">
+                  <input id="tcUiPdf" name="ui_pdf" type="file" accept=".hwp,.hwpx,.pdf" multiple>
+                  <span class="file-mark">DOC</span>
+                  <strong>사용자인터페이스설계서</strong>
+                  <small data-file-label="tcUiPdf">파일 선택</small>
+                </label>
+                <button class="primary-button" id="tcButton" type="submit">생성</button>
+              </form>
 
-          <form id="tsForm" class="task-form" data-task-panel="ts">
-            <label class="drop-zone" for="tsTemplateXlsx">
-              <input id="tsTemplateXlsx" name="template_xlsx" type="file" accept=".xlsx">
-              <span class="file-mark">XLSX</span>
-              <strong>기존 통합시험 시나리오</strong>
-              <small data-file-label="tsTemplateXlsx">파일 선택</small>
-            </label>
+              <form id="tsForm" class="task-form" data-task-panel="ts">
+                <label class="drop-zone" for="tsTemplateXlsx">
+                  <input id="tsTemplateXlsx" name="template_xlsx" type="file" accept=".xlsx">
+                  <span class="file-mark">XLSX</span>
+                  <strong>기존 통합시험 시나리오</strong>
+                  <small data-file-label="tsTemplateXlsx">파일 선택</small>
+                </label>
 
-            <label class="drop-zone" for="tsTcXlsx">
-              <input id="tsTcXlsx" name="tc_xlsx" type="file" accept=".xlsx" multiple>
-              <span class="file-mark">XLSX</span>
-              <strong>단위시험 케이스</strong>
-              <small data-file-label="tsTcXlsx">1단계에서 생성한 엑셀 파일 선택</small>
-            </label>
+                <label class="drop-zone" for="tsTcXlsx">
+                  <input id="tsTcXlsx" name="tc_xlsx" type="file" accept=".xlsx" multiple>
+                  <span class="file-mark">XLSX</span>
+                  <strong>단위시험 케이스</strong>
+                  <small data-file-label="tsTcXlsx">단위시험 케이스 엑셀 파일 선택</small>
+                </label>
 
-            <label class="drop-zone" for="tsUiPdf">
-              <input id="tsUiPdf" name="ui_pdf" type="file" accept=".hwp,.hwpx,.pdf" multiple>
-              <span class="file-mark">DOC</span>
-              <strong>사용자인터페이스설계서</strong>
-              <small data-file-label="tsUiPdf">파일 선택</small>
-            </label>
-            <button class="primary-button" id="tsButton" type="submit">생성</button>
-          </form>
+                <label class="drop-zone" for="tsUiPdf">
+                  <input id="tsUiPdf" name="ui_pdf" type="file" accept=".hwp,.hwpx,.pdf" multiple>
+                  <span class="file-mark">DOC</span>
+                  <strong>사용자인터페이스설계서</strong>
+                  <small data-file-label="tsUiPdf">파일 선택</small>
+                </label>
+                <button class="primary-button" id="tsButton" type="submit">생성</button>
+              </form>
+            </div>
+          </details>
         </aside>
 
         <section class="result-panel qa-results">
@@ -133,6 +166,8 @@
               <span class="loader"></span>
               <strong id="loadingTitle">처리 중</strong>
               <p id="loadingMessage">요청을 처리하고 있습니다.</p>
+              <ol class="loading-steps" id="loadingSteps" hidden></ol>
+              <button class="loading-cancel-button" id="loadingCancelButton" type="button">취소</button>
             </div>
           </div>
         </section>
@@ -141,6 +176,6 @@
   </main>
 
   <script src="/static/header.js?v=20260518-integrated"></script>
-  <script src="/static/qa.js?v=20260519-ts-focused-ui"></script>
+  <script src="/static/qa.js?v=20260526-cancel"></script>
 </body>
 </html>

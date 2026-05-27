@@ -18,6 +18,7 @@ from app_runtime import (
     TEMP_DIR,
     RESULT_DIR,
     TS_TEMPLATE_PATH,
+    RESULT_TEMPLATE_PATH,
     cleanup_runtime,
     ensure_runtime_dirs,
     log_event,
@@ -49,6 +50,13 @@ from qa_generation.generate_tc import (
 from qa_generation.generate_ts import generate_test_scenarios
 from qa_generation.folder_pipeline import QaFolderMatchingError, run_folder_qa_pipeline
 from qa_generation.generate_ts import extract_req_mapping_from_pdf, extract_unit_test_from_excel
+from cancellation import (
+    CancelledRequest,
+    cancel_checker,
+    cancel_request,
+    register_request,
+    unregister_request,
+)
 
 
 RESULT_FILES: dict[str, Path] = {}
@@ -577,7 +585,21 @@ class WebHandler(BaseHTTPRequestHandler):
             self.handle_metadata_apply_post()
             return
 
+        if request_path == "/api/cancel-request":
+            self.handle_cancel_request_post()
+            return
+
         self.send_error(404)
+
+    def handle_cancel_request_post(self) -> None:
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length)
+            payload = parse_json_object(body.decode("utf-8", errors="replace") if body else "{}")
+            request_id = str(payload.get("request_id") or "").strip()
+            self.send_json({"ok": cancel_request(request_id), "request_id": request_id})
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
 
     def handle_metadata_preview_post(self) -> None:
         temp_dir: Path | None = None
@@ -870,12 +892,15 @@ class WebHandler(BaseHTTPRequestHandler):
                 model_name=model_name,
                 ollama_url=ollama_url,
                 scenario_form_path=TS_TEMPLATE_PATH,
+                result_form_path=RESULT_TEMPLATE_PATH,
                 ui_design_items=file_items.get("ui_design_files") or [],
                 ui_design_root=Path(fields.get("ui_design_root", "")) if fields.get("ui_design_root") else None,
                 qa_source_items=file_items.get("qa_source_files") or [],
                 qa_source_root=Path(fields.get("qa_source_root", "")) if fields.get("qa_source_root") else None,
                 tc_source_root=Path(fields.get("tc_source_root", "")) if fields.get("tc_source_root") else None,
+                unit_result_root=Path(fields.get("unit_result_root", "")) if fields.get("unit_result_root") else None,
                 ts_source_root=Path(fields.get("ts_source_root", "")) if fields.get("ts_source_root") else None,
+                integration_result_root=Path(fields.get("integration_result_root", "")) if fields.get("integration_result_root") else None,
                 request_id=request_id,
             )
             self.send_json(payload, status=200 if payload.get("ok") else 400)

@@ -1,3 +1,4 @@
+import fitz
 import requests
 import json
 import os
@@ -5,10 +6,11 @@ import re
 import time
 import ctypes
 import zipfile
+from typing import Callable
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 from pathlib import Path
-
+import time
 from document_update.hwpx_text import extract_document_text
 
 try:
@@ -35,15 +37,38 @@ REQUIRED_TC_KEYS = [
 
 CIRCLED_NUMBERS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 
+
+def extract_cover_author_from_document(document_path):
+  try:
+    text = extract_document_text(Path(document_path))
+  except Exception:
+    return ""
+
+  lines = [line.strip() for line in text.splitlines() if line.strip()]
+  for index, line in enumerate(lines[:80]):
+    if re.sub(r"\s+", "", line) != "작성자":
+      continue
+    for value in lines[index + 1:index + 5]:
+      normalized = re.sub(r"\s+", "", value)
+      if normalized and normalized not in {"작성자", "승인자"}:
+        return value
+  return ""
+
 def extract_text_from_pdf(pdf_path):
-  return extract_text_from_design_document(pdf_path)
+  if not os.path.exists(pdf_path):
+    raise FileNotFoundError(f"PDF 파일을 찾을 수 없습니다: {pdf_path}")
+  
+  print(f"\n*** 사용자인터페이스설계서에서 텍스트 추출 중: {pdf_path}")
+  text_content = ""
+  with fitz.open(pdf_path) as doc:
+    for page_num in range(len(doc)): 
+      page = doc.load_page(page_num)
+      page_text = page.get_text()
+      text_content += page_text
 
-def extract_text_from_design_document(document_path):
-  if not os.path.exists(document_path):
-    raise FileNotFoundError(f"사용자인터페이스설계서 파일을 찾을 수 없습니다: {document_path}")
+  extracted_text = text_content.strip()
 
-  print(f"\n*** 사용자인터페이스설계서에서 텍스트 추출 중: {document_path}")
-  return extract_document_text(Path(document_path)).strip()
+  return extracted_text
 
 def extract_screen_blocks(extracted_text):
   screen_pattern = re.compile(r"\bUI-[A-Z0-9]+(?:-[A-Z0-9]+)+\b")
@@ -72,33 +97,56 @@ def extract_screen_blocks(extracted_text):
     else:
       print("'4. 화면/보고서 정의' 본문 시작점을 찾지 못해 전체 텍스트에서 화면 제목 분할을 적용합니다.")
 
-    for idx, section_match in enumerate(section_matches):
-      start = section_match.start()
-      end = section_matches[idx + 1].start() if idx + 1 < len(section_matches) else len(target_text)
-      block_text = target_text[start:end].strip()
-      screen_match = screen_pattern.search(block_text)
-
-      if not screen_match:
-        print(f"[화면 분할 제외] 화면ID 없음: {section_match.group(0).strip()}")
-        continue
-
-      screen_id = screen_match.group(0)
+    def add_screen_candidate(screen_id, candidate_text):
       candidate = {
         "screen_id": screen_id,
         "unit_test_id": screen_id.replace("UI", "UT", 1),
-        "text": block_text,
-        "score": screen_block_score(block_text)
+        "text": candidate_text,
+        "score": screen_block_score(candidate_text)
       }
 
       existing = blocks_by_screen_id.get(screen_id)
       if existing and existing["score"] >= candidate["score"]:
-        print(f"[화면 분할 제외] 중복 화면ID: {screen_id} (기존 점수 {existing['score']} >= 후보 점수 {candidate['score']})")
-        continue
+        print(f"[screen split skip] duplicate screen_id: {screen_id} (existing score {existing['score']} >= candidate score {candidate['score']})")
+        return
 
       if existing:
-        print(f"[화면 분할 교체] 중복 화면ID: {screen_id} (기존 점수 {existing['score']} < 후보 점수 {candidate['score']})")
+        print(f"[screen split replace] duplicate screen_id: {screen_id} (existing score {existing['score']} < candidate score {candidate['score']})")
 
       blocks_by_screen_id[screen_id] = candidate
+
+    for idx, section_match in enumerate(section_matches):
+      start = section_match.start()
+      end = section_matches[idx + 1].start() if idx + 1 < len(section_matches) else len(target_text)
+      block_text = target_text[start:end].strip()
+      screen_matches = list(screen_pattern.finditer(block_text))
+
+      if not screen_matches:
+        print(f"[화면 분할 제외] 화면ID 없음: {section_match.group(0).strip()}")
+        continue
+
+      screen_boundaries = []
+      for screen_match in screen_matches:
+        screen_id = screen_match.group(0)
+        if screen_boundaries and screen_boundaries[-1].group(0) == screen_id:
+          continue
+        screen_boundaries.append(screen_match)
+
+      if len(screen_boundaries) == 1:
+        add_screen_candidate(screen_boundaries[0].group(0), block_text)
+        continue
+
+      print(f"[screen split] {section_match.group(0).strip()} contains {len(screen_boundaries)} screen IDs")
+      for screen_idx, screen_match in enumerate(screen_boundaries):
+        screen_id = screen_match.group(0)
+        screen_start = 0 if screen_idx == 0 else screen_match.start()
+        screen_end = (
+          screen_boundaries[screen_idx + 1].start()
+          if screen_idx + 1 < len(screen_boundaries)
+          else len(block_text)
+        )
+        add_screen_candidate(screen_id, block_text[screen_start:screen_end].strip())
+      continue
 
     if blocks_by_screen_id:
       return [
@@ -344,7 +392,12 @@ def build_retry_prompt(screen_id, unit_test_id, expected_steps, block_text, bad_
   {block_text}
   """
 
-def build_test_cases_from_text(extracted_text, model_name, ollama_url, screen_blocks=None):
+def _check_cancel(cancel_check: Callable[[], None] | None) -> None:
+  if cancel_check:
+    cancel_check()
+
+
+def build_test_cases_from_text(extracted_text, model_name, ollama_url, screen_blocks=None, cancel_check: Callable[[], None] | None = None):
   print(f"\nAI 추론 중... ({model_name})")
 
   system_prompt = """
@@ -487,6 +540,7 @@ def build_test_cases_from_text(extracted_text, model_name, ollama_url, screen_bl
   all_test_cases = []
 
   for idx, block in enumerate(screen_blocks, 1):
+    _check_cancel(cancel_check)
     flow_steps = extract_process_flow_steps(block["text"])
     expected_steps = len(flow_steps)
     screen_id = block["screen_id"]
@@ -539,7 +593,9 @@ def build_test_cases_from_text(extracted_text, model_name, ollama_url, screen_bl
     try:
       print(f"\n[AI 호출] {idx}/{len(screen_blocks)} {screen_id} 처리 중...")
       print(f"[AI 호출 설정] {screen_id}: expected_steps={expected_steps} text_len={len(block['text'])} num_predict={num_predict} timeout={request_timeout}s")
+      _check_cancel(cancel_check)
       response_text = call_ollama(ollama_url, model_name, system_prompt, user_prompt, num_predict=num_predict, timeout=request_timeout)
+      _check_cancel(cancel_check)
       parsed_json = parse_llm_json(response_text)
       normalized_cases = normalize_test_cases(parsed_json, screen_id, unit_test_id)
 
@@ -578,7 +634,9 @@ def build_test_cases_from_text(extracted_text, model_name, ollama_url, screen_bl
 
       try:
         print(f"[AI 재호출] {screen_id} 응답 형식 보정 중...")
+        _check_cancel(cancel_check)
         retry_text = call_ollama(ollama_url, model_name, system_prompt, retry_prompt, num_predict=num_predict, timeout=request_timeout)
+        _check_cancel(cancel_check)
         retry_json = parse_llm_json(retry_text)
         normalized_cases = normalize_test_cases(retry_json, screen_id, unit_test_id)
 
@@ -597,7 +655,7 @@ def build_test_cases_from_text(extracted_text, model_name, ollama_url, screen_bl
   print(f"\n전체 생성 테스트 케이스 행 수: {len(all_test_cases)}")
   return all_test_cases
   
-def save_test_cases_to_excel(test_cases, output_dir: Path, base_filename="generated_TC"):
+def save_test_cases_to_excel(test_cases, output_dir: Path, base_filename="generated_TC", performer=""):
   if not test_cases:
     print("저장할 데이터가 없습니다.")
     return
@@ -670,7 +728,7 @@ def save_test_cases_to_excel(test_cases, output_dir: Path, base_filename="genera
     ws.cell(row=r2, column=2, value=common.get("단위시험_ID", ""))
     ws.merge_cells(start_row=r2, start_column=2, end_row=r2, end_column=3)
     ws.cell(row=r2, column=4, value="수행자")
-    ws.cell(row=r2, column=5, value="")
+    ws.cell(row=r2, column=5, value=performer)
 
     # 3행: 단위시험 명 / 수행 일자
     r3 = current_row + 2
@@ -843,7 +901,7 @@ def move_blank_page_breaks_to_test_titles(hwpx_path):
   elif os.path.exists(temp_path):
     os.remove(temp_path)
 
-def save_test_cases_to_hwpx(test_cases, temp_path, output_filename):
+def save_test_cases_to_hwpx(test_cases, temp_path, output_filename, performer="", clear_execution_date=False):
   if not test_cases:
     return None
   
@@ -873,20 +931,44 @@ def save_test_cases_to_hwpx(test_cases, temp_path, output_filename):
         hwp.insert_text(str(text))
       hwp.Run("Cancel")
 
-    hwp.Run("MoveDocBegin")
-    if find_text("목 차") or find_text("<목 차>"):
-      hwp.Run("MovePageDown")
-      hwp.Run("MovePageBegin")
+    def move_to_first_test_body_after_toc(max_pages=5):
+      hwp.Run("MoveDocBegin")
+      if not (find_text("목 차") or find_text("<목 차>")):
+        return False
 
-      if find_text("단위시험 ID"):
+      for _ in range(max_pages):
+        hwp.Run("MovePageDown")
+        hwp.Run("MovePageBegin")
         if find_text("단위시험 ID"):
           hwp.Run("Cancel")
-          hwp.Run("MoveUp"); hwp.Run("MoveUp"); hwp.Run("MoveUp")
-          hwp.Run("MoveLineBegin")
-          hwp.Run("Select")
-          hwp.Run("MoveDocEnd")
-          hwp.Run("Delete")
-          time.sleep(0.2)
+          return True
+      hwp.Run("Cancel")
+      return False
+
+    def move_to_test_step_data_row():
+      hwp.Run("MovePageBegin")
+      for header in ("순서", "순번"):
+        if not find_text(header):
+          continue
+        if hwp.TableLowerCell():
+          hwp.Run("TableColBegin")
+          return True
+        hwp.Run("Cancel")
+        hwp.Run("MovePageBegin")
+      return False
+
+    hwp.Run("MoveDocBegin")
+    if find_text("목 차") or find_text("<목 차>"):
+      hwp.Run("Cancel")
+      if move_to_first_test_body_after_toc():
+        if find_text("단위시험 ID"):
+          hwp.Run("Cancel")
+        hwp.Run("MoveUp"); hwp.Run("MoveUp"); hwp.Run("MoveUp")
+        hwp.Run("MoveLineBegin")
+        hwp.Run("Select")
+        hwp.Run("MoveDocEnd")
+        hwp.Run("Delete")
+        time.sleep(0.2)
 
     try:
       # 클립보드 강제 초기화
@@ -937,15 +1019,16 @@ def save_test_cases_to_hwpx(test_cases, temp_path, output_filename):
         hwp.insert_text(f"{tc_id} - {first_step.get('단위시험_명','')}")
 
         find_text("단위시험 ID"); hwp.Run("TableRightCell"); clear_and_write(tc_id)
+        if find_text("수행자"):
+          hwp.Run("TableRightCell"); clear_and_write(performer)
         find_text("단위시험 명"); hwp.Run("TableRightCell"); clear_and_write(first_step.get("단위시험_명",""))
+        if clear_execution_date and find_text("수행 일자"):
+          hwp.Run("TableRightCell"); clear_and_write("")
         find_text("사전조건"); hwp.Run("TableRightCell"); clear_and_write(first_step.get("사전조건",""))
         find_text("화면 ID"); hwp.Run("TableRightCell"); clear_and_write(first_step.get("화면_ID",""))
 
-        if not find_text("수행 결과"):
-          raise RuntimeError(f"HWPX 양식에서 테스트 스텝 표의 '수행 결과' 영역을 찾을 수 없습니다: {tc_id}")
-
-        hwp.TableLowerCell()
-        hwp.Run("TableColBegin")
+        if not move_to_test_step_data_row():
+          raise RuntimeError(f"HWPX 양식에서 테스트 스텝 데이터 행으로 이동할 수 없습니다: {tc_id}")
 
         for col in range(5):
           clear_and_write("")
@@ -997,6 +1080,7 @@ def generate_test_cases(
     template_path: Path,
     extracted_text: str | None = None,
     screen_blocks: list[dict] | None = None,
+    cancel_check: Callable[[], None] | None = None,
 ) -> dict:
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
@@ -1004,8 +1088,13 @@ def generate_test_cases(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    extract_text = extracted_text if extracted_text is not None else extract_text_from_design_document(pdf_path)
-    tc_data = build_test_cases_from_text(extract_text, model_name, ollama_url, screen_blocks=screen_blocks)
+    _check_cancel(cancel_check)
+    cover_author = extract_cover_author_from_document(template_path)
+    _check_cancel(cancel_check)
+    extract_text = extracted_text if extracted_text is not None else extract_text_from_pdf(pdf_path)
+    _check_cancel(cancel_check)
+    tc_data = build_test_cases_from_text(extract_text, model_name, ollama_url, screen_blocks=screen_blocks, cancel_check=cancel_check)
+    _check_cancel(cancel_check)
 
     if not tc_data:
         return {
@@ -1014,7 +1103,8 @@ def generate_test_cases(
             "files": [],
         }
 
-    excel_path = save_test_cases_to_excel(tc_data, output_dir)
+    excel_path = save_test_cases_to_excel(tc_data, output_dir, performer=cover_author)
+    _check_cancel(cancel_check)
 
     files = []
     if excel_path:
@@ -1025,11 +1115,13 @@ def generate_test_cases(
         })
 
     if HWP_AVAILABLE and template_path.exists():
+        _check_cancel(cancel_check)
         hwpx_path = output_dir / f"generated_TC_{int(time.time())}.hwpx"
         saved_hwpx = save_test_cases_to_hwpx(
             tc_data,
             temp_path=str(template_path),
             output_filename=str(hwpx_path),
+            performer=cover_author,
         )
         if saved_hwpx:
             saved_hwpx = Path(saved_hwpx)

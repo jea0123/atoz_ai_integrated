@@ -18,6 +18,7 @@ TEMP_DIR = WORK_DIR / "temp"
 RESULT_DIR = WORK_DIR / "results"
 
 TS_TEMPLATE_PATH = TEMPLATE_DIR / "scenario_sheet_form.xlsx"
+RESULT_TEMPLATE_PATH = TEMPLATE_DIR / "result_sheet_form.xlsx"
 
 LOG_PATH = WORK_DIR / "web_app.log"
 RUNTIME_ENV_PATH = BASE_DIR / ".env"
@@ -35,6 +36,17 @@ def log_event(event: str, **values: object) -> None:
     if extras:
         line = f"{line} {extras}"
 
+    write_log_line(line)
+
+
+def log_message(message: str) -> None:
+    """사람이 읽기 쉬운 진행 로그를 서버 콘솔과 로그 파일에 함께 남긴다."""
+    WORK_DIR.mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    write_log_line(f"[{timestamp}] {message}")
+
+
+def write_log_line(line: str) -> None:
     print(line, flush=True)
     try:
         with LOG_PATH.open("a", encoding="utf-8") as log_file:
