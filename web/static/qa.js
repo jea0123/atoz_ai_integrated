@@ -27,6 +27,11 @@ const taskPanels = [...document.querySelectorAll("[data-task-panel]")];
 const fileInputs = [...document.querySelectorAll("input[type='file']")];
 const LAST_DUMP_ROOT_KEY = "atoz:lastDumpRoot";
 const QA_SOURCE_EXTENSIONS = new Set([".hwp", ".hwpx", ".pdf", ".xlsx"]);
+const QA_LOADING_STEPS = [
+  "입력 파일을 확인하는 중",
+  "설계서와 산출물을 분석하는 중",
+  "QA 결과를 생성하는 중",
+];
 const initialFileLabels = new Map(
   fileInputs.map((input) => {
     const label = document.querySelector(`[data-file-label="${input.id}"]`);
@@ -921,14 +926,7 @@ async function runFolderQa(event) {
   }
 
   setBadge("처리중", "busy");
-  setLoading(true, "QA 생성 중...", "추가 문서 폴더와 QA 대상 산출물 폴더를 요구사항 ID 기준으로 매칭하고 있습니다.", [
-    "대상 폴더와 추가 문서 목록을 읽는 중",
-    "요구사항 ID 기준으로 산출물 세트를 매칭하는 중",
-    "화면설계서에서 OCR 텍스트 추출 중",
-    "단위시험 케이스와 결과서를 생성하는 중",
-    "통합시험 시나리오와 결과서를 생성하는 중",
-    "생성 파일을 기존 산출물 위치에 배치하는 중",
-  ]);
+  setLoading(true, "QA 생성 중", "QA 산출물을 생성하고 있습니다.", QA_LOADING_STEPS);
   clearDownloads();
   clearError();
   resultTitle.textContent = "QA 생성";
@@ -964,14 +962,7 @@ async function runTcGeneration(event) {
   ])) return;
 
   setBadge("처리중", "busy");
-  setLoading(true, "단위시험 케이스 생성 중", "AI가 화면별 테스트 케이스를 만들고 있습니다.", [
-    "업로드 파일을 확인하는 중",
-    "사용자인터페이스설계서에서 OCR 텍스트 추출 중",
-    "4.x 섹션과 화면ID를 분리하는 중",
-    "처리흐름을 테스트 스텝으로 정리하는 중",
-    "AI가 화면별 단위시험 케이스를 작성하는 중",
-    "엑셀과 HWPX 결과 파일을 만드는 중",
-  ]);
+  setLoading(true, "단위시험 케이스 생성 중", "QA 산출물을 생성하고 있습니다.", QA_LOADING_STEPS);
   clearDownloads();
   clearError();
   resultTitle.textContent = "단위시험 케이스 생성";
@@ -1013,14 +1004,7 @@ async function runTsGeneration(event) {
   ])) return;
 
   setBadge("처리중", "busy");
-  setLoading(true, "통합시험 시나리오 생성 중", "단위시험 케이스를 통합시험 시나리오 양식으로 변환하고 있습니다.", [
-    "업로드 파일을 확인하는 중",
-    "단위시험 케이스 엑셀 데이터를 읽는 중",
-    "사용자인터페이스설계서에서 OCR 텍스트 추출 중",
-    "화면ID와 요구사항 ID를 매핑하는 중",
-    "통합시험 시나리오 행을 구성하는 중",
-    "엑셀 결과 파일을 만드는 중",
-  ]);
+  setLoading(true, "통합시험 시나리오 생성 중", "QA 산출물을 생성하고 있습니다.", QA_LOADING_STEPS);
   clearDownloads();
   clearError();
   resultTitle.textContent = "통합시험 시나리오 생성";

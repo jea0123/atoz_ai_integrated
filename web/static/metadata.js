@@ -19,13 +19,27 @@ const resultRows = document.querySelector("#resultRows");
 const visibleCount = document.querySelector("#visibleCount");
 const emptyState = document.querySelector("#emptyState");
 const loadingOverlay = document.querySelector("#loadingOverlay");
+const loadingTitle = document.querySelector("#loadingTitle");
+const loadingMessage = document.querySelector("#loadingMessage");
+const loadingSteps = document.querySelector("#loadingSteps");
 const loadingCancelButton = document.querySelector("#loadingCancelButton");
 const applyReport = document.querySelector("#applyReport");
 const LAST_DUMP_ROOT_KEY = "atoz:lastDumpRoot";
+const MIN_LOADING_MS = 1200;
+const COMPLETE_LOADING_MS = 300;
+const METADATA_LOADING_STEPS = [
+  "입력 파일을 확인하는 중",
+  "WBS와 산출물 문서를 대조하는 중",
+  "메타데이터 작업 결과를 정리하는 중",
+];
 
 let lastTargets = [];
 let lastPreviewApprovalAuthor = "";
 let activeRequest = null;
+let loadingStepTimer = null;
+let loadingStepIndex = 0;
+let loadingStartedAt = 0;
+let currentLoadingSteps = [];
 const excludedPaths = new Set();
 
 function escapeHtml(value) {
@@ -42,13 +56,85 @@ function setBadge(text, mode) {
   statusBadge.className = `status-pill ${mode || ""}`.trim();
 }
 
-function setLoading(isLoading) {
+function renderLoadingSteps(steps = [], activeIndex = 0) {
+  if (!loadingSteps) return;
+  if (!steps.length) {
+    loadingSteps.hidden = true;
+    loadingSteps.replaceChildren();
+    return;
+  }
+
+  loadingSteps.hidden = false;
+  loadingSteps.replaceChildren(
+    ...steps.map((step, index) => {
+      const item = document.createElement("li");
+      item.textContent = step;
+      if (index < activeIndex) item.classList.add("done");
+      if (index === activeIndex) item.classList.add("active");
+      return item;
+    })
+  );
+}
+
+function completeLoadingSteps() {
+  if (!currentLoadingSteps.length) return;
+  renderLoadingSteps(currentLoadingSteps, currentLoadingSteps.length);
+}
+
+function stopLoadingSteps() {
+  if (loadingStepTimer) {
+    clearInterval(loadingStepTimer);
+    loadingStepTimer = null;
+  }
+}
+
+function startLoadingSteps(steps = []) {
+  stopLoadingSteps();
+  loadingStepIndex = 0;
+  currentLoadingSteps = [...steps];
+  renderLoadingSteps(steps, loadingStepIndex);
+
+  if (steps.length <= 1) return;
+  loadingStepTimer = setInterval(() => {
+    loadingStepIndex = Math.min(loadingStepIndex + 1, steps.length - 1);
+    renderLoadingSteps(steps, loadingStepIndex);
+  }, 2600);
+}
+
+function setLoading(isLoading, title = "처리 중", message = "요청을 처리하고 있습니다.", steps = []) {
+  if (!isLoading) {
+    stopLoadingSteps();
+    renderLoadingSteps([]);
+    currentLoadingSteps = [];
+  }
   loadingOverlay.hidden = !isLoading;
+  if (isLoading) loadingStartedAt = Date.now();
+  if (loadingTitle) loadingTitle.textContent = title;
+  if (loadingMessage) {
+    loadingMessage.textContent = message;
+    loadingMessage.classList.toggle("is-hidden", isLoading && steps.length > 0);
+  }
+  if (isLoading) startLoadingSteps(steps.length ? steps : [message]);
   previewButton.disabled = isLoading;
   applyButton.disabled = isLoading;
   previewButton.classList.toggle("is-loading", isLoading);
   applyButton.classList.toggle("is-loading", isLoading);
   if (loadingCancelButton) loadingCancelButton.disabled = !isLoading;
+}
+
+async function finishLoading({ complete = false } = {}) {
+  if (!loadingOverlay || loadingOverlay.hidden) return;
+  if (complete) {
+    stopLoadingSteps();
+    completeLoadingSteps();
+    await new Promise((resolve) => setTimeout(resolve, COMPLETE_LOADING_MS));
+  }
+
+  const elapsed = Date.now() - loadingStartedAt;
+  if (elapsed < MIN_LOADING_MS) {
+    await new Promise((resolve) => setTimeout(resolve, MIN_LOADING_MS - elapsed));
+  }
+  setLoading(false);
 }
 
 function beginCancelableRequest() {
@@ -283,7 +369,8 @@ function renderApplyError(item) {
 }
 
 async function requestPreview() {
-  setLoading(true);
+  let completed = false;
+  setLoading(true, "메타데이터 처리 중", "WBS 기준으로 산출물 문서를 확인하고 있습니다.", METADATA_LOADING_STEPS);
   setBadge("확인 중", "busy");
   applyReport.hidden = true;
   const request = beginCancelableRequest();
@@ -297,6 +384,7 @@ async function requestPreview() {
     setSummary(data);
     renderTargets();
     setBadge("완료", "done");
+    completed = true;
   } catch (error) {
     if (isAbortError(error)) {
       markRequestCanceled();
@@ -306,7 +394,11 @@ async function requestPreview() {
     resultMeta.textContent = error.message;
   } finally {
     endCancelableRequest(request);
-    setLoading(false);
+    if (request.controller.signal.aborted) {
+      setLoading(false);
+    } else {
+      await finishLoading({ complete: completed });
+    }
   }
 }
 
@@ -315,7 +407,8 @@ async function requestApply() {
     await requestPreview();
     if (!lastTargets.length) return;
   }
-  setLoading(true);
+  let completed = false;
+  setLoading(true, "메타데이터 처리 중", "WBS 기준으로 산출물 문서를 확인하고 있습니다.", METADATA_LOADING_STEPS);
   setBadge("반영 중", "busy");
   const request = beginCancelableRequest();
   try {
@@ -328,13 +421,21 @@ async function requestApply() {
     }
     renderApplyReport(data);
     setBadge("완료", "done");
+    completed = true;
   } catch (error) {
+    if (isAbortError(error)) {
+      return;
+    }
     setBadge("확인 필요", "error");
     resultMeta.textContent = error.message;
   } finally {
-    if (request.controller.signal.aborted) markRequestCanceled();
     endCancelableRequest(request);
-    setLoading(false);
+    if (request.controller.signal.aborted) {
+      markRequestCanceled();
+      setLoading(false);
+    } else {
+      await finishLoading({ complete: completed });
+    }
   }
 }
 
