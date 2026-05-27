@@ -8,11 +8,13 @@ from pathlib import Path
 import re
 import shutil
 import zipfile
+from typing import Callable
 from uuid import uuid4
 
 from openpyxl import load_workbook
 
 from app_runtime import TEMP_DIR, log_event, log_message, remove_runtime_path
+from cancellation import CancelledRequest
 from document_update.hwpx_text import extract_document_text
 from qa_generation.generate_tc import extract_cover_author_from_document, generate_test_cases
 from qa_generation.generate_ts import generate_integration_test_results, generate_test_scenarios
@@ -97,6 +99,7 @@ def run_folder_qa_pipeline(
         ts_source_root: Path | None = None,
         integration_result_root: Path | None = None,
         request_id: str | None = None,
+        cancel_check: Callable[[], None] | None = None,
 ) -> dict[str, object]:
     # check.html이 만든 결과 폴더 안에서 QA 입력물을 찾아 생성 결과를 같은 위치에 배치한다.
     request_id = request_id or uuid4().hex[:8]
@@ -112,6 +115,8 @@ def run_folder_qa_pipeline(
     qa_batch_log(request_id, f"시작 | 대상 산출물 폴더: {dump_root}")
 
     try:
+        if cancel_check:
+            cancel_check()
         ui_design_paths = collect_design_documents(ui_design_root)
         ui_design_paths.extend(save_uploaded_design_documents(temp_dir, ui_design_items or []))
         qa_source_paths = collect_source_documents(qa_source_root)
@@ -157,6 +162,8 @@ def run_folder_qa_pipeline(
         total_ts_count = 0
 
         for index, item in enumerate(requirement_items, start=1):
+            if cancel_check:
+                cancel_check()
             requirement_id = str(item["requirement_id"])
             req_temp_dir = temp_dir / safe_requirement_dirname(requirement_id)
             item_tc_output_dir = req_temp_dir / "tc-output"
@@ -186,8 +193,11 @@ def run_folder_qa_pipeline(
                         ollama_url=ollama_url,
                         output_dir=item_tc_output_dir,
                         template_path=tc_template,
+                        cancel_check=cancel_check,
                     )
                 )
+                if cancel_check:
+                    cancel_check()
                 if not tc_payload.get("ok"):
                     raise RuntimeError(str(tc_payload.get("error") or "단위시험 케이스 생성에 실패했습니다."))
 
@@ -209,6 +219,8 @@ def run_folder_qa_pipeline(
                         item_unit_result_output_dir,
                     )
                 )
+                if cancel_check:
+                    cancel_check()
                 if unit_result_hwpx is None:
                     raise RuntimeError("교체할 단위시험결과서 HWPX가 생성되지 않았습니다.")
                 qa_batch_log(
@@ -223,8 +235,11 @@ def run_folder_qa_pipeline(
                         ui_pdf_path=ui_design,
                         output_dir=item_ts_output_dir,
                         form_path=scenario_form_path,
+                        cancel_check=cancel_check,
                     )
                 )
+                if cancel_check:
+                    cancel_check()
                 if not ts_payload.get("ok"):
                     raise RuntimeError(str(ts_payload.get("error") or "통합시험 시나리오 생성에 실패했습니다."))
 
@@ -242,8 +257,11 @@ def run_folder_qa_pipeline(
                         ui_pdf_path=ui_design,
                         output_dir=item_integration_result_output_dir,
                         form_path=result_form_path,
+                        cancel_check=cancel_check,
                     )
                 )
+                if cancel_check:
+                    cancel_check()
                 if not integration_result_payload.get("ok"):
                     raise RuntimeError(str(integration_result_payload.get("error") or "통합시험 결과서 생성에 실패했습니다."))
 
@@ -259,6 +277,8 @@ def run_folder_qa_pipeline(
                     f"[{requirement_id}] 통합시험결과서 생성 완료 | {int(integration_result_payload.get('count') or 0)}행",
                 )
 
+                if cancel_check:
+                    cancel_check()
                 placed_for_requirement = [
                     place_generated_file(tc_hwpx, tc_template, "tc_hwpx", "단위시험케이스", requirement_id),
                     place_generated_file(unit_result_hwpx, unit_result_template, "unit_result_hwpx", "단위시험결과서", requirement_id),
@@ -285,6 +305,8 @@ def run_folder_qa_pipeline(
                     "ts_count": ts_count,
                     "placed_files": placed_for_requirement,
                 })
+            except CancelledRequest:
+                raise
             except Exception as exc:
                 qa_batch_log(request_id, f"[{requirement_id}] 실패 | {exc}")
                 processed_items.append({

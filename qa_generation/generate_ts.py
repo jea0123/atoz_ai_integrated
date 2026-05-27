@@ -482,6 +482,9 @@ def generate_test_scenarios(
     ui_pdf_path: Path | None,
     output_dir: Path,
     form_path: Path,
+    req_mapping: dict[str, str] | None = None,
+    unit_test_data: list[dict] | None = None,
+    log_progress: bool = True,
     cancel_check: Callable[[], None] | None = None,
 ) -> dict:
     _check_cancel(cancel_check)
@@ -579,14 +582,15 @@ def generate_integration_test_results(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     cover_author = extract_cover_author_from_workbook(template_xlsx_path)
-    req_mapping = {}
-    if ui_pdf_path:
+    req_mapping = dict(req_mapping or {})
+    if not req_mapping and ui_pdf_path:
         ui_pdf_path = Path(ui_pdf_path)
         if ui_pdf_path.exists():
             req_mapping = extract_req_mapping_from_pdf(ui_pdf_path)
             _check_cancel(cancel_check)
 
-    unit_test_data = extract_unit_test_from_excel(tc_xlsx_path)
+    if unit_test_data is None:
+        unit_test_data = extract_unit_test_from_excel(tc_xlsx_path)
     _check_cancel(cancel_check)
     if not unit_test_data:
         return {
@@ -612,10 +616,12 @@ def generate_integration_test_results(
 
     for data in unit_test_data:
         _check_cancel(cancel_check)
+        _check_cancel(cancel_check)
         screen_id = data.get("화면_ID", "").strip()
         data["요구사항_ID"] = req_mapping.get(screen_id, "")
 
     result_rows = build_test_scenarios_from_unit_tests(unit_test_data, author=cover_author)
+    _check_cancel(cancel_check)
     if not result_rows:
         return {
             "ok": False,
@@ -629,6 +635,7 @@ def generate_integration_test_results(
         output_dir=output_dir,
         result_sheet_form_path=form_path,
     )
+    _check_cancel(cancel_check)
 
     files = []
     if excel_path:
