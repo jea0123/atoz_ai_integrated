@@ -78,10 +78,10 @@ def extract_output_section(document_text: str) -> str:
     return document_text[start:end]
 
 
-def read_standard_outputs(standard_file: Path) -> list[StandardOutput]:
+def read_standard_outputs(standard_file: Path, standard_text: str | None = None) -> list[StandardOutput]:
     # 문서관리표준에서 산출물 ID/산출물명 목록을 StandardOutput 리스트로 읽는다.
     """문서관리표준에서 관리문서 ID와 산출물 코드 표를 읽는다."""
-    text = extract_standard_text(standard_file)
+    text = standard_text if standard_text is not None else extract_standard_text(standard_file)
     if not text.strip():
         raise RuntimeError(f"문서 텍스트를 추출하지 못했습니다: {standard_file}")
 

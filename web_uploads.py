@@ -6,6 +6,8 @@ from email.policy import default
 from pathlib import Path
 import re
 
+from output_file_check.file_noise import is_noise_filename
+
 
 def parse_multipart_items(content_type: str, body: bytes) -> tuple[dict[str, str], dict[str, list[tuple[str, bytes]]]]:
     # multipart/form-data 본문을 일반 필드와 파일 목록으로 분리한다.
@@ -91,6 +93,8 @@ def save_check_uploads(
     for index, (filename, payload) in enumerate(folder_items, start=1):
         if not payload:
             continue
+        if is_noise_filename(filename):
+            continue
         suffix = Path(filename).suffix.lower()
 
         relative_path = safe_relative_upload_path(filename, f"file-{index}{suffix}")
@@ -103,3 +107,33 @@ def save_check_uploads(
         raise ValueError("업로드된 폴더에서 저장할 파일을 찾지 못했습니다.")
 
     return standard_path, folder_dir
+
+
+def save_requirement_uploads(
+    temp_dir: Path,
+    file_items: dict[str, list[tuple[str, bytes]]],
+) -> list[Path]:
+    # 요구사항별 자동 생성에 사용할 파일들을 임시 폴더에 저장한다.
+    """요구사항 파일 input으로 올라온 파일들을 상대 경로 없이 안전하게 저장한다."""
+    requirement_items = file_items.get("requirement_files") or []
+    if not requirement_items:
+        return []
+
+    requirement_dir = temp_dir / "requirements"
+    requirement_dir.mkdir(exist_ok=True)
+
+    saved_paths: list[Path] = []
+    for index, (filename, payload) in enumerate(requirement_items, start=1):
+        if not payload:
+            continue
+        if is_noise_filename(filename):
+            continue
+        suffix = Path(filename).suffix.lower()
+        safe_name = safe_upload_filename(filename, "requirement_file", suffix or ".bin")
+        target_path = requirement_dir / safe_name
+        if target_path.exists():
+            target_path = requirement_dir / f"{target_path.stem}_{index}{target_path.suffix}"
+        target_path.write_bytes(payload)
+        saved_paths.append(target_path)
+
+    return saved_paths

@@ -17,10 +17,14 @@ NOISE_PATTERN = re.compile(
 )
 
 
-def read_path_templates(standard_file: Path, outputs: list[StandardOutput]) -> list[PathTemplate]:
+def read_path_templates(
+    standard_file: Path,
+    outputs: list[StandardOutput],
+    standard_text: str | None = None,
+) -> list[PathTemplate]:
     # 표준 PDF에서 산출물별 예상 폴더 경로 템플릿을 읽는다.
     """문서관리표준의 폴더명/문서명 표에서 예상 경로 템플릿을 읽는다."""
-    text = extract_standard_text(standard_file)
+    text = standard_text if standard_text is not None else extract_standard_text(standard_file)
     templates = parse_layout_path_templates(text)
     templates.extend(build_known_stage_templates(text))
     return deduplicate_templates(templates, outputs)
@@ -139,6 +143,14 @@ def build_known_stage_templates(document_text: str) -> list[PathTemplate]:
                 make_template("단위시험케이스", "03.설계", "05.설계단계시험계획", "01.단위시험케이스"),
                 make_template("통합시험시나리오", "03.설계", "05.설계단계시험계획", "02.통합시험시나리오"),
                 make_template("인수인계시험시나리오", "03.설계", "05.설계단계시험계획", "03.인수인계시험시나리오"),
+            ]
+        )
+
+    if "03.설계" in compact:
+        templates.extend(
+            [
+                make_template("사용자인터페이스설계", "03.설계", "02.어플리케이션설계", "01.사용자인터페이스설계"),
+                make_template("사용자인터페이스설계서", "03.설계", "02.어플리케이션설계", "01.사용자인터페이스설계"),
             ]
         )
 

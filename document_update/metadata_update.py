@@ -34,7 +34,8 @@ WBS_START_COL = 16
 WBS_AUTHOR_COL = 28
 WBS_OUTPUT_COL = 29
 WBS_TASK_COLS = (5, 6, 7, 8, 9, 10)
-DOCUMENT_VERSION_VALUE = "V0.1"
+DOCUMENT_VERSION_VALUE = "v0.1"
+UNLABELED_HEADER_VERSION_VALUE = DOCUMENT_VERSION_VALUE
 DATE_LABELS = {"개정일자"}
 AUTHOR_LABELS = {"작성자", "작성 자", "작 성 자"}
 VERSION_LABELS = {"문서버전", "문 서 버 전", "Version"}
@@ -205,13 +206,6 @@ def extract_requirement_id_from_values(values: object) -> str:
 
     match = REQUIREMENT_ID_PATTERN.search(text)
     return match.group(0).upper() if match else ""
-
-
-def build_wbs_index(records: list[WbsMetadata]) -> dict[str, list[WbsMetadata]]:
-    index: dict[str, list[WbsMetadata]] = {}
-    for record in records:
-        index.setdefault(normalize_key(record.output_name), []).append(record)
-    return index
 
 
 def should_scan_document(path: Path) -> bool:
@@ -1070,7 +1064,7 @@ def update_unlabeled_excel_header_metadata_xml(
             (author_cell.ref, author_cell.row, author_cell.col, author),
         ]
         if version_cell is not None:
-            updates.insert(0, (version_cell.ref, version_cell.row, version_cell.col, DOCUMENT_VERSION_VALUE))
+            updates.insert(0, (version_cell.ref, version_cell.row, version_cell.col, UNLABELED_HEADER_VERSION_VALUE))
         for cell_ref, row, col, value in updates:
             updated_xml = replace_or_insert_cell_xml(updated_xml, cell_ref, row, col, value)
             count += 1
@@ -1128,7 +1122,7 @@ def update_excel_drawing_metadata_xml(xml: str, revision_date: str, author: str)
 
     new_texts: dict[int, str] = {}
     if version_match is not None:
-        add_drawing_text_span_update(new_texts, texts, spans, version_match.span(), DOCUMENT_VERSION_VALUE)
+        add_drawing_text_span_update(new_texts, texts, spans, version_match.span(), UNLABELED_HEADER_VERSION_VALUE)
     formatted_date = format_date_like_existing(revision_date, date_match.group(0))
     add_drawing_text_span_update(new_texts, texts, spans, (date_start, date_end), formatted_date)
     new_texts[author_run_index] = author
@@ -1296,43 +1290,6 @@ def revision_header_map(labels: list[str]) -> dict[str, int]:
     return result if required.issubset(result) else {}
 
 
-def update_label_right_cells(sheet: Worksheet, labels: set[str], new_value: object) -> int:
-    normalized_labels = {normalize_label(label) for label in labels}
-    count = 0
-    for row in sheet.iter_rows():
-        for index, cell in enumerate(row[:-1]):
-            if normalize_label(clean_text(cell.value)) not in normalized_labels:
-                continue
-            target = row[index + 1]
-            if normalize_label(clean_text(target.value)) in {normalize_label(item) for item in LABEL_LIKE_VALUES}:
-                continue
-            target.value = new_value
-            if isinstance(new_value, date):
-                target.number_format = "yyyy-mm-dd"
-            count += 1
-    return count
-
-
-def update_revision_history_sheet(sheet: Worksheet, revision_date: date, author: str) -> int:
-    for row in sheet.iter_rows():
-        labels = [normalize_label(clean_text(cell.value)) for cell in row]
-        header_map = revision_header_map(labels)
-        if not header_map:
-            continue
-        date_idx = header_map["date"]
-        author_idx = header_map["author"]
-        for data_row in sheet.iter_rows(min_row=row[0].row + 1, max_col=max(date_idx, author_idx) + 1):
-            version = clean_text(data_row[0].value)
-            if VERSION_PATTERN.fullmatch(version):
-                data_row[0].value = "0.1"
-                data_row[date_idx].value = revision_date
-                data_row[date_idx].number_format = "yyyy-mm-dd"
-                data_row[author_idx].value = author
-                return 3
-        return 0
-    return 0
-
-
 def write_updated_hwpx_metadata(path: Path, author: str, revision_date: str, approval_author: str) -> tuple[int, int]:
     temp_path = path.with_name(f".metadata_{path.name}")
     cover_count = 0
@@ -1464,7 +1421,7 @@ def update_unlabeled_header_metadata_block(
             continue
 
         header_revision_date = format_date_like_existing(revision_date, values[2])
-        updates = [(1, DOCUMENT_VERSION_VALUE), (2, header_revision_date), (3, author)]
+        updates = [(1, UNLABELED_HEADER_VERSION_VALUE), (2, header_revision_date), (3, author)]
         updated_row = row_xml
         offset = 0
         count = 0

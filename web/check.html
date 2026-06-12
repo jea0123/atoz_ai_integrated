@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>산출물 매핑 확인</title>
-  <link rel="stylesheet" href="/static/check.css?v=20260511-blue-polish">
+  <link rel="stylesheet" href="/static/check.css?v=20260610-match-mode-toggle">
 </head>
 <body>
   <main class="app-shell">
@@ -27,15 +27,16 @@
 
           <fieldset class="mode-toggle">
             <legend>
-              <span>매칭 방식</span>
+              <span>매칭</span>
               <small id="runtimeMode">실행 모드 확인 중</small>
             </legend>
-            <label>
-              <input type="radio" name="match_mode" value="ai_first" checked>
-              <span>
-                <strong>AI 우선</strong>
-                <small>문서를 읽고 먼저 판단</small>
-              </span>
+            <div class="mode-summary">
+              <strong>규칙 매칭</strong>
+              <small>파일명, 경로, 문서명 기준</small>
+            </div>
+            <label class="mode-check">
+              <input id="aiFallbackToggle" type="checkbox" checked>
+              <span>미매칭만 AI 확인</span>
             </label>
           </fieldset>
 
@@ -51,6 +52,13 @@
             <span class="file-mark">DIR</span>
             <strong>검사 폴더</strong>
             <small id="folderName">미선택 시 data\테스트 사용</small>
+          </label>
+
+          <label class="drop-zone" for="requirementFiles">
+            <input id="requirementFiles" name="requirement_files" type="file" multiple>
+            <span class="file-mark">REQ</span>
+            <strong>요구사항 파일명</strong>
+            <small id="requirementName">파일명 기준 SFR별 복제</small>
           </label>
 
           <button class="primary-button" id="runButton" type="submit">
@@ -122,6 +130,6 @@
   </main>
 
   <script src="/static/header.js?v=20260508-apply-errors"></script>
-  <script src="/static/check.js?v=20260521-merge-result"></script>
+  <script src="/static/check.js?v=20260610-match-mode-toggle"></script>
 </body>
 </html>

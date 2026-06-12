@@ -237,9 +237,6 @@ def extract_process_flow_steps(screen_text):
 
   return steps
 
-def estimate_process_step_count(screen_text):
-  return len(extract_process_flow_steps(screen_text))
-
 def parse_llm_json(response_text):
   try:
     return json.loads(response_text)

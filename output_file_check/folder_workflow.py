@@ -14,7 +14,7 @@ from output_file_check.folder_apply_ops import (
 )
 from output_file_check.folder_mapping import build_folder_mapping, build_folder_policy_from_fields
 from output_file_check.folder_serialization import serialize_check_result
-from web_uploads import save_check_uploads
+from web_uploads import save_check_uploads, save_requirement_uploads
 
 
 DEFAULT_CHECK_FOLDER = BASE_DIR / "data" / "테스트"
@@ -100,6 +100,7 @@ def run_web_folder_apply(fields: dict[str, str], file_items: dict[str, list[tupl
 
     try:
         standard_file, uploaded_folder = save_check_uploads(temp_dir, file_items, fallback_folder=DEFAULT_CHECK_FOLDER)
+        requirement_files = save_requirement_uploads(temp_dir, file_items)
         folder_policy = build_folder_policy_from_fields(fields)
         dump_parent = resolve_dump_parent(fields.get("dump_path", ""))
         source_root = effective_uploaded_root(uploaded_folder)
@@ -112,6 +113,7 @@ def run_web_folder_apply(fields: dict[str, str], file_items: dict[str, list[tupl
             temp_dir,
             request_id,
             log_prefix="folder_apply",
+            requirement_files=requirement_files,
         )
         remove_runtime_path(temp_dir)
         return payload

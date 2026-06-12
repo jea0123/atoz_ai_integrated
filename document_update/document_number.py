@@ -30,6 +30,39 @@ from .ppt_ooxml import PPT_DOCUMENT_SUFFIXES, write_updated_ppt_document
 
 
 DOCUMENT_NUMBER_LABEL = "\ubb38\uc11c\ubc88\ud638"
+DOCUMENT_NUMBER_LABELS = {DOCUMENT_NUMBER_LABEL, "문서 번호", "문 서 번호"}
+DOCUMENT_VERSION_VALUE = "v0.1"
+UNLABELED_HEADER_VERSION_VALUE = DOCUMENT_VERSION_VALUE
+DOCUMENT_VERSION_LABELS = {"문서버전", "문 서 버 전", "Version"}
+DOCUMENT_NUMBER_LABEL_LIKE_VALUES = {
+    "문서명",
+    "문서제목",
+    "산출물명",
+    "문서버전",
+    "버전",
+    "개정일자",
+    "작성자",
+    "승인",
+    "개정사유",
+    "개정이력",
+}
+VERSION_PATTERN = re.compile(r"^[vV]?\d+(?:\.\d+)*$")
+DATE_VALUE_PATTERN = re.compile(r"^\d{4}[-./]\d{1,2}[-./]\d{1,2}$")
+HEADER_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?header)\b[^>]*>.*?</(?P=tag)>", re.DOTALL)
+
+
+def normalize_document_number_label(value: str) -> str:
+    return re.sub(r"\s+", "", value or "")
+
+
+def is_document_number_label(value: str) -> bool:
+    label = normalize_document_number_label(value.strip())
+    return label in {normalize_document_number_label(item) for item in DOCUMENT_NUMBER_LABELS}
+
+
+def is_document_version_label(value: str) -> bool:
+    label = normalize_document_number_label(value.strip())
+    return label in {normalize_document_number_label(item) for item in DOCUMENT_VERSION_LABELS}
 
 
 def infer_document_number_from_filename(file_path: Path) -> str:
@@ -49,6 +82,13 @@ def unique_scan_values(*values: str) -> list[str]:
             result.append(value)
 
     return result
+
+
+def append_unique_scan_values(values: list[str], *items: str) -> None:
+    for item in items:
+        item = item.strip()
+        if item and item not in values:
+            values.append(item)
 
 
 def get_cell_text(cell_xml: str) -> str:
@@ -121,32 +161,183 @@ def replace_cell_text(cell_xml: str, new_text: str) -> tuple[str, str]:
     raise RuntimeError("문서번호 오른쪽 칸에 텍스트를 넣을 위치를 찾지 못했습니다.")
 
 
-def replace_document_number_in_section(xml: str, new_document_number: str) -> tuple[str, str]:
-    """문서번호 행을 찾아 바로 오른쪽 셀에 새 문서번호를 쓴다."""
-    # 문서번호 라벨 바로 오른쪽 셀만 덮어쓴다.
+def find_document_number_cell_value(xml: str) -> str:
     for row_match in ROW_PATTERN.finditer(xml):
         row_xml = row_match.group(0)
         cells = list(CELL_PATTERN.finditer(row_xml))
+        for cell_index, cell_match in enumerate(cells[:-1]):
+            label_text = get_cell_text(cell_match.group(0)).strip()
+            if is_document_number_label(label_text):
+                target_text = get_cell_text(cells[cell_index + 1].group(0)).strip()
+                if target_text and not is_document_number_value_cell(target_text):
+                    continue
+                return target_text
+    return ""
+
+
+def is_document_number_value_cell(value: str) -> bool:
+    text = value.strip()
+    if not text:
+        return False
+    label_like_values = {normalize_document_number_label(item) for item in DOCUMENT_NUMBER_LABEL_LIKE_VALUES}
+    return normalize_document_number_label(text) not in label_like_values
+
+
+def is_document_version_value_cell(value: str) -> bool:
+    label_like_values = {normalize_document_number_label(item) for item in DOCUMENT_NUMBER_LABEL_LIKE_VALUES}
+    return normalize_document_number_label(value) not in label_like_values
+
+
+def replace_document_number_labeled_cells(
+    xml: str,
+    new_document_number: str,
+) -> tuple[str, list[str], int, int]:
+    pieces: list[str] = []
+    last = 0
+    old_values: list[str] = []
+    changed_count = 0
+    found_count = 0
+
+    for row_match in ROW_PATTERN.finditer(xml):
+        row_xml = row_match.group(0)
+        cells = list(CELL_PATTERN.finditer(row_xml))
+        updated_row = row_xml
+        offset = 0
+        row_changed = False
 
         for cell_index, cell_match in enumerate(cells[:-1]):
             label_text = get_cell_text(cell_match.group(0)).strip()
-            if label_text != DOCUMENT_NUMBER_LABEL:
+            if not is_document_number_label(label_text):
                 continue
 
             target_cell_match = cells[cell_index + 1]
-            updated_cell, old_document_number = replace_cell_text(
+            old_document_number = get_cell_text(target_cell_match.group(0)).strip()
+            if old_document_number and not is_document_number_value_cell(old_document_number):
+                continue
+            old_values.append(old_document_number)
+            found_count += 1
+            if old_document_number == new_document_number:
+                continue
+
+            updated_cell, _old_document_number = replace_cell_text(
                 target_cell_match.group(0),
                 new_document_number,
             )
-            updated_row = (
-                row_xml[:target_cell_match.start()]
-                + updated_cell
-                + row_xml[target_cell_match.end():]
-            )
-            updated_xml = xml[:row_match.start()] + updated_row + xml[row_match.end():]
-            return updated_xml, old_document_number.strip()
+            start = target_cell_match.start() + offset
+            end = target_cell_match.end() + offset
+            updated_row = updated_row[:start] + updated_cell + updated_row[end:]
+            offset += len(updated_cell) - len(target_cell_match.group(0))
+            changed_count += 1
+            row_changed = True
 
-    raise RuntimeError("첫 번째 장에서 문서번호 바로 오른쪽 ID 칸을 찾지 못했습니다.")
+        if row_changed:
+            pieces.append(xml[last:row_match.start()])
+            pieces.append(updated_row)
+            last = row_match.end()
+
+    if not pieces:
+        return xml, old_values, changed_count, found_count
+
+    pieces.append(xml[last:])
+    return "".join(pieces), old_values, changed_count, found_count
+
+
+def replace_document_version_labeled_cells(xml: str) -> tuple[str, int]:
+    pieces: list[str] = []
+    last = 0
+    changed_count = 0
+
+    for row_match in ROW_PATTERN.finditer(xml):
+        row_xml = row_match.group(0)
+        cells = list(CELL_PATTERN.finditer(row_xml))
+        updated_row = row_xml
+        offset = 0
+        row_changed = False
+
+        for cell_index, cell_match in enumerate(cells[:-1]):
+            label_text = get_cell_text(cell_match.group(0)).strip()
+            if not is_document_version_label(label_text):
+                continue
+
+            target_cell_match = cells[cell_index + 1]
+            old_version = get_cell_text(target_cell_match.group(0)).strip()
+            if not is_document_version_value_cell(old_version) or old_version == DOCUMENT_VERSION_VALUE:
+                continue
+
+            updated_cell, _old_version = replace_cell_text(target_cell_match.group(0), DOCUMENT_VERSION_VALUE)
+            start = target_cell_match.start() + offset
+            end = target_cell_match.end() + offset
+            updated_row = updated_row[:start] + updated_cell + updated_row[end:]
+            offset += len(updated_cell) - len(target_cell_match.group(0))
+            changed_count += 1
+            row_changed = True
+
+        if row_changed:
+            pieces.append(xml[last:row_match.start()])
+            pieces.append(updated_row)
+            last = row_match.end()
+
+    if not pieces:
+        return xml, 0
+
+    pieces.append(xml[last:])
+    return "".join(pieces), changed_count
+
+
+def replace_unlabeled_header_version_cells(xml: str) -> tuple[str, int]:
+    pieces: list[str] = []
+    last = 0
+    changed_count = 0
+
+    for header_match in HEADER_PATTERN.finditer(xml):
+        header_xml = header_match.group(0)
+        updated_header, count = replace_unlabeled_header_version_block(header_xml)
+        if not count:
+            continue
+        pieces.append(xml[last:header_match.start()])
+        pieces.append(updated_header)
+        last = header_match.end()
+        changed_count += count
+
+    if not pieces:
+        return xml, 0
+
+    pieces.append(xml[last:])
+    return "".join(pieces), changed_count
+
+
+def replace_unlabeled_header_version_block(header_xml: str) -> tuple[str, int]:
+    for row_match in ROW_PATTERN.finditer(header_xml):
+        row_xml = row_match.group(0)
+        cells = list(CELL_PATTERN.finditer(row_xml))
+        if len(cells) < 4:
+            continue
+
+        values = [get_cell_text(cell.group(0)).strip() for cell in cells]
+        if not looks_like_unlabeled_header_metadata_row(values):
+            continue
+
+        version_cell = cells[1]
+        old_version = values[1]
+        if old_version == UNLABELED_HEADER_VERSION_VALUE:
+            return header_xml, 0
+
+        updated_cell, _old_version = replace_cell_text(version_cell.group(0), UNLABELED_HEADER_VERSION_VALUE)
+        updated_row = row_xml[:version_cell.start()] + updated_cell + row_xml[version_cell.end():]
+        return header_xml[:row_match.start()] + updated_row + header_xml[row_match.end():], 1
+
+    return header_xml, 0
+
+
+def looks_like_unlabeled_header_metadata_row(values: list[str]) -> bool:
+    if len(values) < 4:
+        return False
+    return (
+        bool(OUTPUT_ID_PATTERN.search(values[0]))
+        and (not values[1] or bool(VERSION_PATTERN.fullmatch(values[1])))
+        and bool(DATE_VALUE_PATTERN.fullmatch(values[2].strip()))
+        and normalize_document_number_label(values[3]) not in {normalize_document_number_label(item) for item in DOCUMENT_NUMBER_LABEL_LIKE_VALUES}
+    )
 
 
 def replace_matching_text_nodes(xml: str, old_text: str, new_text: str) -> tuple[str, int]:
@@ -258,10 +449,7 @@ def write_updated_hwpx_document(
 
     with zipfile.ZipFile(file_path, "r") as source_zip:
         section_xml = source_zip.read("Contents/section0.xml").decode("utf-8", errors="ignore")
-        _, old_document_number = replace_document_number_in_section(
-            section_xml,
-            new_document_number,
-        )
+        old_document_number = find_document_number_cell_value(section_xml)
 
     document_numbers_to_scan = unique_scan_values(
         old_document_number,
@@ -275,7 +463,7 @@ def write_updated_hwpx_document(
     title_replace_count = 0
     project_title_replace_count = 0
     matching_document_number_replace_count = 0
-    replaced = False
+    document_number_position_found = False
 
     try:
         with zipfile.ZipFile(file_path, "r") as zin:
@@ -302,12 +490,25 @@ def write_updated_hwpx_document(
                             project_title_replace_count += count
                             changed = True
 
-                        if item.filename == "Contents/section0.xml":
-                            xml, old_document_number = replace_document_number_in_section(
-                                xml,
-                                new_document_number,
-                            )
-                            replaced = True
+                        (
+                            xml,
+                            labeled_old_document_numbers,
+                            labeled_replace_count,
+                            labeled_found_count,
+                        ) = replace_document_number_labeled_cells(xml, new_document_number)
+                        if labeled_found_count:
+                            document_number_position_found = True
+                        if labeled_replace_count:
+                            append_unique_scan_values(document_numbers_to_scan, *labeled_old_document_numbers)
+                            matching_document_number_replace_count += labeled_replace_count
+                            changed = True
+
+                        xml, count = replace_document_version_labeled_cells(xml)
+                        if count:
+                            changed = True
+
+                        xml, count = replace_unlabeled_header_version_cells(xml)
+                        if count:
                             changed = True
 
                         for document_number_to_scan in document_numbers_to_scan:
@@ -326,7 +527,7 @@ def write_updated_hwpx_document(
 
                     zout.writestr(item, data)
 
-        if not replaced:
+        if not document_number_position_found and not matching_document_number_replace_count:
             raise RuntimeError("첫 번째 장에서 문서번호 바로 오른쪽 ID 칸을 찾지 못했습니다.")
 
         updated_path = write_path
@@ -402,6 +603,7 @@ def write_updated_excel_document(
                     updated_sheet,
                     header_project_count,
                     header_document_number_count,
+                    header_version_count,
                 ) = replace_excel_sheet_header_values(
                     sheet_xml,
                     shared_strings,
@@ -410,7 +612,7 @@ def write_updated_excel_document(
                     document_numbers_to_scan,
                     new_document_number,
                 )
-                if sheet.path == cover_sheet_path or header_project_count or header_document_number_count:
+                if sheet.path == cover_sheet_path or header_project_count or header_document_number_count or header_version_count:
                     updated_sheets[sheet.path] = updated_sheet
                     project_title_replace_count += header_project_count
                     document_number_replace_count += header_document_number_count
