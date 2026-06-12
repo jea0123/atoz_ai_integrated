@@ -77,10 +77,10 @@ METADATA_LABEL_PATTERN = re.compile(
 )
 
 
-def read_standard_project_title(standard_file: Path) -> str:
+def read_standard_project_title(standard_file: Path, standard_text: str | None = None) -> str:
     # 문서관리표준에서 프로젝트명/사업명을 추정한다.
     """문서관리표준 표지에서 사업명/프로젝트명을 읽는다."""
-    text = extract_standard_text(standard_file)
+    text = standard_text if standard_text is not None else extract_standard_text(standard_file)
     first_part = text[:6000]
     lines = meaningful_lines(first_part)
 

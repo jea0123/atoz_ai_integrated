@@ -1,4 +1,4 @@
-# AI 우선 산출물 매칭의 핵심입니다. 규칙은 후보 축소/검증에만 사용합니다.
+# 산출물 매칭의 핵심입니다. 기본은 규칙 우선이며 필요한 경우에만 AI로 보강합니다.
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,14 +8,14 @@ from app_runtime import log_event, parse_json_object
 from document_update.ollama_client import generate
 from output_file_check.content_identity import extract_file_cover_text, find_document_number, read_file_identity
 from output_file_check.folder_policy import FolderPolicy, relative_parent_parts
-from output_file_check.matcher import score_file
+from output_file_check.matcher import score_file, strip_parenthetical_content
 from output_file_check.models import FileIdentity, MatchCandidate, OutputMatch, PathTemplate, ScannedFile, StandardOutput
 from output_file_check.normalization import normalize_for_match, strip_attachment_tail
 
 
 AI_PREVIEW_CHARS = 900
 AI_LOG_PREVIEW_CHARS = 700
-FOLDER_AI_TIMEOUT_SECONDS = 12
+FOLDER_AI_TIMEOUT_SECONDS = 8
 
 
 def build_outputs_from_path_templates(
@@ -104,9 +104,11 @@ def match_files_by_ai_first(
     folder_policy: FolderPolicy | None,
     ollama_url: str,
     model: str,
+    all_outputs: list[StandardOutput] | None = None,
 ) -> list[OutputMatch]:
     """AI 우선 매칭의 메인 흐름이다. 규칙은 AI에 보낼 후보 축소에만 관여한다."""
     output_by_name = index_outputs_by_name(outputs)
+    all_outputs_for_filter = all_outputs or outputs
     candidates_by_output = empty_candidate_map(outputs)
     files_by_output = empty_file_scope_map(outputs)
     usable_templates = usable_templates_for_outputs(path_templates, output_by_name)
@@ -116,7 +118,15 @@ def match_files_by_ai_first(
             log_event("ai_match.skipped", file=str(file_for_ai.path), reason="missing_cover_text")
             continue
 
-        title_outputs = outputs_matching_document_title(file_for_ai, outputs)
+        title_outputs_all = outputs_matching_document_title(file_for_ai, all_outputs_for_filter)
+        title_outputs = [
+            output
+            for output in title_outputs_all
+            if normalize_for_check_key(output.output_name) in output_by_name
+        ]
+        if title_outputs_all and not title_outputs:
+            log_event("ai_match.skipped", file=str(file_for_ai.path), reason="other_output_title")
+            continue
         if len(title_outputs) == 1:
             output = title_outputs[0]
             key = normalize_for_check_key(output.output_name)
@@ -158,24 +168,109 @@ def match_files_by_ai_first(
         outputs=len(outputs),
     )
 
-    for output in outputs:
+    ai_batch_failed = False
+    for output_index, output in enumerate(outputs, start=1):
+        if ai_batch_failed:
+            break
         key = normalize_for_check_key(output.output_name)
         output_files = list(files_by_output.get(key, {}).values())
         if not output_files:
             continue
-        candidates_by_output.setdefault(key, []).extend(
-            ai_score_files_for_output(
-                output,
-                output_files,
-                root_folder,
-                expected_project_title=expected_project_title,
-                ollama_url=ollama_url,
-                model=model,
-                all_outputs=outputs,
-            )
+        scored_candidates, ai_batch_failed = ai_score_files_for_output(
+            output,
+            output_files,
+            root_folder,
+            expected_project_title=expected_project_title,
+            ollama_url=ollama_url,
+            model=model,
+            all_outputs=all_outputs_for_filter,
         )
+        candidates_by_output.setdefault(key, []).extend(scored_candidates)
+        if ai_batch_failed:
+            log_event(
+                "ai_match.stopped_after_error",
+                output_id=output.output_id,
+                output_name=output.output_name,
+                remaining_outputs=max(len(outputs) - output_index, 0),
+            )
 
     return output_matches_from_candidates(outputs, candidates_by_output)
+
+
+def match_files_by_rule_with_ai_fallback(
+    outputs: list[StandardOutput],
+    files: list[ScannedFile],
+    path_templates: list[PathTemplate],
+    root_folder: Path,
+    *,
+    threshold: float,
+    expected_project_title: str,
+    folder_policy: FolderPolicy | None,
+    ollama_url: str,
+    model: str,
+) -> list[OutputMatch]:
+    """규칙 매칭을 먼저 실행하고, 매칭이 비어 있는 산출물만 AI로 보강한다."""
+    rule_matches = match_files_by_folder_path(
+        outputs,
+        files,
+        path_templates,
+        root_folder,
+        threshold=threshold,
+        folder_policy=folder_policy,
+    )
+    missing_outputs = [match.output for match in rule_matches if not match.candidates]
+    if not missing_outputs or not ollama_url:
+        return rule_matches
+
+    claimed_paths = {
+        candidate.file.path
+        for match in rule_matches
+        for candidate in match.candidates
+    }
+    fallback_files = [file for file in files if file.path not in claimed_paths]
+    if not fallback_files:
+        return rule_matches
+
+    log_event(
+        "ai_match.fallback_scope",
+        outputs=len(outputs),
+        missing_outputs=len(missing_outputs),
+        files=len(files),
+        fallback_files=len(fallback_files),
+    )
+    ai_matches = match_files_by_ai_first(
+        missing_outputs,
+        fallback_files,
+        path_templates,
+        root_folder,
+        threshold=threshold,
+        expected_project_title=expected_project_title,
+        folder_policy=folder_policy,
+        ollama_url=ollama_url,
+        model=model,
+        all_outputs=outputs,
+    )
+    return merge_rule_matches_with_ai_fallback(rule_matches, ai_matches)
+
+
+def merge_rule_matches_with_ai_fallback(
+    rule_matches: list[OutputMatch],
+    ai_matches: list[OutputMatch],
+) -> list[OutputMatch]:
+    ai_by_output = {
+        normalize_for_check_key(match.output.output_name): match
+        for match in ai_matches
+        if match.candidates
+    }
+    merged: list[OutputMatch] = []
+    for match in rule_matches:
+        if match.candidates:
+            merged.append(match)
+            continue
+
+        fallback = ai_by_output.get(normalize_for_check_key(match.output.output_name))
+        merged.append(fallback or match)
+    return merged
 
 
 def empty_candidate_map(outputs: list[StandardOutput]) -> dict[str, list[MatchCandidate]]:
@@ -348,18 +443,18 @@ def outputs_matching_document_title(file: ScannedFile, outputs: list[StandardOut
     identity = file.identity
     if identity is None or not identity.document_title:
         return []
-    return outputs_matching_text(identity.document_title, outputs)
+    return outputs_matching_text(identity.document_title, outputs, strip_parenthetical=True)
 
 
 def outputs_matching_cover_text(file: ScannedFile, outputs: list[StandardOutput]) -> list[StandardOutput]:
     identity = file.identity
     if identity is None:
         return []
-    return outputs_matching_text(identity.preview_text, outputs)
+    return outputs_matching_text(identity.preview_text, outputs, strip_parenthetical=True)
 
 
-def outputs_matching_text(text: str, outputs: list[StandardOutput]) -> list[StandardOutput]:
-    text_keys = normalize_text_variants_for_match(text)
+def outputs_matching_text(text: str, outputs: list[StandardOutput], *, strip_parenthetical: bool = False) -> list[StandardOutput]:
+    text_keys = normalize_text_variants_for_match(text, strip_parenthetical=strip_parenthetical)
     if not text_keys:
         return []
     matched: list[StandardOutput] = []
@@ -367,18 +462,18 @@ def outputs_matching_text(text: str, outputs: list[StandardOutput]) -> list[Stan
         if any(
             text_matches_alias_key(text_key, alias_key)
             for text_key in text_keys
-            for alias_key in output_match_alias_keys(output)
+            for alias_key in output_match_alias_keys(output, strip_parenthetical=strip_parenthetical)
         ):
             matched.append(output)
     return matched
 
 
-def output_match_alias_keys(output: StandardOutput) -> list[str]:
-    canonical_key = normalize_for_match(output.output_name)
+def output_match_alias_keys(output: StandardOutput, *, strip_parenthetical: bool = False) -> list[str]:
+    canonical_key = normalize_text_for_match(output.output_name, strip_parenthetical=strip_parenthetical)
     keys: list[str] = []
     seen: set[str] = set()
     for alias in (output.output_name, *output.aliases):
-        for alias_key in normalize_text_variants_for_match(alias):
+        for alias_key in normalize_text_variants_for_match(alias, strip_parenthetical=strip_parenthetical):
             if not alias_key or alias_key in seen:
                 continue
             if alias_key != canonical_key and is_too_generic_alias(alias_key, canonical_key):
@@ -388,14 +483,14 @@ def output_match_alias_keys(output: StandardOutput) -> list[str]:
     return keys
 
 
-def normalize_text_variants_for_match(value: str) -> list[str]:
+def normalize_text_variants_for_match(value: str, *, strip_parenthetical: bool = False) -> list[str]:
     variants = [value]
     without_attachment_tail = strip_attachment_tail(value)
     if without_attachment_tail and without_attachment_tail != value:
         variants.append(without_attachment_tail)
 
-    without_parenthetical = remove_parenthetical_text(value)
-    if without_parenthetical != value:
+    without_parenthetical = remove_parenthetical_text(value) if strip_parenthetical else value
+    if strip_parenthetical and without_parenthetical != value:
         variants.append(without_parenthetical)
 
     keys: list[str] = []
@@ -408,8 +503,13 @@ def normalize_text_variants_for_match(value: str) -> list[str]:
     return keys
 
 
+def normalize_text_for_match(value: str, *, strip_parenthetical: bool = False) -> str:
+    text = remove_parenthetical_text(value) if strip_parenthetical else value
+    return normalize_for_match(text)
+
+
 def remove_parenthetical_text(value: str) -> str:
-    return re.sub(r"[\(\[\{（［｛][^)\]\}）］｝]*[\)\]\}）］｝]", "", value)
+    return strip_parenthetical_content(value)
 
 
 def is_too_generic_alias(alias_key: str, canonical_key: str) -> bool:
@@ -449,8 +549,9 @@ def ai_score_files_for_output(
     ollama_url: str,
     model: str,
     all_outputs: list[StandardOutput],
-) -> list[MatchCandidate]:
+) -> tuple[list[MatchCandidate], bool]:
     """산출물 하나의 후보 파일 묶음을 AI가 한 번에 보고 실제 반영 대상을 고른다."""
+    ai_batch_failed = False
     try:
         selected_indexes = ask_ai_for_output_file_matches(
             output,
@@ -462,6 +563,7 @@ def ai_score_files_for_output(
             all_outputs,
         )
     except Exception as exc:
+        ai_batch_failed = True
         selected_indexes = repair_under_selected_indexes(output, files, [], all_outputs)
         log_event(
             "ai_match.batch_error",
@@ -492,7 +594,7 @@ def ai_score_files_for_output(
             source="ai_batch",
         )
         candidates.append(candidate)
-    return candidates
+    return candidates, ai_batch_failed
 
 
 def file_with_cover_identity(file: ScannedFile, output: StandardOutput) -> ScannedFile:
@@ -555,6 +657,7 @@ Candidate files:
         output_name=output.output_name,
         file_count=len(files),
         expected_indexes=list(range(1, len(files) + 1)),
+        timeout_seconds=FOLDER_AI_TIMEOUT_SECONDS,
         files=[
             {
                 "index": index,
@@ -568,7 +671,7 @@ Candidate files:
         ollama_url,
         model,
         prompt,
-        timeout=max(FOLDER_AI_TIMEOUT_SECONDS, 20),
+        timeout=FOLDER_AI_TIMEOUT_SECONDS,
         options={"temperature": 0, "num_predict": 260},
         response_format="json",
     )

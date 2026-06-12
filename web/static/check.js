@@ -2,8 +2,10 @@
 const form = document.querySelector("#checkForm");
 const standardFile = document.querySelector("#standardFile");
 const folderFiles = document.querySelector("#folderFiles");
+const requirementFiles = document.querySelector("#requirementFiles");
 const standardName = document.querySelector("#standardName");
 const folderName = document.querySelector("#folderName");
+const requirementName = document.querySelector("#requirementName");
 const statusBadge = document.querySelector("#statusBadge");
 const runButton = document.querySelector("#runButton");
 const applyButton = document.querySelector("#applyButton");
@@ -20,6 +22,7 @@ const visibleCount = document.querySelector("#visibleCount");
 const loadingOverlay = document.querySelector("#loadingOverlay");
 const applyReport = document.querySelector("#applyReport");
 const runtimeMode = document.querySelector("#runtimeMode");
+const aiFallbackToggle = document.querySelector("#aiFallbackToggle");
 const LAST_DUMP_ROOT_KEY = "atoz:lastDumpRoot";
 
 const expandedOutputs = new Set();
@@ -43,14 +46,17 @@ function setBadge(text, mode) {
 
 function modeLabel(mode) {
   const labels = {
+    rule_ai_fallback: "규칙 매칭 · 미매칭 AI 확인",
     ai_first: "AI 우선",
-    rule_fallback_no_ollama: "규칙 기반",
+    rule_only: "규칙 매칭만",
+    rule_fallback_no_ollama: "규칙 매칭만",
   };
   return labels[mode] || mode || "-";
 }
 
 function modeClass(mode) {
   if (mode === "ai_first") return "ai";
+  if (mode === "rule_only" || mode === "rule_fallback_no_ollama") return "no-ai";
   return "rule";
 }
 
@@ -59,9 +65,20 @@ function setRuntimeMode(data) {
   if (!runtimeMode || !currentRuntimeMode) return;
 
   const mode = currentRuntimeMode.mode || "unknown";
-  const modelText = currentRuntimeMode.model ? ` · ${currentRuntimeMode.model}` : "";
   runtimeMode.className = `mode-note ${modeClass(mode)}`;
-  runtimeMode.textContent = `${currentRuntimeMode.label || modeLabel(mode)}${modelText}`;
+  runtimeMode.textContent = currentRuntimeMode.label || modeLabel(mode);
+}
+
+function selectedMatchMode() {
+  return aiFallbackToggle?.checked ? "rule_ai_fallback" : "rule_only";
+}
+
+function syncMatchModeDisplay() {
+  setRuntimeMode({
+    ...(currentRuntimeMode || {}),
+    mode: selectedMatchMode(),
+    label: modeLabel(selectedMatchMode()),
+  });
 }
 
 async function loadRuntimeMode() {
@@ -87,6 +104,15 @@ function setLoading(isLoading) {
 
 function setFileSummary() {
   standardName.textContent = standardFile.files.length ? standardFile.files[0].name : "파일 선택";
+  if (requirementFiles) {
+    if (!requirementFiles.files.length) {
+      requirementName.textContent = "파일명 기준 SFR별 복제";
+    } else {
+      requirementName.textContent = requirementFiles.files.length > 1
+        ? `${requirementFiles.files[0].name} 외 ${requirementFiles.files.length - 1}개`
+        : requirementFiles.files[0].name;
+    }
+  }
   if (!folderFiles.files.length) {
     folderName.textContent = "기본 폴더: data\\테스트";
     return;
@@ -97,12 +123,17 @@ function setFileSummary() {
   folderName.textContent = `${rootName} · ${folderFiles.files.length}개`;
 }
 
-function buildFormData() {
+function buildFormData({ includeRequirementFiles = true } = {}) {
   const body = new FormData();
   body.append("standard_file", standardFile.files[0], standardFile.files[0].name);
 
   for (const file of folderFiles.files) {
     body.append("folder_files", file, file.webkitRelativePath || file.name);
+  }
+  if (includeRequirementFiles && requirementFiles) {
+    for (const file of requirementFiles.files) {
+      body.append("requirement_files", file, file.webkitRelativePath || file.name);
+    }
   }
 
   for (const element of form.elements) {
@@ -115,6 +146,7 @@ function buildFormData() {
       body.append(element.name, element.value);
     }
   }
+  body.append("match_mode", selectedMatchMode());
   body.append("excluded_candidate_paths", [...excludedCandidatePaths].join("\n"));
 
   return body;
@@ -192,6 +224,15 @@ function renderApplyReport(data) {
   const updated = items.filter((item) => item.status === "updated");
   const skipped = Number(data.skipped_file_count || 0);
   const filenameUnchanged = Number(data.filename_unchanged_count || 0);
+  const requirementEnabled = Boolean(data.requirement_generation_enabled);
+  const requirementCreated = Number(data.requirement_generated_file_count || 0);
+  const requirementFolders = Number(data.requirement_generated_folder_count || 0);
+  const requirementRemoved = Number(data.requirement_generation_removed_file_count || 0);
+  const requirementSkipped = Number(data.requirement_generation_skipped_count || 0);
+  const requirementWarnings = Number(data.requirement_generation_warning_count || 0);
+  const requirementErrors = Number(data.requirement_generation_error_count || 0);
+  const requirementReadme = data.requirement_generation_readme_path || "";
+  const hasErrors = failed.length || requirementErrors;
   const dumpRoot = data.dump_root || "";
   if (dumpRoot) {
     try {
@@ -202,15 +243,24 @@ function renderApplyReport(data) {
   }
 
   applyReport.hidden = false;
-  applyReport.className = `apply-report ${failed.length ? "has-errors" : "is-clean"}`;
+  applyReport.className = `apply-report ${hasErrors ? "has-errors" : "is-clean"}`;
   applyReport.innerHTML = `
     <div class="apply-report-head">
       <div>
         <strong>반영 결과</strong>
         <span>성공 ${updated.length}건 · 오류 ${failed.length}건 · 건너뜀 ${skipped}건 · 파일명 미변경 ${filenameUnchanged}건</span>
       </div>
-      <span class="apply-report-badge">${failed.length ? "확인 필요" : "오류 없음"}</span>
+      <span class="apply-report-badge">${hasErrors ? "확인 필요" : "오류 없음"}</span>
     </div>
+    ${
+      requirementEnabled
+        ? `<div class="apply-folder-result">
+            <span>요구사항 파일명별 자동 생성</span>
+            <code>ID 폴더 ${requirementFolders}건 · 생성 ${requirementCreated}건 · 기존 삭제 ${requirementRemoved}건 · ID 없음 ${requirementSkipped}건 · 경고 ${requirementWarnings}건 · 오류 ${requirementErrors}건</code>
+            ${requirementReadme ? `<code>${escapeHtml(requirementReadme)}</code>` : ""}
+          </div>`
+        : ""
+    }
     ${
       dumpRoot
         ? `<div class="apply-folder-result">
@@ -396,6 +446,8 @@ function clearResults(message) {
 
 standardFile.addEventListener("change", setFileSummary);
 folderFiles.addEventListener("change", setFileSummary);
+requirementFiles?.addEventListener("change", setFileSummary);
+aiFallbackToggle?.addEventListener("change", syncMatchModeDisplay);
 resultFilter.addEventListener("input", () => renderMatches(lastMatches));
 resultRows.addEventListener("change", (event) => {
   const input = event.target;
@@ -431,7 +483,7 @@ async function runRequest({ endpoint, busyText, preparingText, doneText, applyMo
   try {
     const response = await fetch(endpoint, {
       method: "POST",
-      body: buildFormData(),
+      body: buildFormData({ includeRequirementFiles: applyMode }),
     });
     const data = await response.json().catch(() => ({ error: "서버 응답을 읽지 못했습니다." }));
 

@@ -17,10 +17,28 @@ REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 XML_SPACE_ATTR = "{http://www.w3.org/XML/1998/namespace}space"
 DOCUMENT_NUMBER_LABEL = "\ubb38\uc11c\ubc88\ud638"
+DOCUMENT_VERSION_VALUE = "v0.1"
+UNLABELED_HEADER_VERSION_VALUE = DOCUMENT_VERSION_VALUE
+DOCUMENT_VERSION_LABELS = {"문서버전", "문 서 버 전", "Version"}
+LABEL_LIKE_VALUES = {
+    "문서명",
+    "문서제목",
+    "산출물명",
+    "문서번호",
+    "문서버전",
+    "버전",
+    "개정일자",
+    "작성자",
+    "승인",
+    "개정사유",
+    "개정이력",
+}
 EXCEL_DOCUMENT_SUFFIXES = {".xlsx", ".xlsm", ".xltx", ".xltm"}
 COVER_SHEET_HINT = "\ud45c\uc9c0"
 DRAWING_PARAGRAPH_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?p)\b[^>]*>.*?</(?P=tag)>", re.DOTALL)
 DRAWING_TEXT_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?t)\b[^>]*>(?P<text>.*?)</(?P=tag)>", re.DOTALL)
+VERSION_PATTERN = re.compile(r"^[vV]?\d+(?:\.\d+)*$")
+DATE_VALUE_PATTERN = re.compile(r"^\d{4}[-./]\d{1,2}[-./]\d{1,2}$")
 
 ET.register_namespace("", MAIN_NS)
 ET.register_namespace("r", REL_NS)
@@ -178,6 +196,20 @@ def iter_cells(root: ET.Element, shared_strings: list[str]) -> list[CellInfo]:
 
 def clean_cover_value(value: str) -> str:
     return value.strip().strip("\"'`<>")
+
+
+def normalize_metadata_label(value: str) -> str:
+    return re.sub(r"\s+", "", value or "")
+
+
+def is_document_version_label(value: str) -> bool:
+    label = normalize_metadata_label(clean_cover_value(value))
+    return label in {normalize_metadata_label(item) for item in DOCUMENT_VERSION_LABELS}
+
+
+def is_label_like_value(value: str) -> bool:
+    label = normalize_metadata_label(clean_cover_value(value))
+    return label in {normalize_metadata_label(item) for item in LABEL_LIKE_VALUES}
 
 
 def meaningful_cover_value(value: str) -> str:
@@ -411,6 +443,19 @@ def build_updated_excel_cover_sheet(
         document_number_count = 0 if old_document_number == new_document_number else 1
         break
 
+    cell_by_position = {(info.row, info.col): info for info in iter_cells(root, shared_strings)}
+    for info in iter_cells(root, shared_strings):
+        if not is_document_version_label(info.text):
+            continue
+
+        target_col = info.col + 1
+        target_ref = f"{col_to_name(target_col)}{info.row}"
+        target_info = cell_by_position.get((info.row, target_col))
+        old_version = clean_cover_value(target_info.text if target_info else "")
+        if is_label_like_value(old_version) or old_version == DOCUMENT_VERSION_VALUE:
+            continue
+        updates[target_ref] = (info.row, target_col, DOCUMENT_VERSION_VALUE)
+
     if not old_document_number and document_number_count == 0:
         raise RuntimeError("엑셀 표지에서 문서번호 오른쪽 칸을 찾지 못했습니다.")
 
@@ -444,9 +489,10 @@ def replace_excel_sheet_header_values(
     new_project_title: str | None,
     old_document_numbers: list[str],
     new_document_number: str,
-) -> tuple[bytes, int, int]:
+) -> tuple[bytes, int, int, int]:
     root = ET.fromstring(sheet_xml)
     replacements: dict[str, tuple[str, str]] = {}
+    cells = iter_cells(root, shared_strings)
 
     old_project = clean_cover_value(old_project_title or "")
     new_project = clean_cover_value(new_project_title or "")
@@ -458,23 +504,38 @@ def replace_excel_sheet_header_values(
         if old_document and old_document != clean_cover_value(new_document_number):
             replacements[old_document] = (new_document_number, "document")
 
-    if not replacements:
-        return sheet_xml.encode("utf-8"), 0, 0
-
     updates: dict[str, tuple[int, int, str, str]] = {}
-    for info in iter_cells(root, shared_strings):
+    cells_by_position = {(cell.row, cell.col): cell for cell in cells}
+    for info in cells:
         if info.row > EXCEL_HEADER_SCAN_MAX_ROW:
             continue
         replacement = replacements.get(clean_cover_value(info.text))
         if replacement:
             updates[info.ref] = (info.row, info.col, replacement[0], replacement[1])
+        if is_document_version_label(info.text):
+            target_col = info.col + 1
+            target_ref = f"{col_to_name(target_col)}{info.row}"
+            target_info = cells_by_position.get((info.row, target_col))
+            old_version = clean_cover_value(target_info.text if target_info else "")
+            if not is_label_like_value(old_version) and old_version != DOCUMENT_VERSION_VALUE:
+                updates[target_ref] = (info.row, target_col, DOCUMENT_VERSION_VALUE, "version")
+
+    for cell_ref, row, col, current_value in unlabeled_header_version_targets(cells):
+        if clean_cover_value(current_value) != UNLABELED_HEADER_VERSION_VALUE:
+            updates[cell_ref] = (
+                row,
+                col,
+                UNLABELED_HEADER_VERSION_VALUE,
+                "version",
+            )
 
     if not updates:
-        return sheet_xml.encode("utf-8"), 0, 0
+        return sheet_xml.encode("utf-8"), 0, 0, 0
 
     updated_xml_text = sheet_xml
     project_count = 0
     document_number_count = 0
+    version_count = 0
     for cell_ref, (row_index, col_index, value, kind) in updates.items():
         updated_xml_text = replace_or_insert_cell_xml(
             updated_xml_text,
@@ -487,8 +548,50 @@ def replace_excel_sheet_header_values(
             project_count += 1
         elif kind == "document":
             document_number_count += 1
+        elif kind == "version":
+            version_count += 1
 
-    return updated_xml_text.encode("utf-8"), project_count, document_number_count
+    return updated_xml_text.encode("utf-8"), project_count, document_number_count, version_count
+
+
+def unlabeled_header_version_targets(cells: list[CellInfo]) -> list[tuple[str, int, int, str]]:
+    rows: dict[int, list[CellInfo]] = {}
+    for cell in cells:
+        if cell.row <= EXCEL_HEADER_SCAN_MAX_ROW:
+            rows.setdefault(cell.row, []).append(cell)
+
+    result: list[tuple[str, int, int, str]] = []
+    for row_index in sorted(rows):
+        row_cells = sorted(rows[row_index], key=lambda item: item.col)
+        row_values = [clean_cover_value(cell.text) for cell in row_cells]
+        output_cell = next((cell for cell in row_cells if OUTPUT_ID_PATTERN.search(clean_cover_value(cell.text))), None)
+        if output_cell is None:
+            continue
+
+        date_cell = next(
+            (cell for cell in row_cells if DATE_VALUE_PATTERN.fullmatch(clean_cover_value(cell.text))),
+            None,
+        )
+        if date_cell is None:
+            continue
+
+        version_cell = next(
+            (
+                cell
+                for cell in row_cells
+                if cell.col < date_cell.col and VERSION_PATTERN.fullmatch(clean_cover_value(cell.text))
+            ),
+            None,
+        )
+        if version_cell is not None:
+            result.append((version_cell.ref, version_cell.row, version_cell.col, version_cell.text))
+            continue
+
+        inferred_col = date_cell.col - 1
+        if inferred_col > output_cell.col:
+            result.append((f"{col_to_name(inferred_col)}{date_cell.row}", date_cell.row, inferred_col, ""))
+
+    return result
 
 
 def replace_excel_drawing_header_values(
@@ -507,6 +610,7 @@ def replace_excel_drawing_header_values(
     texts = [unescape(match.group("text")) for match in text_matches]
     new_texts: dict[int, str] = {}
     paragraphs = drawing_paragraph_text_runs(drawing_xml, text_matches, texts)
+    add_unlabeled_drawing_version_update(new_texts, texts)
 
     title_count = 0
     project_count = 0
@@ -570,6 +674,44 @@ def replace_excel_drawing_header_values(
         last = match.end("text")
     pieces.append(drawing_xml[last:])
     return "".join(pieces).encode("utf-8"), title_count, project_count, document_number_count
+
+
+def add_unlabeled_drawing_version_update(new_texts: dict[int, str], texts: list[str]) -> None:
+    combined = "".join(texts)
+    date_match = select_drawing_metadata_date(combined)
+    if date_match is None:
+        return
+    version_match = select_drawing_metadata_version(combined, date_match.start())
+    if version_match is None:
+        return
+    replace_drawing_text_span(
+        new_texts,
+        texts,
+        list(range(len(texts))),
+        version_match.span(),
+        UNLABELED_HEADER_VERSION_VALUE,
+    )
+
+
+def select_drawing_metadata_date(text: str) -> re.Match[str] | None:
+    for match in re.finditer(r"\d{4}[-./]\d{1,2}[-./]\d{1,2}", text):
+        prefix = text[:match.start()]
+        if not OUTPUT_ID_PATTERN.search(prefix[-200:]):
+            continue
+        if not re.search(r"[vV]?\d+(?:\.\d+)+\s*$", prefix):
+            continue
+        return match
+    return None
+
+
+def select_drawing_metadata_version(text: str, before_index: int) -> re.Match[str] | None:
+    prefix = text[:before_index]
+    candidates = [
+        match
+        for match in re.finditer(r"[vV]?\d+(?:\.\d+)+", prefix)
+        if OUTPUT_ID_PATTERN.search(prefix[max(0, match.start() - 200):match.start()])
+    ]
+    return candidates[-1] if candidates else None
 
 
 def drawing_paragraph_text_runs(

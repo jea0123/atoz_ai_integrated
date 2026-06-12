@@ -18,6 +18,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--check-only", action="store_true", help="Only print matching results.")
     parser.add_argument("--json", action="store_true", help="Print full JSON payload.")
     parser.add_argument("--threshold", type=float, default=DEFAULT_MATCH_THRESHOLD, help="Match score threshold.")
+    parser.add_argument(
+        "--match-mode",
+        choices=("rule_ai_fallback", "rule_only", "ai_first"),
+        help="Matching mode. Defaults to rule-first with AI fallback when Ollama is configured.",
+    )
     parser.add_argument("--project-title", help="Override project title read from the standard.")
     parser.add_argument("--ignore-folders", help="Comma-separated folder names to ignore.")
     parser.add_argument("--transparent-folders", help="Comma-separated folder names ignored in path comparison.")
@@ -54,6 +59,7 @@ def build_fields(args: argparse.Namespace) -> dict[str, str]:
     fields = {"threshold": str(args.threshold)}
     optional_values = {
         "project_title": args.project_title,
+        "match_mode": args.match_mode,
         "ignore_folder_names": args.ignore_folders,
         "transparent_folder_names": args.transparent_folders,
         "map_only_under": args.map_only_under,

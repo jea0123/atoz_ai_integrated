@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 from difflib import SequenceMatcher
+import re
 
 from .models import MatchCandidate, ScannedFile, StandardOutput
 from .normalization import STANDARD_ID_IN_NAME_PATTERN, normalize_for_match, output_id_prefix, strip_attachment_tail
 
 
 DEFAULT_MATCH_THRESHOLD = 0.72
+PARENTHETICAL_CONTENT_PATTERN = re.compile(r"\([^()]*\)|\uFF08[^\uFF08\uFF09]*\uFF09")
 
 
 def score_file(
@@ -99,8 +101,8 @@ def score_content(output: StandardOutput, scanned_file: ScannedFile) -> MatchCan
     if identity is None or identity.error:
         return None
 
-    title_normalized = normalize_for_match(identity.document_title)
-    preview_normalized = normalize_for_match(identity.preview_text)
+    title_normalized = normalize_content_title_for_match(identity.document_title)
+    preview_normalized = normalize_content_title_for_match(identity.preview_text)
     output_id_upper = output.output_id.upper()
     preview_upper = identity.preview_text.upper()
 
@@ -114,7 +116,7 @@ def score_content(output: StandardOutput, scanned_file: ScannedFile) -> MatchCan
     best_score = 0.0
     best_reason = ""
     for alias in output.aliases or (output.output_name,):
-        alias_normalized = normalize_for_match(alias)
+        alias_normalized = normalize_content_title_for_match(alias)
         if not alias_normalized:
             continue
 
@@ -142,14 +144,14 @@ def has_document_title_conflict(output: StandardOutput, scanned_file: ScannedFil
     if identity is None or identity.error or not identity.document_title:
         return False
 
-    title_normalized = normalize_for_match(identity.document_title)
+    title_normalized = normalize_content_title_for_match(identity.document_title)
     if not title_normalized:
         return False
 
     aliases = output.aliases or (output.output_name,)
     best_score = 0.0
     for alias in aliases:
-        alias_normalized = normalize_for_match(alias)
+        alias_normalized = normalize_content_title_for_match(alias)
         if not alias_normalized:
             continue
         if alias_normalized == title_normalized:
@@ -159,4 +161,17 @@ def has_document_title_conflict(output: StandardOutput, scanned_file: ScannedFil
         best_score = max(best_score, SequenceMatcher(None, alias_normalized, title_normalized).ratio())
 
     return best_score < 0.72
+
+
+def normalize_content_title_for_match(value: str) -> str:
+    return normalize_for_match(strip_parenthetical_content(value))
+
+
+def strip_parenthetical_content(value: str) -> str:
+    text = str(value)
+    while True:
+        updated = PARENTHETICAL_CONTENT_PATTERN.sub(" ", text)
+        if updated == text:
+            return updated
+        text = updated
 

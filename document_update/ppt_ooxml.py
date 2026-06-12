@@ -30,9 +30,26 @@ NS = {"p": P_NS, "a": A_NS}
 
 METADATA_LABELS = ("문서번호", "Version", "버전", "개정일자", "작성자")
 DOCUMENT_NUMBER_LABEL = "문서번호"
+DOCUMENT_VERSION_VALUE = "v0.1"
+UNLABELED_HEADER_VERSION_VALUE = DOCUMENT_VERSION_VALUE
+DOCUMENT_VERSION_LABELS = {"문서버전", "문 서 버 전", "Version", "버전"}
+DOCUMENT_NUMBER_LABEL_LIKE_VALUES = {
+    "문서명",
+    "문서제목",
+    "산출물명",
+    "문서버전",
+    "버전",
+    "개정일자",
+    "작성자",
+    "승인",
+    "개정사유",
+    "개정이력",
+}
 PARAGRAPH_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?p)\b[^>]*>.*?</(?P=tag)>", re.DOTALL)
 TABLE_ROW_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?tr)\b[^>]*>.*?</(?P=tag)>", re.DOTALL)
 TABLE_CELL_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?tc)\b[^>]*>.*?</(?P=tag)>", re.DOTALL)
+VERSION_PATTERN = re.compile(r"^[vV]?\d+(?:\.\d+)*$")
+DATE_VALUE_PATTERN = re.compile(r"^\d{4}[-./]\d{1,2}[-./]\d{1,2}$")
 TITLE_KEYWORDS = (
     "계획서",
     "결과서",
@@ -239,6 +256,10 @@ def clean_cover_text(value: str) -> str:
     return text.strip(" -\t\r\n")
 
 
+def normalize_document_number_label(value: str) -> str:
+    return re.sub(r"\s+", "", clean_cover_text(value))
+
+
 def has_metadata_label(value: str) -> bool:
     return any(label in value for label in METADATA_LABELS)
 
@@ -360,6 +381,9 @@ def replace_document_number_cell(xml: str, new_document_number: str) -> tuple[st
                 continue
 
             target_cell_match = cells[cell_index + 1]
+            old_document_number = xml_fragment_text(target_cell_match.group(0))
+            if old_document_number and not is_document_number_value_cell(old_document_number):
+                continue
             updated_cell, old_document_number = replace_cell_text(
                 target_cell_match.group(0),
                 new_document_number,
@@ -376,6 +400,94 @@ def replace_document_number_cell(xml: str, new_document_number: str) -> tuple[st
             return updated_xml, old_document_number, 1
 
     return xml, "", 0
+
+
+def replace_document_version_cells(xml: str) -> tuple[str, int]:
+    pieces: list[str] = []
+    last = 0
+    count = 0
+
+    for row_match in TABLE_ROW_PATTERN.finditer(xml):
+        row_xml = row_match.group(0)
+        cells = list(TABLE_CELL_PATTERN.finditer(row_xml))
+        updated_row = row_xml
+        offset = 0
+        row_changed = False
+
+        for cell_index, cell_match in enumerate(cells[:-1]):
+            label_text = xml_fragment_text(cell_match.group(0))
+            if not is_document_version_label(label_text):
+                continue
+
+            target_cell_match = cells[cell_index + 1]
+            old_version = xml_fragment_text(target_cell_match.group(0))
+            if not is_document_version_value_cell(old_version) or old_version == DOCUMENT_VERSION_VALUE:
+                continue
+
+            updated_cell, _old_version = replace_cell_text(target_cell_match.group(0), DOCUMENT_VERSION_VALUE)
+            start = target_cell_match.start() + offset
+            end = target_cell_match.end() + offset
+            updated_row = updated_row[:start] + updated_cell + updated_row[end:]
+            offset += len(updated_cell) - len(target_cell_match.group(0))
+            count += 1
+            row_changed = True
+
+        unlabeled_index = unlabeled_header_version_cell_index(cells)
+        if unlabeled_index is not None:
+            version_cell = cells[unlabeled_index]
+            old_version = xml_fragment_text(version_cell.group(0))
+            if old_version != UNLABELED_HEADER_VERSION_VALUE:
+                updated_cell, _old_version = replace_cell_text(version_cell.group(0), UNLABELED_HEADER_VERSION_VALUE)
+                start = version_cell.start() + offset
+                end = version_cell.end() + offset
+                updated_row = updated_row[:start] + updated_cell + updated_row[end:]
+                count += 1
+                row_changed = True
+
+        if row_changed:
+            pieces.append(xml[last:row_match.start()])
+            pieces.append(updated_row)
+            last = row_match.end()
+
+    if not pieces:
+        return xml, 0
+
+    pieces.append(xml[last:])
+    return "".join(pieces), count
+
+
+def is_document_version_label(value: str) -> bool:
+    label = normalize_document_number_label(value)
+    return label in {normalize_document_number_label(item) for item in DOCUMENT_VERSION_LABELS}
+
+
+def unlabeled_header_version_cell_index(cells: list[re.Match[str]]) -> int | None:
+    if len(cells) < 4:
+        return None
+
+    values = [xml_fragment_text(cell.group(0)) for cell in cells]
+    if not OUTPUT_ID_PATTERN.search(values[0]):
+        return None
+    if values[1] and not VERSION_PATTERN.fullmatch(values[1]):
+        return None
+    if not DATE_VALUE_PATTERN.fullmatch(values[2]):
+        return None
+    if normalize_document_number_label(values[3]) in {normalize_document_number_label(item) for item in DOCUMENT_NUMBER_LABEL_LIKE_VALUES}:
+        return None
+    return 1
+
+
+def is_document_number_value_cell(value: str) -> bool:
+    text = clean_cover_text(value)
+    if not text:
+        return False
+    label_like_values = {normalize_document_number_label(item) for item in DOCUMENT_NUMBER_LABEL_LIKE_VALUES}
+    return normalize_document_number_label(text) not in label_like_values
+
+
+def is_document_version_value_cell(value: str) -> bool:
+    label_like_values = {normalize_document_number_label(item) for item in DOCUMENT_NUMBER_LABEL_LIKE_VALUES}
+    return normalize_document_number_label(value) not in label_like_values
 
 
 def write_updated_ppt_document(
@@ -441,6 +553,10 @@ def write_updated_ppt_document(
                         xml, count = replace_matching_text_nodes(xml, old_document_number, new_document_number)
                         if count:
                             document_number_replace_count += count
+                            changed = True
+
+                        xml, count = replace_document_version_cells(xml)
+                        if count:
                             changed = True
 
                         if changed:

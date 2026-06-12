@@ -1,4 +1,4 @@
-# 덤프 폴더 복사, 백업, 문서값 반영, 파일명 변경을 실행합니다.
+# 덤프 폴더 복사, 문서값 반영, 파일명 변경을 실행합니다.
 from __future__ import annotations
 
 from datetime import datetime
@@ -16,6 +16,7 @@ from document_update.document_number import write_updated_document
 from document_update.hwp_convert import start_allow_all_watcher, stop_allow_all_watcher
 from document_update.patterns import OUTPUT_ID_PATTERN
 from document_update.runtime_conversion import prepare_target_file
+from output_file_check.file_noise import copytree_ignore_noise, remove_noise_files
 from output_file_check.folder_mapping import (
     build_folder_mapping,
     normalize_relative_path_for_compare,
@@ -23,16 +24,28 @@ from output_file_check.folder_mapping import (
 )
 from output_file_check.folder_policy import FolderPolicy
 from output_file_check.folder_serialization import serialize_check_result
-from output_file_check.models import MatchCandidate, OutputMatch, StandardOutput
+from output_file_check.models import MatchCandidate, OutputMatch, PathTemplate, StandardOutput
 from output_file_check.normalization import filesystem_safe_stem, normalize_for_match, output_name_from_id
+from output_file_check.requirement_generation import (
+    RequirementGenerationResult,
+    generate_requirement_documents,
+)
 
 
 TEST_OUTPUT_ID_PATTERN = re.compile(r"\d{4,}(?:\([^)]*\))?")
 PRESERVED_TAIL_PATTERN = re.compile(
-    r"((?:(?:[_-][vV]\d+(?:\.\d+)*)|(?:[_-]SFR-[A-Za-z0-9-]+)|(?:\[[^\]]+\]))+)$",
+    r"((?:(?:[_-][vV]\d+(?:\.\d+)*)|(?:[_-]SFR-[A-Za-z0-9-]+))+)$",
     re.IGNORECASE,
 )
+ATTACHMENT_TAIL_PATTERN = re.compile(
+    r"^[\s_-]*(?:[\[\(（［｛]\s*(?:별첨|첨부)\s*\d*[^)\]\}）］｝]*[\)\]\}）］｝]|(?:별첨|첨부)\s*\d+)",
+    re.IGNORECASE,
+)
+REQUIREMENT_TAIL_PATTERN = re.compile(r"(?<![A-Z0-9])SFR-(?:[A-Z0-9]+-)*\d+(?![A-Z0-9])", re.IGNORECASE)
 VERSION_TAIL_PATTERN = re.compile(r"([_-])[vV]\d+(?:\.\d+)*")
+DEFAULT_FILENAME_VERSION_TAIL = "_v0.1"
+HANDOVER_RESULT_KEY = normalize_for_match("인수인계시험결과서")
+HANDOVER_CONFIRMATION_KEY = normalize_for_match("별첨1인수인계확인서")
 
 
 def clean_output_id(raw_text: str) -> str:
@@ -54,9 +67,9 @@ def validate_output_id(output_id: str) -> None:
 
 def build_target_filename(output: StandardOutput, old_path: Path) -> str:
     suffix = old_path.suffix
-    preserved_tail = extract_preserved_tail(old_path.stem)
     stem = build_standard_stem(output)
-    return f"{filesystem_safe_stem(stem)}{preserved_tail}{suffix}"
+    preserved_tail = extract_preserved_tail(old_path.stem, stem)
+    return f"{filesystem_safe_stem(f'{stem}{preserved_tail}')}{suffix}"
 
 
 def build_standard_stem(output: StandardOutput) -> str:
@@ -72,17 +85,68 @@ def build_standard_stem(output: StandardOutput) -> str:
     return f"{output.output_id}-{output_name}" if output.output_id else output_name
 
 
-def extract_preserved_tail(stem: str) -> str:
-    match = PRESERVED_TAIL_PATTERN.search(stem)
-    if not match:
-        return ""
-    return VERSION_TAIL_PATTERN.sub(r"\1v0.1", match.group(1))
+def extract_preserved_tail(stem: str, standard_stem: str = "") -> str:
+    full_tail = tail_after_standard_stem(stem, standard_stem)
+    if (
+        full_tail is not None
+        and (
+            is_attachment_tail(full_tail)
+            or (
+                is_handover_confirmation_stem(stem, standard_stem)
+                and REQUIREMENT_TAIL_PATTERN.search(full_tail)
+            )
+        )
+    ):
+        tail = full_tail
+    else:
+        match = PRESERVED_TAIL_PATTERN.search(stem)
+        if not match:
+            return DEFAULT_FILENAME_VERSION_TAIL
+        tail = match.group(1)
+
+    tail = VERSION_TAIL_PATTERN.sub(r"\1v0.1", tail)
+    if not VERSION_TAIL_PATTERN.search(tail):
+        tail = f"{tail}{DEFAULT_FILENAME_VERSION_TAIL}"
+    if tail and tail[0] not in {"_", "-", "["}:
+        tail = f"_{tail}"
+    return tail
+
+
+def is_attachment_tail(tail: str) -> bool:
+    return bool(ATTACHMENT_TAIL_PATTERN.search(tail))
+
+
+def is_handover_confirmation_stem(stem: str, standard_stem: str) -> bool:
+    stem_key = normalize_for_match(stem)
+    standard_key = normalize_for_match(standard_stem)
+    return HANDOVER_RESULT_KEY in standard_key and HANDOVER_CONFIRMATION_KEY in stem_key
+
+
+def tail_after_standard_stem(stem: str, standard_stem: str) -> str | None:
+    if not standard_stem:
+        return None
+
+    prefixes = tuple(dict.fromkeys([standard_stem, filesystem_safe_stem(standard_stem)]))
+    for prefix in prefixes:
+        if not prefix or len(stem) < len(prefix):
+            continue
+        if stem[:len(prefix)].casefold() != prefix.casefold():
+            continue
+        tail = stem[len(prefix):]
+        if not tail or tail[0] in {"_", "-", "[", " "}:
+            return tail
+    return None
 
 
 def copy_folder_to_dump(source_root: Path, dump_parent: Path) -> Path:
     # 원본 폴더를 건드리지 않기 위해 덤프 위치에 복사본을 만든다.
     dump_root = next_versioned_dump_path(dump_parent, source_root.name)
-    shutil.copytree(windows_long_path(source_root), windows_long_path(dump_root))
+    shutil.copytree(
+        windows_long_path(source_root),
+        windows_long_path(dump_root),
+        ignore=copytree_ignore_noise,
+    )
+    remove_noise_files(dump_root)
     return dump_root
 
 
@@ -111,6 +175,7 @@ def apply_dumped_folder(
     request_id: str,
     *,
     log_prefix: str,
+    requirement_files: list[Path] | None = None,
 ) -> dict[str, object]:
     # 덤프된 폴더 기준으로 매칭, 제외 후보 반영, 문서 수정, 파일명 변경을 실행한다.
     mapping = build_folder_mapping(standard_file, dump_root, fields, folder_policy)
@@ -136,6 +201,20 @@ def apply_dumped_folder(
     finally:
         stop_allow_all_watcher(allow_stop_event, allow_thread)
 
+    requirement_result = run_requirement_generation_safely(
+        dump_root,
+        mapping.outputs,
+        mapping.path_templates,
+        requirement_files or [],
+        mapping.standard_project_title,
+        temp_dir,
+        fields,
+        apply_items=apply_items,
+        request_id=request_id,
+        log_prefix=log_prefix,
+    )
+    removed_noise_file_count = remove_noise_files(dump_root)
+
     try:
         write_apply_readme(
             dump_root,
@@ -143,6 +222,7 @@ def apply_dumped_folder(
             mapping.standard_project_title,
             apply_items,
             excluded_file_count,
+            requirement_result=requirement_result,
         )
     except Exception as exc:
         log_event(
@@ -167,6 +247,8 @@ def apply_dumped_folder(
             "skipped_file_count": excluded_file_count,
             "filename_unchanged_count": sum(1 for item in apply_items if is_filename_unchanged_item(item)),
             "apply_items": apply_items,
+            "removed_noise_file_count": removed_noise_file_count,
+            **serialize_requirement_generation_result(requirement_result),
         }
     )
     log_event(
@@ -177,6 +259,7 @@ def apply_dumped_folder(
         excluded=excluded_file_count,
         updated=payload["updated_file_count"],
         failed=payload["failed_file_count"],
+        removed_noise_file_count=removed_noise_file_count,
         failed_items=[
             {
                 "output_name": item.get("output_name", ""),
@@ -188,6 +271,83 @@ def apply_dumped_folder(
         ]
     )
     return payload
+
+
+def run_requirement_generation_safely(
+    dump_root: Path,
+    outputs: list[StandardOutput],
+    path_templates: list[PathTemplate],
+    requirement_files: list[Path],
+    standard_project_title: str,
+    temp_dir: Path,
+    fields: dict[str, str],
+    *,
+    apply_items: list[dict[str, object]] | None = None,
+    request_id: str,
+    log_prefix: str,
+) -> RequirementGenerationResult:
+    try:
+        return generate_requirement_documents(
+            dump_root,
+            outputs,
+            path_templates,
+            requirement_files,
+            standard_project_title,
+            temp_dir,
+            fields,
+            apply_items=apply_items,
+        )
+    except Exception as exc:
+        log_event(
+            f"{log_prefix}.requirement_generation_error",
+            request_id=request_id,
+            dump_root=str(dump_root),
+            error=str(exc),
+        )
+        return RequirementGenerationResult(
+            enabled=bool(requirement_files),
+            target_names=(),
+            target_count=0,
+            created_items=[],
+            skipped_items=[],
+            error_items=[
+                {
+                    "status": "error",
+                    "reason": "요구사항별 자동 생성 처리 중 오류가 발생했습니다.",
+                    "error": str(exc),
+                }
+            ],
+        )
+
+
+def serialize_requirement_generation_result(result: RequirementGenerationResult) -> dict[str, object]:
+    created_ok = [item for item in result.created_items if item.get("status") != "error"]
+    created_errors = [item for item in result.created_items if item.get("status") == "error"]
+    warnings = [item for item in result.created_items if item.get("status") == "created_with_warning"]
+    removed_items = result.removed_items or []
+    removed_ok = [item for item in removed_items if item.get("status") == "removed"]
+    removed_errors = [item for item in removed_items if item.get("status") == "error"]
+    folder_items = result.folder_items or []
+    folder_ok = [item for item in folder_items if item.get("status") != "error"]
+    folder_created = [item for item in folder_items if item.get("status") == "created"]
+    folder_errors = [item for item in folder_items if item.get("status") == "error"]
+    return {
+        "requirement_generation_enabled": result.enabled,
+        "requirement_generation_target_count": result.target_count,
+        "requirement_generated_file_count": len(created_ok),
+        "requirement_generated_folder_count": len(folder_ok),
+        "requirement_generation_created_folder_count": len(folder_created),
+        "requirement_generation_removed_file_count": len(removed_ok),
+        "requirement_generation_warning_count": len(warnings),
+        "requirement_generation_skipped_count": len(result.skipped_items),
+        "requirement_generation_error_count": len(created_errors) + len(result.error_items) + len(removed_errors) + len(folder_errors),
+        "requirement_generation_readme_path": str(result.readme_path) if result.readme_path else "",
+        "requirement_generation_items": result.created_items,
+        "requirement_generation_folder_items": folder_items,
+        "requirement_generation_removed_items": removed_items,
+        "requirement_generation_skipped_items": result.skipped_items,
+        "requirement_generation_error_items": [*created_errors, *result.error_items, *removed_errors, *folder_errors],
+    }
 
 
 def resolve_dump_parent(raw_path: str) -> Path:
@@ -286,7 +446,7 @@ def apply_batch_candidate(
     # 후보 파일 하나에 산출물 ID/제목/프로젝트명을 반영하고 필요하면 파일명도 바꾼다.
     original_path = candidate.file.path
     identity = candidate.file.identity
-    backup_path = backup_original_for_batch(original_path)
+    backup_path = None
 
     try:
         target_file, _ = prepare_target_file(original_path, temp_dir)
@@ -363,34 +523,6 @@ def apply_batch_candidate(
         }
 
 
-def backup_original_for_batch(file_path: Path) -> Path | None:
-    # 수정 전 원본 파일을 같은 폴더의 backup/bak 계열 폴더에 저장한다.
-    backup_dir = find_existing_backup_dir(file_path.parent)
-    if backup_dir is None:
-        return None
-
-    target = unique_file_path(backup_dir / file_path.name)
-    shutil.copy2(file_path, target)
-    return target
-
-
-def find_existing_backup_dir(parent: Path) -> Path | None:
-    # 이미 존재하는 원본/backup/bak 폴더를 찾는다.
-    original_dir = find_child_dir(parent, {"원본"})
-    if original_dir:
-        return original_dir
-    return find_child_dir(parent, {"bak", "backup", "백업"})
-
-
-def find_child_dir(parent: Path, names: set[str]) -> Path | None:
-    # 대소문자를 무시하고 지정한 이름의 하위 폴더를 찾는다.
-    normalized = {name.casefold() for name in names}
-    for child in parent.iterdir():
-        if child.is_dir() and child.name.casefold() in normalized:
-            return child
-    return None
-
-
 def build_cover_status(
     *,
     old_document_number: str,
@@ -459,6 +591,8 @@ def write_apply_readme(
     standard_project_title: str,
     apply_items: list[dict[str, object]],
     skipped_file_count: int,
+    *,
+    requirement_result: RequirementGenerationResult | None = None,
 ) -> Path:
     report_path = unique_file_path(dump_root / "README_검수결과.md")
     report_path.write_text(
@@ -468,6 +602,7 @@ def write_apply_readme(
             standard_project_title,
             apply_items,
             skipped_file_count,
+            requirement_result=requirement_result,
         ),
         encoding="utf-8",
     )
@@ -480,6 +615,8 @@ def build_apply_readme(
     standard_project_title: str,
     apply_items: list[dict[str, object]],
     skipped_file_count: int,
+    *,
+    requirement_result: RequirementGenerationResult | None = None,
 ) -> str:
     updated_items = [item for item in apply_items if item.get("status") == "updated"]
     failed_items = [item for item in apply_items if item.get("status") == "error"]
@@ -520,8 +657,47 @@ def build_apply_readme(
     append_cover_attention_section(lines, cover_attention_items, dump_root)
     lines.extend(["", "## 반영 오류", ""])
     append_error_section(lines, failed_items, dump_root)
+    append_requirement_generation_section(lines, requirement_result, dump_root)
     lines.append("")
     return "\n".join(lines)
+
+
+def append_requirement_generation_section(
+    lines: list[str],
+    result: RequirementGenerationResult | None,
+    dump_root: Path,
+) -> None:
+    if result is None or not result.enabled:
+        return
+
+    created_ok = [item for item in result.created_items if item.get("status") != "error"]
+    warnings = [item for item in result.created_items if item.get("status") == "created_with_warning"]
+    created_errors = [item for item in result.created_items if item.get("status") == "error"]
+    removed_items = result.removed_items or []
+    removed_ok = [item for item in removed_items if item.get("status") == "removed"]
+    removed_errors = [item for item in removed_items if item.get("status") == "error"]
+    folder_items = result.folder_items or []
+    folder_ok = [item for item in folder_items if item.get("status") != "error"]
+    folder_created = [item for item in folder_items if item.get("status") == "created"]
+    folder_errors = [item for item in folder_items if item.get("status") == "error"]
+
+    lines.extend(
+        [
+            "",
+            "## 요구사항별 자동 생성",
+            "",
+            "| 항목 | 값 |",
+            "| --- | --- |",
+            f"| 대상 산출물 | {result.target_count}건 |",
+            f"| 요구사항 ID 폴더 | {len(folder_ok)}건 (신규 {len(folder_created)}건) |",
+            f"| 생성 파일 | {len(created_ok)}건 |",
+            f"| 기존 기준 파일 삭제 | {len(removed_ok)}건 |",
+            f"| 생성 경고 | {len(warnings)}건 |",
+            f"| 요구사항 ID 없음 | {len(result.skipped_items)}건 |",
+            f"| 생성 오류 | {len(created_errors) + len(result.error_items) + len(removed_errors) + len(folder_errors)}건 |",
+            f"| 상세 README | {markdown_cell(relative_report_path(str(result.readme_path), dump_root) if result.readme_path else '-')} |",
+        ]
+    )
 
 
 def append_filename_unchanged_section(

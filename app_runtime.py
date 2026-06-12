@@ -182,22 +182,28 @@ def runtime_mode_payload() -> dict[str, object]:
     model = resolve_runtime_model(env)
     if ollama_url:
         return {
-            "mode": "ai_first",
-            "label": "AI 우선",
+            "mode": "rule_ai_fallback",
+            "label": "규칙 매칭 · 미매칭 AI 확인",
             "model": model,
             "ollama_configured": True,
         }
 
     return {
         "mode": "rule_fallback_no_ollama",
-        "label": "규칙 기반",
+        "label": "규칙 매칭만",
         "model": model,
         "ollama_configured": False,
     }
 
 
-def selected_match_mode(_fields: dict[str, str], ollama_url: str | None) -> tuple[str, str]:
-    # 현재 공개 흐름은 AI 우선 하나다. Ollama가 없을 때만 기존 규칙 매칭으로 fallback한다.
-    if ollama_url:
+def selected_match_mode(fields: dict[str, str], ollama_url: str | None) -> tuple[str, str]:
+    # 기본은 규칙 매칭을 먼저 쓰고, 비어 있는 산출물만 AI로 보강한다.
+    requested = (fields.get("match_mode") or "rule_ai_fallback").strip()
+
+    if requested == "rule_only":
+        return "rule_only", "rule_only"
+    if requested == "ai_first" and ollama_url:
         return "ai_first", "ai_first"
+    if ollama_url:
+        return "rule_ai_fallback", "rule_ai_fallback"
     return "rule_only", "rule_fallback_no_ollama"
