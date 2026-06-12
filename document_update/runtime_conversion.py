@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import csv
-import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -140,100 +139,6 @@ def convert_hwp_to_hwpx_with_timeout(input_path: Path, output_path: Path) -> Pat
         raise RuntimeError("HWPX 변환 결과 파일이 생성되지 않았습니다.")
 
     return output_path
-
-
-def convert_hwp_batch_to_hwpx_with_timeout(items: list[tuple[Path, Path]]) -> list[Path]:
-    if not items:
-        return []
-
-    existing_hwp_process_ids = running_hwp_process_ids()
-    manifest_path = items[0][1].parent / f"batch_hwp_manifest_{int(time.time() * 1000)}.json"
-    manifest_path.write_text(
-        json.dumps(
-            [
-                {"input_path": str(input_path), "output_path": str(output_path)}
-                for input_path, output_path in items
-            ],
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    command = [
-        sys.executable,
-        "-X",
-        "utf8",
-        "-m",
-        "document_update.hwp_convert",
-        "--manifest",
-        str(manifest_path),
-    ]
-
-    try:
-        result = subprocess.run(
-            command,
-            cwd=str(BASE_DIR),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            timeout=max(HWP_CONVERSION_TIMEOUT_SECONDS, HWP_CONVERSION_TIMEOUT_SECONDS * len(items)),
-            creationflags=CREATE_NO_WINDOW,
-        )
-    except subprocess.TimeoutExpired as exc:
-        stop_new_hwp_processes(existing_hwp_process_ids)
-        raise RuntimeError(
-            f"HWP {len(items)}개를 HWPX로 일괄 변환하는 데 시간이 너무 오래 걸렸습니다. "
-            "한글 확인 팝업이 떠 있으면 '모두 허용'을 눌러 주세요."
-        ) from exc
-    finally:
-        try:
-            manifest_path.unlink()
-        except OSError:
-            pass
-
-    if result.returncode != 0:
-        stop_new_hwp_processes(existing_hwp_process_ids)
-        message = (result.stderr or result.stdout or "").strip()
-        raise RuntimeError(message or "HWP 일괄 변환에 실패했습니다.")
-
-    output_paths = [output_path for _input_path, output_path in items]
-    missing_paths = [path for path in output_paths if not path.exists()]
-    if missing_paths:
-        raise RuntimeError(f"HWPX 변환 결과 파일이 생성되지 않았습니다: {missing_paths[0].name}")
-    return output_paths
-
-
-def prepare_target_files_batch(
-    target_files: list[Path],
-    temp_dir: Path,
-) -> dict[Path, tuple[Path, bool]]:
-    converted_dir = temp_dir / "converted"
-    converted_dir.mkdir(parents=True, exist_ok=True)
-    prepared: dict[Path, tuple[Path, bool]] = {}
-    conversion_items: list[tuple[Path, Path]] = []
-
-    for target_file in target_files:
-        if target_file in prepared:
-            continue
-
-        if target_file.suffix.lower() == ".hwp" and is_hwpx_zip(target_file):
-            converted_path = converted_dir / f"{target_file.stem}.hwpx"
-            shutil.copy2(target_file, converted_path)
-            prepared[target_file] = (converted_path, True)
-            continue
-
-        if not needs_hwp_to_hwpx_conversion(target_file):
-            prepared[target_file] = (target_file, False)
-            continue
-
-        converted_path = converted_dir / f"{target_file.stem}.hwpx"
-        conversion_items.append((target_file, converted_path))
-        prepared[target_file] = (converted_path, True)
-
-    if conversion_items:
-        convert_hwp_batch_to_hwpx_with_timeout(conversion_items)
-
-    return prepared
 
 
 def prepare_target_file(target_file: Path, temp_dir: Path) -> tuple[Path, bool]:

@@ -208,13 +208,6 @@ def extract_requirement_id_from_values(values: object) -> str:
     return match.group(0).upper() if match else ""
 
 
-def build_wbs_index(records: list[WbsMetadata]) -> dict[str, list[WbsMetadata]]:
-    index: dict[str, list[WbsMetadata]] = {}
-    for record in records:
-        index.setdefault(normalize_key(record.output_name), []).append(record)
-    return index
-
-
 def should_scan_document(path: Path) -> bool:
     if path.suffix.lower() not in SUPPORTED_METADATA_SUFFIXES:
         return False
@@ -1295,43 +1288,6 @@ def revision_header_map(labels: list[str]) -> dict[str, int]:
             result["approval"] = index
     required = {"version", "date", "author"}
     return result if required.issubset(result) else {}
-
-
-def update_label_right_cells(sheet: Worksheet, labels: set[str], new_value: object) -> int:
-    normalized_labels = {normalize_label(label) for label in labels}
-    count = 0
-    for row in sheet.iter_rows():
-        for index, cell in enumerate(row[:-1]):
-            if normalize_label(clean_text(cell.value)) not in normalized_labels:
-                continue
-            target = row[index + 1]
-            if normalize_label(clean_text(target.value)) in {normalize_label(item) for item in LABEL_LIKE_VALUES}:
-                continue
-            target.value = new_value
-            if isinstance(new_value, date):
-                target.number_format = "yyyy-mm-dd"
-            count += 1
-    return count
-
-
-def update_revision_history_sheet(sheet: Worksheet, revision_date: date, author: str) -> int:
-    for row in sheet.iter_rows():
-        labels = [normalize_label(clean_text(cell.value)) for cell in row]
-        header_map = revision_header_map(labels)
-        if not header_map:
-            continue
-        date_idx = header_map["date"]
-        author_idx = header_map["author"]
-        for data_row in sheet.iter_rows(min_row=row[0].row + 1, max_col=max(date_idx, author_idx) + 1):
-            version = clean_text(data_row[0].value)
-            if VERSION_PATTERN.fullmatch(version):
-                data_row[0].value = "0.1"
-                data_row[date_idx].value = revision_date
-                data_row[date_idx].number_format = "yyyy-mm-dd"
-                data_row[author_idx].value = author
-                return 3
-        return 0
-    return 0
 
 
 def write_updated_hwpx_metadata(path: Path, author: str, revision_date: str, approval_author: str) -> tuple[int, int]:

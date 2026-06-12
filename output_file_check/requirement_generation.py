@@ -553,24 +553,6 @@ def extract_template_tail(output: StandardOutput, template_stem: str) -> str | N
     return None
 
 
-def replace_or_insert_requirement_id(tail: str, requirement_id: str, version: str) -> str:
-    if REQUIREMENT_ID_PATTERN.search(tail):
-        return REQUIREMENT_ID_PATTERN.sub(requirement_id, tail)
-
-    if starts_with_version_tail(tail):
-        return f"_{requirement_id}{tail}"
-
-    if not tail:
-        return f"_{requirement_id}_{version}"
-
-    separator = "" if tail[0] in {"_", "-", "["} else "_"
-    return f"_{requirement_id}_{version}{separator}{tail}"
-
-
-def starts_with_version_tail(tail: str) -> bool:
-    return bool(re.match(r"^[_\-\s][vV]\d+(?:\.\d+)*", tail))
-
-
 def normalize_tail_versions(tail: str, version: str) -> str:
     return VERSION_TOKEN_REPLACE_PATTERN.sub(lambda match: f"{match.group(1)}{version}", tail)
 
@@ -902,25 +884,6 @@ def unique_file_path(path: Path) -> Path:
         candidate = path.with_name(f"{path.stem}_{timestamp}_{index}{path.suffix}")
         index += 1
     return candidate
-
-
-def build_update_warnings(
-    old_title: str,
-    old_project_title: str,
-    new_title: str,
-    new_project_title: str,
-    title_replace_count: int,
-    project_title_replace_count: int,
-    document_number_replace_count: int,
-) -> list[str]:
-    warnings: list[str] = []
-    if old_title and normalize_for_match(old_title) != normalize_for_match(new_title) and title_replace_count == 0:
-        warnings.append("문서명 변경 대상 텍스트를 찾지 못했습니다.")
-    if old_project_title and normalize_for_match(old_project_title) != normalize_for_match(new_project_title) and project_title_replace_count == 0:
-        warnings.append("사업명 변경 대상 텍스트를 찾지 못했습니다.")
-    if document_number_replace_count == 0:
-        warnings.append("문서번호 변경 위치를 찾지 못했을 수 있습니다.")
-    return warnings
 
 
 def write_requirement_generation_readme(

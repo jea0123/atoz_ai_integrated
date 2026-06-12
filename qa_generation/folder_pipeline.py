@@ -803,41 +803,6 @@ def build_matching_failure_payload(
     }
 
 
-def select_best_file(
-        root: Path,
-        files: list[Path],
-        *,
-        suffixes: set[str],
-        keywords: tuple[str, ...],
-        exclude_keywords: tuple[str, ...] = (),
-) -> dict[str, object]:
-    scored: list[tuple[int, int, Path]] = []
-    for path in files:
-        if path.suffix.lower() not in suffixes:
-            continue
-
-        text = searchable_text(root, path)
-        score = score_keywords(text, keywords) - score_keywords(text, exclude_keywords)
-        if score <= 0:
-            continue
-
-        scored.append((score, -len(str(path)), path))
-
-    scored.sort(key=lambda item: (item[0], item[1], str(item[2]).casefold()), reverse=True)
-    candidates = [
-        {
-            "path": str(path),
-            "score": score,
-        }
-        for score, _length_score, path in scored[:5]
-    ]
-    return {
-        "path": str(scored[0][2]) if scored else "",
-        "score": scored[0][0] if scored else 0,
-        "candidates": candidates,
-    }
-
-
 def searchable_text(root: Path, path: Path) -> str:
     try:
         relative = path.relative_to(root)
@@ -857,13 +822,6 @@ def score_keywords(text: str, keywords: tuple[str, ...]) -> int:
         if normalized and normalized in text:
             score += 100 + len(normalized)
     return score
-
-
-def require_selected(selection: dict[str, dict[str, object]], key: str, label: str) -> Path:
-    selected = Path(str(selection.get(key, {}).get("path") or ""))
-    if not selected.exists() or not selected.is_file():
-        raise ValueError(f"{label}를 결과 폴더에서 찾지 못했습니다.")
-    return selected
 
 
 def generate_unit_result_hwpx(tc_hwpx: Path, result_template: Path, output_dir: Path) -> Path | None:
