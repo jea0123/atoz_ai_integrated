@@ -232,7 +232,10 @@ function renderApplyReport(data) {
   const requirementWarnings = Number(data.requirement_generation_warning_count || 0);
   const requirementErrors = Number(data.requirement_generation_error_count || 0);
   const requirementReadme = data.requirement_generation_readme_path || "";
-  const hasErrors = failed.length || requirementErrors;
+  const initialRevisionUpdated = Number(data.initial_revision_updated_count || 0);
+  const initialRevisionSkipped = Number(data.initial_revision_skipped_count || 0);
+  const initialRevisionFailed = Number(data.initial_revision_failed_count || 0);
+  const hasErrors = failed.length || requirementErrors || initialRevisionFailed;
   const dumpRoot = data.dump_root || "";
   if (dumpRoot) {
     try {
@@ -261,6 +264,10 @@ function renderApplyReport(data) {
           </div>`
         : ""
     }
+    <div class="apply-folder-result">
+      <span>개정이력 v0.1 초기화</span>
+      <code>날짜 ${new Date().getFullYear()}-00-00 · 작성자 송아름 · 승인자 임채현 · 성공 ${initialRevisionUpdated}건 · 스킵 ${initialRevisionSkipped}건 · 오류 ${initialRevisionFailed}건</code>
+    </div>
     ${
       dumpRoot
         ? `<div class="apply-folder-result">

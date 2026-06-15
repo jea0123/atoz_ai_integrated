@@ -14,6 +14,7 @@ from app_runtime import (
 )
 from document_update.document_number import write_updated_document
 from document_update.hwp_convert import start_allow_all_watcher, stop_allow_all_watcher
+from document_update.metadata_update import update_metadata_in_document
 from document_update.patterns import OUTPUT_ID_PATTERN
 from document_update.runtime_conversion import prepare_target_file
 from output_file_check.file_noise import copytree_ignore_noise, remove_noise_files
@@ -246,6 +247,15 @@ def apply_dumped_folder(
             "apply_target_file_count": len(selected_candidates),
             "skipped_file_count": excluded_file_count,
             "filename_unchanged_count": sum(1 for item in apply_items if is_filename_unchanged_item(item)),
+            "initial_revision_updated_count": sum(
+                1 for item in apply_items if item.get("initial_revision_status") == "updated"
+            ),
+            "initial_revision_skipped_count": sum(
+                1 for item in apply_items if item.get("initial_revision_status") == "skipped"
+            ),
+            "initial_revision_failed_count": sum(
+                1 for item in apply_items if item.get("initial_revision_status") == "error"
+            ),
             "apply_items": apply_items,
             "removed_noise_file_count": removed_noise_file_count,
             **serialize_requirement_generation_result(requirement_result),
@@ -489,6 +499,8 @@ def apply_batch_candidate(
         if original_path.exists() and original_path.resolve() != final_path.resolve():
             original_path.unlink()
 
+        revision_result = apply_initial_revision_metadata(final_path, temp_dir)
+
         cover_status = build_cover_status(
             old_document_number=old_document_number,
             new_document_number=output_id,
@@ -510,6 +522,13 @@ def apply_batch_candidate(
             "expected_filename": expected_filename,
             "file_name_changed": original_path.name != final_path.name,
             "backup_path": str(backup_path) if backup_path else "",
+            "initial_revision_status": revision_result["status"],
+            "initial_revision_date": revision_result["revision_date"],
+            "initial_revision_author": revision_result["author"],
+            "initial_revision_approval_author": revision_result["approval_author"],
+            "initial_revision_cover_update_count": revision_result["cover_update_count"],
+            "initial_revision_history_update_count": revision_result["revision_history_update_count"],
+            "initial_revision_error": revision_result["error"],
             **cover_status,
         }
     except Exception as exc:
@@ -519,6 +538,43 @@ def apply_batch_candidate(
             "output_name": candidate.output.output_name,
             "old_path": str(original_path),
             "backup_path": str(backup_path) if backup_path else "",
+            "error": str(exc),
+        }
+
+
+def initial_revision_date() -> str:
+    return f"{datetime.now().year}-00-00"
+
+
+def apply_initial_revision_metadata(file_path: Path, temp_dir: Path) -> dict[str, object]:
+    revision_date = initial_revision_date()
+    author = "송아름"
+    approval_author = "임채현"
+    try:
+        result = update_metadata_in_document(
+            file_path,
+            author,
+            revision_date,
+            approval_author,
+            temp_dir,
+        )
+        return {
+            "status": result.status,
+            "revision_date": revision_date,
+            "author": author,
+            "approval_author": approval_author,
+            "cover_update_count": result.cover_update_count,
+            "revision_history_update_count": result.revision_history_update_count,
+            "error": result.error,
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "revision_date": revision_date,
+            "author": author,
+            "approval_author": approval_author,
+            "cover_update_count": 0,
+            "revision_history_update_count": 0,
             "error": str(exc),
         }
 
