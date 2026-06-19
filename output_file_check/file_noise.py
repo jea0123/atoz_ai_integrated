@@ -8,7 +8,12 @@ NOISE_FILE_NAMES = {"thumbs.db", "desktop.ini"}
 
 def is_noise_filename(filename: str) -> bool:
     name = Path(filename).name.casefold()
-    return name in NOISE_FILE_NAMES or name.startswith("~$")
+    return (
+        name in NOISE_FILE_NAMES
+        or name.startswith("~$")
+        or name.startswith(".metadata_")
+        or "_metadata_" in name
+    )
 
 
 def copytree_ignore_noise(_directory: str, names: list[str]) -> set[str]:

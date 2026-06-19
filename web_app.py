@@ -534,6 +534,10 @@ class WebHandler(BaseHTTPRequestHandler):
             self.serve_file(WEB_DIR / "check.html")
             return
 
+        if request_path in {"/management", "/management.html"}:
+            self.serve_file(WEB_DIR / "management.html")
+            return
+
         if request_path in {"/qa", "/qa.html"}:
             self.serve_file(WEB_DIR / "qa.html")
             return

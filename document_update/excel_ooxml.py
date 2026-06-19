@@ -242,13 +242,16 @@ def meaningful_cover_value(value: str) -> str:
     return cleaned
 
 
-def find_excel_cover_identity(file_path: Path) -> tuple[str, str]:
-    with zipfile.ZipFile(file_path, "r") as zf:
-        shared_strings = read_shared_strings(zf)
-        sheet = cover_sheet_ref(zf)
-        root = ET.fromstring(zf.read(sheet.path))
-        cells = iter_cells(root, shared_strings)
+def unique_cover_values(*values: str) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        cleaned = clean_cover_value(value)
+        if cleaned and cleaned not in result:
+            result.append(cleaned)
+    return result
 
+
+def infer_project_title_from_cover_cells(cells: list[CellInfo]) -> str:
     document_rows = [
         cell.row
         for cell in cells
@@ -257,6 +260,30 @@ def find_excel_cover_identity(file_path: Path) -> tuple[str, str]:
     cutoff_row = min(document_rows) if document_rows else 40
 
     values: list[str] = []
+    for cell in sorted(cells, key=lambda item: (item.row, item.col)):
+        if cell.row >= cutoff_row:
+            continue
+        value = meaningful_cover_value(cell.text)
+        if value and value not in values:
+            values.append(value)
+
+    return values[-2] if len(values) >= 2 else ""
+
+
+def find_excel_cover_identity(file_path: Path) -> tuple[str, str]:
+    with zipfile.ZipFile(file_path, "r") as zf:
+        shared_strings = read_shared_strings(zf)
+        sheet = cover_sheet_ref(zf)
+        root = ET.fromstring(zf.read(sheet.path))
+        cells = iter_cells(root, shared_strings)
+
+    values: list[str] = []
+    document_rows = [
+        cell.row
+        for cell in cells
+        if clean_cover_value(cell.text) == DOCUMENT_NUMBER_LABEL
+    ]
+    cutoff_row = min(document_rows) if document_rows else 40
     for cell in sorted(cells, key=lambda item: (item.row, item.col)):
         if cell.row >= cutoff_row:
             continue
@@ -400,38 +427,37 @@ def replace_or_insert_cell_xml(
 def build_updated_excel_cover_sheet(
     zf: zipfile.ZipFile,
     new_document_number: str,
-    old_title: str | None,
-    new_title: str | None,
     old_project_title: str | None,
     new_project_title: str | None,
-) -> tuple[str, bytes, str, int, int, int]:
+) -> tuple[str, bytes, str, int, int, list[str]]:
     shared_strings = read_shared_strings(zf)
     sheet = cover_sheet_ref(zf)
     original_sheet_xml = zf.read(sheet.path).decode("utf-8", errors="ignore")
     root = ET.fromstring(original_sheet_xml)
+    cells = iter_cells(root, shared_strings)
 
-    title_count = 0
     project_count = 0
     old_document_number = ""
     document_number_count = 0
     updates: dict[str, tuple[int, int, str]] = {}
+    project_titles_to_scan = unique_cover_values(
+        old_project_title or "",
+        infer_project_title_from_cover_cells(cells),
+    )
 
-    for info in iter_cells(root, shared_strings):
+    for info in cells:
         value = clean_cover_value(info.text)
-        if old_title and new_title and old_title != new_title and value == old_title:
-            updates[info.ref] = (info.row, info.col, new_title)
-            title_count += 1
         if (
-            old_project_title
+            project_titles_to_scan
             and new_project_title
-            and old_project_title != new_project_title
-            and value == old_project_title
+            and value in project_titles_to_scan
+            and value != clean_cover_value(new_project_title)
         ):
             updates[info.ref] = (info.row, info.col, new_project_title)
             project_count += 1
 
-    cell_by_ref = {info.ref: info for info in iter_cells(root, shared_strings)}
-    for info in iter_cells(root, shared_strings):
+    cell_by_ref = {info.ref: info for info in cells}
+    for info in cells:
         if clean_cover_value(info.text) != DOCUMENT_NUMBER_LABEL:
             continue
 
@@ -443,8 +469,8 @@ def build_updated_excel_cover_sheet(
         document_number_count = 0 if old_document_number == new_document_number else 1
         break
 
-    cell_by_position = {(info.row, info.col): info for info in iter_cells(root, shared_strings)}
-    for info in iter_cells(root, shared_strings):
+    cell_by_position = {(info.row, info.col): info for info in cells}
+    for info in cells:
         if not is_document_version_label(info.text):
             continue
 
@@ -473,9 +499,9 @@ def build_updated_excel_cover_sheet(
         sheet.path,
         updated_xml_text.encode("utf-8"),
         old_document_number,
-        title_count,
         project_count,
         document_number_count,
+        project_titles_to_scan,
     )
 
 
@@ -485,7 +511,7 @@ EXCEL_HEADER_SCAN_MAX_ROW = 8
 def replace_excel_sheet_header_values(
     sheet_xml: str,
     shared_strings: list[str],
-    old_project_title: str | None,
+    old_project_titles: list[str],
     new_project_title: str | None,
     old_document_numbers: list[str],
     new_document_number: str,
@@ -494,10 +520,11 @@ def replace_excel_sheet_header_values(
     replacements: dict[str, tuple[str, str]] = {}
     cells = iter_cells(root, shared_strings)
 
-    old_project = clean_cover_value(old_project_title or "")
     new_project = clean_cover_value(new_project_title or "")
-    if old_project and new_project and old_project != new_project:
-        replacements[old_project] = (new_project_title or "", "project")
+    for old_project in old_project_titles:
+        old_project = clean_cover_value(old_project)
+        if old_project and new_project and old_project != new_project:
+            replacements[old_project] = (new_project_title or "", "project")
 
     for old_document_number in old_document_numbers:
         old_document = clean_cover_value(old_document_number)
@@ -596,41 +623,35 @@ def unlabeled_header_version_targets(cells: list[CellInfo]) -> list[tuple[str, i
 
 def replace_excel_drawing_header_values(
     drawing_xml: str,
-    old_title: str | None,
-    new_title: str | None,
-    old_project_title: str | None,
+    old_project_titles: list[str],
     new_project_title: str | None,
     old_document_numbers: list[str],
     new_document_number: str,
-) -> tuple[bytes, int, int, int]:
+) -> tuple[bytes, int, int]:
     text_matches = list(DRAWING_TEXT_PATTERN.finditer(drawing_xml))
     if not text_matches:
-        return drawing_xml.encode("utf-8"), 0, 0, 0
+        return drawing_xml.encode("utf-8"), 0, 0
 
     texts = [unescape(match.group("text")) for match in text_matches]
     new_texts: dict[int, str] = {}
     paragraphs = drawing_paragraph_text_runs(drawing_xml, text_matches, texts)
     add_unlabeled_drawing_version_update(new_texts, texts)
 
-    title_count = 0
     project_count = 0
     document_number_count = 0
-    old_title_clean = clean_cover_value(old_title or "")
-    new_title_clean = clean_cover_value(new_title or "")
-    old_project_clean = clean_cover_value(old_project_title or "")
+    old_project_keys = {
+        clean_cover_value(value)
+        for value in old_project_titles
+        if clean_cover_value(value)
+    }
     new_project_clean = clean_cover_value(new_project_title or "")
     for paragraph_index, (run_indexes, combined) in enumerate(paragraphs):
         clean_combined = clean_cover_value(combined)
-        if old_title_clean and new_title_clean and old_title_clean != new_title_clean and clean_combined == old_title_clean:
-            replace_drawing_paragraph(new_texts, texts, run_indexes, new_title or "")
-            title_count += 1
-            continue
-
         if (
-            old_project_clean
+            old_project_keys
             and new_project_clean
-            and old_project_clean != new_project_clean
-            and clean_combined == old_project_clean
+            and clean_combined in old_project_keys
+            and clean_combined != new_project_clean
         ):
             replace_drawing_paragraph(new_texts, texts, run_indexes, new_project_title or "")
             project_count += 1
@@ -646,23 +667,8 @@ def replace_excel_drawing_header_values(
             replace_drawing_text_span(new_texts, texts, run_indexes, match.span(), new_document_number)
             document_number_count += 1
 
-        if not new_project_clean:
-            continue
-        previous = previous_non_empty_paragraph(paragraphs, paragraph_index)
-        if previous is None:
-            continue
-        previous_run_indexes, previous_text = previous
-        previous_clean = clean_cover_value(previous_text)
-        if (
-            previous_clean
-            and previous_clean != new_project_clean
-            and not any(run_index in new_texts for run_index in previous_run_indexes)
-        ):
-            replace_drawing_paragraph(new_texts, texts, previous_run_indexes, new_project_title or "")
-            project_count += 1
-
     if not new_texts:
-        return drawing_xml.encode("utf-8"), 0, 0, 0
+        return drawing_xml.encode("utf-8"), 0, 0
 
     pieces: list[str] = []
     last = 0
@@ -673,7 +679,7 @@ def replace_excel_drawing_header_values(
         pieces.append(escape(new_texts[index]))
         last = match.end("text")
     pieces.append(drawing_xml[last:])
-    return "".join(pieces).encode("utf-8"), title_count, project_count, document_number_count
+    return "".join(pieces).encode("utf-8"), project_count, document_number_count
 
 
 def add_unlabeled_drawing_version_update(new_texts: dict[int, str], texts: list[str]) -> None:
@@ -732,16 +738,6 @@ def drawing_paragraph_text_runs(
         if clean_cover_value(combined):
             paragraphs.append((run_indexes, combined))
     return paragraphs
-
-
-def previous_non_empty_paragraph(
-    paragraphs: list[tuple[list[int], str]],
-    current_index: int,
-) -> tuple[list[int], str] | None:
-    for index in range(current_index - 1, -1, -1):
-        if clean_cover_value(paragraphs[index][1]):
-            return paragraphs[index]
-    return None
 
 
 def replace_drawing_paragraph(

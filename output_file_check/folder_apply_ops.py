@@ -33,13 +33,16 @@ from output_file_check.requirement_generation import (
 )
 
 
-TEST_OUTPUT_ID_PATTERN = re.compile(r"\d{4,}(?:\([^)]*\))?")
 PRESERVED_TAIL_PATTERN = re.compile(
     r"((?:(?:[_-][vV]\d+(?:\.\d+)*)|(?:[_-]SFR-[A-Za-z0-9-]+))+)$",
     re.IGNORECASE,
 )
 ATTACHMENT_TAIL_PATTERN = re.compile(
     r"^[\s_-]*(?:[\[\(（［｛]\s*(?:별첨|첨부)\s*\d*[^)\]\}）］｝]*[\)\]\}）］｝]|(?:별첨|첨부)\s*\d+)",
+    re.IGNORECASE,
+)
+ATTACHMENT_TAIL_SEARCH_PATTERN = re.compile(
+    r"(?P<tail>[\s_-]*(?:[\[\(（［｛]\s*(?:별첨|첨부)\s*\d*[^)\]\}）］｝]*[\)\]\}）］｝]|(?:별첨|첨부)\s*\d+).*)",
     re.IGNORECASE,
 )
 REQUIREMENT_TAIL_PATTERN = re.compile(r"(?<![A-Z0-9])SFR-(?:[A-Z0-9]+-)*\d+(?![A-Z0-9])", re.IGNORECASE)
@@ -62,8 +65,12 @@ def clean_output_id(raw_text: str) -> str:
 
 
 def validate_output_id(output_id: str) -> None:
-    if not OUTPUT_ID_PATTERN.fullmatch(output_id) and not TEST_OUTPUT_ID_PATTERN.fullmatch(output_id):
-        raise RuntimeError(f"산출물 ID 형식이 예상과 다릅니다: {output_id}")
+    # 표준의 산출물 ID는 사용자가 프로젝트마다 바꿔 넣는 값이다.
+    # MFDS-* 형식만 허용하면 관리산출물의 "11", "112233" 같은 값이 적용 전에 전부 실패한다.
+    if not output_id:
+        raise RuntimeError("산출물 ID가 비어 있습니다.")
+    if re.search(r"[\x00-\x1f\x7f]", output_id):
+        raise RuntimeError(f"산출물 ID에 사용할 수 없는 제어문자가 있습니다: {output_id}")
 
 
 def build_target_filename(output: StandardOutput, old_path: Path) -> str:
@@ -100,10 +107,14 @@ def extract_preserved_tail(stem: str, standard_stem: str = "") -> str:
     ):
         tail = full_tail
     else:
-        match = PRESERVED_TAIL_PATTERN.search(stem)
-        if not match:
-            return DEFAULT_FILENAME_VERSION_TAIL
-        tail = match.group(1)
+        attachment_tail = attachment_tail_from_stem(stem)
+        if attachment_tail:
+            tail = attachment_tail
+        else:
+            match = PRESERVED_TAIL_PATTERN.search(stem)
+            if not match:
+                return DEFAULT_FILENAME_VERSION_TAIL
+            tail = match.group(1)
 
     tail = VERSION_TAIL_PATTERN.sub(r"\1v0.1", tail)
     if not VERSION_TAIL_PATTERN.search(tail):
@@ -115,6 +126,11 @@ def extract_preserved_tail(stem: str, standard_stem: str = "") -> str:
 
 def is_attachment_tail(tail: str) -> bool:
     return bool(ATTACHMENT_TAIL_PATTERN.search(tail))
+
+
+def attachment_tail_from_stem(stem: str) -> str:
+    match = ATTACHMENT_TAIL_SEARCH_PATTERN.search(stem)
+    return match.group("tail").strip(" \t\r\n") if match else ""
 
 
 def is_handover_confirmation_stem(stem: str, standard_stem: str) -> bool:
@@ -180,6 +196,7 @@ def apply_dumped_folder(
 ) -> dict[str, object]:
     # 덤프된 폴더 기준으로 매칭, 제외 후보 반영, 문서 수정, 파일명 변경을 실행한다.
     mapping = build_folder_mapping(standard_file, dump_root, fields, folder_policy)
+    revision_metadata = initial_revision_metadata_from_fields(fields)
 
     all_selected_candidates = select_all_unique_candidates(mapping.matches)
     selected_candidates = filter_excluded_candidates(
@@ -195,6 +212,7 @@ def apply_dumped_folder(
                 candidate,
                 mapping.standard_project_title,
                 temp_dir,
+                revision_metadata=revision_metadata,
                 rename_files=True,
             )
             for candidate in selected_candidates
@@ -247,6 +265,9 @@ def apply_dumped_folder(
             "apply_target_file_count": len(selected_candidates),
             "skipped_file_count": excluded_file_count,
             "filename_unchanged_count": sum(1 for item in apply_items if is_filename_unchanged_item(item)),
+            "initial_revision_date": revision_metadata["revision_date"],
+            "initial_revision_author": revision_metadata["author"],
+            "initial_revision_approval_author": revision_metadata["approval_author"],
             "initial_revision_updated_count": sum(
                 1 for item in apply_items if item.get("initial_revision_status") == "updated"
             ),
@@ -451,6 +472,7 @@ def apply_batch_candidate(
     standard_project_title: str,
     temp_dir: Path,
     *,
+    revision_metadata: dict[str, str],
     rename_files: bool,
 ) -> dict[str, object]:
     # 후보 파일 하나에 산출물 ID/제목/프로젝트명을 반영하고 필요하면 파일명도 바꾼다.
@@ -459,12 +481,11 @@ def apply_batch_candidate(
     backup_path = None
 
     try:
-        target_file, _ = prepare_target_file(original_path, temp_dir)
+        target_file, _converted_to_hwpx = prepare_target_file(original_path, temp_dir)
         update_dir = temp_dir / "batch-updated"
         update_dir.mkdir(parents=True, exist_ok=True)
         output_suffix = target_file.suffix or original_path.suffix
         temp_output = unique_file_path(update_dir / f"{uuid4().hex}{output_suffix}")
-        old_title = identity.document_title if identity and identity.document_title else None
         old_project_title = identity.project_title if identity and identity.project_title else None
         effective_output = candidate.output
         output_id = clean_output_id(effective_output.output_id)
@@ -473,20 +494,16 @@ def apply_batch_candidate(
         (
             old_document_number,
             _document_backup_path,
-            title_replace_count,
             project_title_replace_count,
             document_number_replace_count,
             output_file,
         ) = write_updated_document(
             target_file,
             new_document_number=output_id,
-            old_title=old_title,
-            new_title=effective_output.output_name if old_title else None,
             old_project_title=old_project_title,
             new_project_title=standard_project_title,
             output_path=temp_output,
         )
-
         final_path = original_path if original_path.suffix.lower() == output_suffix.lower() else original_path.with_suffix(output_suffix)
         expected_filename = build_target_filename(effective_output, final_path)
         if rename_files:
@@ -499,16 +516,13 @@ def apply_batch_candidate(
         if original_path.exists() and original_path.resolve() != final_path.resolve():
             original_path.unlink()
 
-        revision_result = apply_initial_revision_metadata(final_path, temp_dir)
+        revision_result = apply_initial_revision_metadata(final_path, temp_dir, revision_metadata)
 
         cover_status = build_cover_status(
             old_document_number=old_document_number,
             new_document_number=output_id,
-            old_title=old_title,
-            new_title=effective_output.output_name,
             old_project_title=old_project_title,
             new_project_title=standard_project_title,
-            title_replace_count=title_replace_count,
             project_title_replace_count=project_title_replace_count,
             document_number_replace_count=document_number_replace_count,
         )
@@ -542,14 +556,35 @@ def apply_batch_candidate(
         }
 
 
-def initial_revision_date() -> str:
-    return f"{datetime.now().year}-00-00"
+def initial_revision_year(value: object = "") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return str(datetime.now().year)
+    if not re.fullmatch(r"\d{4}", text):
+        raise ValueError("개정일자는 연도 4자리로 입력하세요.")
+    return text
 
 
-def apply_initial_revision_metadata(file_path: Path, temp_dir: Path) -> dict[str, object]:
-    revision_date = initial_revision_date()
-    author = "송아름"
-    approval_author = "임채현"
+def initial_revision_date(year: object = "") -> str:
+    return f"{initial_revision_year(year)}-00-00"
+
+
+def initial_revision_metadata_from_fields(fields: dict[str, str]) -> dict[str, str]:
+    return {
+        "revision_date": initial_revision_date(fields.get("initial_revision_year", "")),
+        "author": (fields.get("initial_revision_author") or "송아름").strip() or "송아름",
+        "approval_author": (fields.get("initial_revision_approval_author") or "임채현").strip() or "임채현",
+    }
+
+
+def apply_initial_revision_metadata(
+    file_path: Path,
+    temp_dir: Path,
+    revision_metadata: dict[str, str],
+) -> dict[str, object]:
+    revision_date = revision_metadata["revision_date"]
+    author = revision_metadata["author"]
+    approval_author = revision_metadata["approval_author"]
     try:
         result = update_metadata_in_document(
             file_path,
@@ -583,11 +618,8 @@ def build_cover_status(
     *,
     old_document_number: str,
     new_document_number: str,
-    old_title: str | None,
-    new_title: str,
     old_project_title: str | None,
     new_project_title: str,
-    title_replace_count: int,
     project_title_replace_count: int,
     document_number_replace_count: int,
 ) -> dict[str, object]:
@@ -595,15 +627,11 @@ def build_cover_status(
     if document_number_replace_count:
         document_number_changed = True
 
-    title_change_expected = values_differ(old_title, new_title)
     project_title_change_expected = values_differ(old_project_title, new_project_title)
-    title_changed = title_replace_count > 0
     project_title_changed = project_title_replace_count > 0
-    cover_changed = document_number_changed or title_changed or project_title_changed
+    cover_changed = document_number_changed or project_title_changed
 
     warnings: list[str] = []
-    if title_change_expected and not title_changed:
-        warnings.append("문서명 변경 대상 텍스트를 찾지 못했습니다.")
     if project_title_change_expected and not project_title_changed:
         warnings.append("사업명 변경 대상 텍스트를 찾지 못했습니다.")
     if not cover_changed:

@@ -14,10 +14,17 @@ from output_file_check.folder_apply_ops import (
 )
 from output_file_check.folder_mapping import build_folder_mapping, build_folder_policy_from_fields
 from output_file_check.folder_serialization import serialize_check_result
-from web_uploads import save_check_uploads, save_requirement_uploads
+from web_uploads import save_check_uploads, save_proposal_requirement_uploads, save_requirement_uploads
 
 
 DEFAULT_CHECK_FOLDER = BASE_DIR / "data" / "테스트"
+
+
+def fallback_folder_from_fields(fields: dict[str, str]) -> Path | None:
+    # 관리산출물 전용 화면은 개발용 샘플 폴더 fallback을 쓰지 않는다.
+    if str(fields.get("require_folder") or "").strip().casefold() in {"1", "true", "yes", "y"}:
+        return None
+    return DEFAULT_CHECK_FOLDER
 
 
 def run_web_check(fields: dict[str, str], file_items: dict[str, list[tuple[str, bytes]]]) -> dict[str, object]:
@@ -36,7 +43,11 @@ def run_web_check(fields: dict[str, str], file_items: dict[str, list[tuple[str, 
     )
 
     try:
-        standard_file, folder_dir = save_check_uploads(temp_dir, file_items, fallback_folder=DEFAULT_CHECK_FOLDER)
+        standard_file, folder_dir = save_check_uploads(
+            temp_dir,
+            file_items,
+            fallback_folder=fallback_folder_from_fields(fields),
+        )
         payload = run_folder_check_paths(standard_file, folder_dir, fields, request_id=request_id)
         log_check_done(request_id, payload)
         remove_runtime_path(temp_dir)
@@ -99,8 +110,15 @@ def run_web_folder_apply(fields: dict[str, str], file_items: dict[str, list[tupl
     )
 
     try:
-        standard_file, uploaded_folder = save_check_uploads(temp_dir, file_items, fallback_folder=DEFAULT_CHECK_FOLDER)
-        requirement_files = save_requirement_uploads(temp_dir, file_items)
+        standard_file, uploaded_folder = save_check_uploads(
+            temp_dir,
+            file_items,
+            fallback_folder=fallback_folder_from_fields(fields),
+        )
+        requirement_files = [
+            *save_requirement_uploads(temp_dir, file_items),
+            *save_proposal_requirement_uploads(temp_dir, file_items),
+        ]
         folder_policy = build_folder_policy_from_fields(fields)
         dump_parent = resolve_dump_parent(fields.get("dump_path", ""))
         source_root = effective_uploaded_root(uploaded_folder)

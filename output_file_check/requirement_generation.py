@@ -30,6 +30,18 @@ DEFAULT_REQUIREMENT_GENERATION_TARGETS: tuple[str, ...] = (
     "단위시험결과서",
     "통합시험결과서",
 )
+APPLIED_OUTPUT_TARGET_SENTINELS = {
+    "__applied__",
+    "__matched__",
+    "*",
+    "all",
+    "applied",
+    "matched",
+    "전체",
+    "반영대상전체",
+    "매칭전체",
+}
+APPLIED_OUTPUT_TARGET_LABEL = "반영 대상 전체"
 
 REQUIREMENT_ID_PATTERN = re.compile(r"(?<![A-Z0-9])SFR-(?:[A-Z0-9]+-)*\d+(?![A-Z0-9])", re.IGNORECASE)
 VERSION_PATTERN = re.compile(r"(?:^|[_\-\s])([vV]\d+(?:\.\d+)*)(?=$|[_\-\s.]|$)")
@@ -91,21 +103,28 @@ def generate_requirement_documents(
     *,
     apply_items: list[dict[str, object]] | None = None,
 ) -> RequirementGenerationResult:
-    # 요구사항 파일은 내용이 아니라 파일명만 사용한다.
+    # 일반 요구사항 파일은 파일명에서, 제안요청서 입력은 임시 소스 파일명에서 ID를 읽는다.
     # 실제 복제 원본은 방금 문서관리표준 기준으로 정제된 산출물 파일이다.
     raw_target_names = fields.get("requirement_generation_targets")
-    target_names = parse_target_names(raw_target_names)
+    target_scope = parse_target_scope(raw_target_names)
+    target_names = parse_target_names(raw_target_names, target_scope=target_scope)
+    require_template_requirement_id = should_require_template_requirement_id(fields, target_scope)
     if not requirement_files:
         return RequirementGenerationResult(False, target_names, 0, [], [], [])
 
     sources, skipped_items = parse_requirement_sources(requirement_files)
-    folder_items = create_requirement_source_folders(dump_root, sources)
-    targets = select_target_outputs(outputs, path_templates, target_names)
+    folder_items = (
+        create_requirement_source_folders(dump_root, sources)
+        if should_create_requirement_source_folders(fields)
+        else []
+    )
+    targets = select_target_outputs(outputs, path_templates, target_names, target_scope=target_scope)
     output_templates, template_errors = select_output_templates(
         dump_root,
         targets,
         apply_items or [],
-        report_missing=bool(raw_target_names and raw_target_names.strip()),
+        report_missing=target_scope == "named",
+        require_template_requirement_id=require_template_requirement_id,
     )
     error_items: list[dict[str, object]] = []
     created_items: list[dict[str, object]] = []
@@ -120,7 +139,7 @@ def generate_requirement_documents(
         )
     error_items.extend(template_errors)
 
-    if targets and not output_templates:
+    if targets and not output_templates and not require_template_requirement_id:
         error_items.append(
             {
                 "status": "error",
@@ -173,11 +192,40 @@ def generate_requirement_documents(
     )
 
 
-def parse_target_names(raw_value: str | None) -> tuple[str, ...]:
-    if not raw_value:
+def parse_target_scope(raw_value: str | None) -> str:
+    if not raw_value or not raw_value.strip():
+        return "default"
+    values = [item.strip() for item in re.split(r"[,;\n]+", raw_value) if item.strip()]
+    if any(value.casefold() in APPLIED_OUTPUT_TARGET_SENTINELS for value in values):
+        return "applied"
+    return "named"
+
+
+def parse_target_names(raw_value: str | None, *, target_scope: str | None = None) -> tuple[str, ...]:
+    scope = target_scope or parse_target_scope(raw_value)
+    if scope == "applied":
+        return (APPLIED_OUTPUT_TARGET_LABEL,)
+    if scope == "default":
         return DEFAULT_REQUIREMENT_GENERATION_TARGETS
     values = [item.strip() for item in re.split(r"[,;\n]+", raw_value) if item.strip()]
     return tuple(dict.fromkeys(values)) or DEFAULT_REQUIREMENT_GENERATION_TARGETS
+
+
+def should_create_requirement_source_folders(fields: dict[str, str]) -> bool:
+    raw = (
+        fields.get("requirement_generation_create_source_folders")
+        or fields.get("create_requirement_source_folders")
+    )
+    if raw is None or not str(raw).strip():
+        return True
+    return str(raw).strip().casefold() not in {"0", "false", "no", "n", "off"}
+
+
+def should_require_template_requirement_id(fields: dict[str, str], target_scope: str) -> bool:
+    raw = fields.get("requirement_generation_require_template_id")
+    if raw is not None and str(raw).strip():
+        return str(raw).strip().casefold() not in {"0", "false", "no", "n", "off"}
+    return target_scope == "applied" or str(fields.get("artifact_category") or "").strip().casefold() == "management"
 
 
 def parse_requirement_sources(requirement_files: list[Path]) -> tuple[list[RequirementSource], list[dict[str, object]]]:
@@ -190,7 +238,7 @@ def parse_requirement_sources(requirement_files: list[Path]) -> tuple[list[Requi
                 {
                     "status": "skipped",
                     "source_file": path.name,
-                    "reason": "파일명에서 SFR로 시작하고 숫자 구간으로 끝나는 요구사항 ID를 찾지 못했습니다.",
+                    "reason": requirement_source_skip_reason(path),
                 }
             )
             continue
@@ -215,6 +263,20 @@ def extract_requirement_ids(filename: str) -> tuple[str, ...]:
     return tuple(result)
 
 
+def requirement_source_skip_reason(path: Path) -> str:
+    default_reason = "파일명에서 SFR로 시작하고 숫자 구간으로 끝나는 요구사항 ID를 찾지 못했습니다."
+    try:
+        if path.suffix.lower() != ".txt":
+            return default_reason
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()[:3]:
+            text = line.strip()
+            if text and not text.startswith("source:") and not text.startswith("requirement_id:"):
+                return text
+    except Exception:
+        return default_reason
+    return default_reason
+
+
 def extract_template_version(path: Path) -> str:
     matches = VERSION_PATTERN.findall(path.stem)
     if not matches:
@@ -235,6 +297,8 @@ def select_target_outputs(
     outputs: list[StandardOutput],
     path_templates: list[PathTemplate],
     target_names: tuple[str, ...],
+    *,
+    target_scope: str = "default",
 ) -> list[tuple[StandardOutput, PathTemplate | None]]:
     templates_by_name = {
         normalize_for_match(template.output_name): template
@@ -243,13 +307,13 @@ def select_target_outputs(
     selected: list[tuple[StandardOutput, PathTemplate | None]] = []
     seen: set[str] = set()
     for output in outputs:
-        if not output_matches_targets(output, target_names):
+        if target_scope != "applied" and not output_matches_targets(output, target_names):
             continue
-        key = normalize_for_match(output.output_name)
-        if key in seen:
+        seen_key = output_match_key(output) if target_scope == "applied" else normalize_for_match(output.output_name)
+        if seen_key in seen:
             continue
-        selected.append((output, templates_by_name.get(key)))
-        seen.add(key)
+        selected.append((output, templates_by_name.get(normalize_for_match(output.output_name))))
+        seen.add(seen_key)
     return selected
 
 
@@ -283,6 +347,7 @@ def select_output_templates(
     apply_items: list[dict[str, object]],
     *,
     report_missing: bool,
+    require_template_requirement_id: bool = False,
 ) -> tuple[list[OutputTemplate], list[dict[str, object]]]:
     selected: list[OutputTemplate] = []
     errors: list[dict[str, object]] = []
@@ -294,7 +359,11 @@ def select_output_templates(
             continue
         seen_outputs.add(output_key)
 
-        template_paths = select_applied_template_paths(output, apply_items)
+        template_paths = select_applied_template_paths(
+            output,
+            apply_items,
+            require_template_requirement_id=require_template_requirement_id,
+        )
         if template_paths:
             selected.append(OutputTemplate(output, template, tuple(template_paths)))
             continue
@@ -313,7 +382,12 @@ def select_output_templates(
     return selected, errors
 
 
-def select_applied_template_paths(output: StandardOutput, apply_items: list[dict[str, object]]) -> list[Path]:
+def select_applied_template_paths(
+    output: StandardOutput,
+    apply_items: list[dict[str, object]],
+    *,
+    require_template_requirement_id: bool = False,
+) -> list[Path]:
     candidates: list[Path] = []
     seen: set[str] = set()
     for item in apply_items:
@@ -328,13 +402,25 @@ def select_applied_template_paths(output: StandardOutput, apply_items: list[dict
         path_key = str(path.resolve(strict=False)).casefold()
         if path_key in seen:
             continue
-        if path.exists() and is_supported_template_path(path):
+        if (
+            path.exists()
+            and is_supported_template_path(path)
+            and (
+                not require_template_requirement_id
+                or template_has_requirement_id_tail(output, path)
+            )
+        ):
             candidates.append(path)
             seen.add(path_key)
 
     if not candidates:
         return []
     return select_distinct_template_variants(output, sorted(candidates, key=template_path_sort_key))
+
+
+def template_has_requirement_id_tail(output: StandardOutput, path: Path) -> bool:
+    tail = extract_template_tail(output, path.stem)
+    return bool(tail and REQUIREMENT_ID_PATTERN.search(tail))
 
 
 def select_distinct_template_variants(output: StandardOutput, candidates: list[Path]) -> list[Path]:

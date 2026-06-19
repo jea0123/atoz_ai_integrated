@@ -5,6 +5,8 @@ from datetime import date, datetime, time
 from pathlib import Path
 import re
 import shutil
+import time
+from uuid import uuid4
 import zipfile
 from xml.sax.saxutils import escape, unescape
 
@@ -21,10 +23,21 @@ from .excel_ooxml import (
     replace_or_insert_cell_xml,
     workbook_sheets,
 )
-from .hwpx_text import extract_document_text, is_hwpx_zip, strip_hwpx_line_seg_arrays
-from .patterns import CELL_PATTERN, OUTPUT_ID_PATTERN, ROW_PATTERN, split_output_id_and_name
+from .hwpx_text import (
+    extract_document_text,
+    is_hwpx_zip,
+    strip_hwpx_line_seg_arrays,
+)
+from .patterns import (
+    CELL_PATTERN,
+    NUMBER_OUTPUT_ID_PATTERN_TEXT,
+    OUTPUT_ID_PATTERN,
+    ROW_PATTERN,
+    split_output_id_and_name,
+)
 from . import ppt_ooxml
 from .runtime_conversion import prepare_target_file
+from output_file_check.file_noise import is_noise_filename
 
 
 SUPPORTED_METADATA_SUFFIXES = {".hwp", ".hwpx", *EXCEL_DOCUMENT_SUFFIXES, *ppt_ooxml.PPT_DOCUMENT_SUFFIXES}
@@ -57,8 +70,8 @@ LABEL_LIKE_VALUES = {
     "승인자",
 }
 VERSION_PATTERN = re.compile(r"^[vV]?\d+(?:\.\d+)*$")
+NUMBER_OUTPUT_ID_PATTERN = re.compile(NUMBER_OUTPUT_ID_PATTERN_TEXT)
 REQUIREMENT_ID_PATTERN = re.compile(r"(?<![A-Z0-9])SFR-[A-Z0-9]+-\d{3}(?!\d)", re.IGNORECASE)
-HEADER_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?header)\b[^>]*>.*?</(?P=tag)>", re.DOTALL)
 DATE_VALUE_PATTERN = re.compile(r"^\d{4}[-./]\d{1,2}[-./]\d{1,2}$")
 DRAWING_TEXT_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?t)\b[^>]*>(?P<text>.*?)</(?P=tag)>", re.DOTALL)
 HWPX_CARET_POSITION_PATTERN = re.compile(r"<(?:\w+:)?CaretPosition\b[^>]*/>", re.DOTALL)
@@ -211,6 +224,8 @@ def extract_requirement_id_from_values(values: object) -> str:
 def should_scan_document(path: Path) -> bool:
     if path.suffix.lower() not in SUPPORTED_METADATA_SUFFIXES:
         return False
+    if is_noise_filename(path.name):
+        return False
     if any(part in IGNORED_FOLDER_NAMES for part in path.parts):
         return False
     if "WBS" in path.name.upper():
@@ -348,16 +363,14 @@ def find_label_value_in_xml(xml: str, labels: set[str]) -> str:
 
 
 def find_header_metadata_values_in_xml(xml: str) -> tuple[str, str]:
-    for header_match in HEADER_PATTERN.finditer(xml):
-        header_xml = header_match.group(0)
-        for row_match in ROW_PATTERN.finditer(header_xml):
-            cells = list(CELL_PATTERN.finditer(row_match.group(0)))
-            if len(cells) < 4:
-                continue
-            values = [get_cell_text(cell.group(0)).strip() for cell in cells]
-            if not looks_like_unlabeled_header_metadata_row(values):
-                continue
-            return values[2], values[3]
+    for row_match in ROW_PATTERN.finditer(xml):
+        cells = list(CELL_PATTERN.finditer(row_match.group(0)))
+        if len(cells) < 4:
+            continue
+        values = [get_cell_text(cell.group(0)).strip() for cell in cells]
+        if not looks_like_unlabeled_header_metadata_row(values):
+            continue
+        return values[2], values[3]
     return "", ""
 
 
@@ -365,7 +378,7 @@ def looks_like_unlabeled_header_metadata_row(values: list[str]) -> bool:
     if len(values) < 4:
         return False
     return (
-        bool(OUTPUT_ID_PATTERN.search(values[0]))
+        bool(OUTPUT_ID_PATTERN.search(values[0]) or NUMBER_OUTPUT_ID_PATTERN.search(values[0]))
         and bool(VERSION_PATTERN.fullmatch(values[1]))
         and bool(DATE_VALUE_PATTERN.fullmatch(values[2].strip()))
         and normalize_label(values[3]) not in {normalize_label(item) for item in LABEL_LIKE_VALUES}
@@ -599,10 +612,34 @@ def update_metadata_in_document(
         )
 
 
+def metadata_temp_path(path: Path) -> Path:
+    return path.with_name(f"{path.stem}_metadata_{uuid4().hex}{path.suffix}")
+
+
+def safe_unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def replace_with_retry(source: Path, target: Path, *, attempts: int = 10, delay_seconds: float = 0.2) -> None:
+    last_error: OSError | None = None
+    for _ in range(attempts):
+        try:
+            source.replace(target)
+            return
+        except OSError as exc:
+            last_error = exc
+            time.sleep(delay_seconds)
+    if last_error is not None:
+        raise last_error
+
+
 def write_updated_excel_metadata(path: Path, author: str, revision_date: str, approval_author: str) -> tuple[int, int]:
     cover_count = 0
     revision_count = 0
-    temp_path = path.with_name(f".metadata_{path.name}")
+    temp_path = metadata_temp_path(path)
     try:
         with zipfile.ZipFile(path, "r") as zin:
             shared_strings = read_shared_strings(zin)
@@ -687,10 +724,10 @@ def write_updated_excel_metadata(path: Path, author: str, revision_date: str, ap
                     elif item.filename == "xl/workbook.xml":
                         data = set_excel_first_sheet_active(data.decode("utf-8", errors="ignore")).encode("utf-8")
                     zout.writestr(item, data)
-        temp_path.replace(path)
+        replace_with_retry(temp_path, path)
     except Exception:
         if temp_path.exists():
-            temp_path.unlink()
+            safe_unlink(temp_path)
         raise
     return cover_count, revision_count
 
@@ -701,7 +738,7 @@ def write_updated_ppt_metadata(path: Path, author: str, revision_date: str, appr
 
     cover_count = 0
     revision_count = 0
-    temp_path = path.with_name(f".metadata_{path.name}")
+    temp_path = metadata_temp_path(path)
     try:
         with zipfile.ZipFile(path, "r") as zin:
             with zipfile.ZipFile(temp_path, "w", zipfile.ZIP_DEFLATED) as zout:
@@ -733,12 +770,12 @@ def write_updated_ppt_metadata(path: Path, author: str, revision_date: str, appr
                             data = xml.encode("utf-8")
                     zout.writestr(item, data)
         if cover_count or revision_count:
-            temp_path.replace(path)
+            replace_with_retry(temp_path, path)
         else:
             temp_path.unlink(missing_ok=True)
     except Exception:
         if temp_path.exists():
-            temp_path.unlink()
+            safe_unlink(temp_path)
         raise
     return cover_count, revision_count
 
@@ -1058,9 +1095,8 @@ def update_unlabeled_excel_header_metadata_xml(
         if not has_document_context and not looks_like_compact_unlabeled_metadata_row(row_values):
             continue
 
-        formatted_date = format_date_like_existing(revision_date, clean_text(date_cell.text))
         updates = [
-            (date_cell.ref, date_cell.row, date_cell.col, formatted_date),
+            (date_cell.ref, date_cell.row, date_cell.col, revision_date),
             (author_cell.ref, author_cell.row, author_cell.col, author),
         ]
         if version_cell is not None:
@@ -1123,8 +1159,7 @@ def update_excel_drawing_metadata_xml(xml: str, revision_date: str, author: str)
     new_texts: dict[int, str] = {}
     if version_match is not None:
         add_drawing_text_span_update(new_texts, texts, spans, version_match.span(), UNLABELED_HEADER_VERSION_VALUE)
-    formatted_date = format_date_like_existing(revision_date, date_match.group(0))
-    add_drawing_text_span_update(new_texts, texts, spans, (date_start, date_end), formatted_date)
+    add_drawing_text_span_update(new_texts, texts, spans, (date_start, date_end), revision_date)
     new_texts[author_run_index] = author
 
     pieces: list[str] = []
@@ -1184,6 +1219,7 @@ def select_excel_drawing_metadata_date(text: str) -> re.Match[str] | None:
 def has_embedded_output_id(text: str) -> bool:
     return bool(
         OUTPUT_ID_PATTERN.search(text)
+        or NUMBER_OUTPUT_ID_PATTERN.search(text)
         or re.search(r"(?:MFDS-\d{3,6}|[A-Za-z]{2,10}(?:-[A-Za-z0-9]{1,12})*-\d{2})", text)
     )
 
@@ -1195,7 +1231,12 @@ def looks_like_unlabeled_author_value(value: str) -> bool:
     normalized = normalize_label(text)
     if normalized in {normalize_label(item) for item in LABEL_LIKE_VALUES}:
         return False
-    if OUTPUT_ID_PATTERN.search(text) or VERSION_PATTERN.fullmatch(text) or DATE_VALUE_PATTERN.fullmatch(text):
+    if (
+        OUTPUT_ID_PATTERN.search(text)
+        or NUMBER_OUTPUT_ID_PATTERN.search(text)
+        or VERSION_PATTERN.fullmatch(text)
+        or DATE_VALUE_PATTERN.fullmatch(text)
+    ):
         return False
     if re.search(r"\d", text):
         return False
@@ -1274,13 +1315,21 @@ def update_excel_revision_history_xml(
 
 
 def revision_header_map(labels: list[str]) -> dict[str, int]:
+    normalized_versions = {normalize_label(label) for label in VERSION_LABELS} | {normalize_label("버전")}
     normalized_revision_dates = {normalize_label(label) for label in REVISION_DATE_HEADER_LABELS}
     normalized_approvals = {normalize_label(label) for label in APPROVAL_LABELS}
     result: dict[str, int] = {}
     for index, label in enumerate(labels):
-        if label == normalize_label("버전"):
+        if label in normalized_versions:
             result["version"] = index
         elif label in normalized_revision_dates:
+            result["date"] = index
+        elif (
+            "version" in result
+            and "date" not in result
+            and index == result["version"] + 1
+            and VERSION_PATTERN.fullmatch(label)
+        ):
             result["date"] = index
         elif label == normalize_label("작성자"):
             result["author"] = index
@@ -1291,7 +1340,7 @@ def revision_header_map(labels: list[str]) -> dict[str, int]:
 
 
 def write_updated_hwpx_metadata(path: Path, author: str, revision_date: str, approval_author: str) -> tuple[int, int]:
-    temp_path = path.with_name(f".metadata_{path.name}")
+    temp_path = metadata_temp_path(path)
     cover_count = 0
     revision_count = 0
     try:
@@ -1311,7 +1360,7 @@ def write_updated_hwpx_metadata(path: Path, author: str, revision_date: str, app
                         xml, count = update_label_right_rows_in_xml(xml, VERSION_LABELS, DOCUMENT_VERSION_VALUE)
                         cover_count += count
                         changed_count += count
-                        xml, count = update_unlabeled_header_metadata_xml(xml, revision_date, author)
+                        xml, count = update_unlabeled_metadata_rows_xml(xml, revision_date, author)
                         cover_count += count
                         changed_count += count
                         xml, count = update_revision_history_xml(xml, revision_date, author, approval_author)
@@ -1326,12 +1375,12 @@ def write_updated_hwpx_metadata(path: Path, author: str, revision_date: str, app
                                 data = xml.encode("utf-8")
                     zout.writestr(item, data)
         if cover_count or revision_count:
-            temp_path.replace(path)
+            replace_with_retry(temp_path, path)
         else:
             temp_path.unlink(missing_ok=True)
     except Exception:
         if temp_path.exists():
-            temp_path.unlink()
+            safe_unlink(temp_path)
         raise
     return cover_count, revision_count
 
@@ -1380,24 +1429,23 @@ def reset_hwpx_open_position(xml: str) -> tuple[str, int]:
     return HWPX_CARET_POSITION_PATTERN.subn("", xml)
 
 
-def update_unlabeled_header_metadata_xml(xml: str, revision_date: str, author: str) -> tuple[str, int]:
+def update_unlabeled_metadata_rows_xml(xml: str, revision_date: str, author: str) -> tuple[str, int]:
     pieces: list[str] = []
     last = 0
     count = 0
 
-    for header_match in HEADER_PATTERN.finditer(xml):
-        header_xml = header_match.group(0)
-        updated_header, header_count = update_unlabeled_header_metadata_block(
-            header_xml,
+    for row_match in ROW_PATTERN.finditer(xml):
+        updated_row, row_count = update_unlabeled_metadata_row(
+            row_match.group(0),
             revision_date,
             author,
         )
-        if not header_count:
+        if not row_count:
             continue
-        pieces.append(xml[last:header_match.start()])
-        pieces.append(updated_header)
-        last = header_match.end()
-        count += header_count
+        pieces.append(xml[last:row_match.start()])
+        pieces.append(updated_row)
+        last = row_match.end()
+        count += row_count
 
     if not pieces:
         return xml, 0
@@ -1405,41 +1453,31 @@ def update_unlabeled_header_metadata_xml(xml: str, revision_date: str, author: s
     return "".join(pieces), count
 
 
-def update_unlabeled_header_metadata_block(
-    header_xml: str,
-    revision_date: str,
-    author: str,
-) -> tuple[str, int]:
-    for row_match in ROW_PATTERN.finditer(header_xml):
-        row_xml = row_match.group(0)
-        cells = list(CELL_PATTERN.finditer(row_xml))
-        if len(cells) < 4:
-            continue
+def update_unlabeled_metadata_row(row_xml: str, revision_date: str, author: str) -> tuple[str, int]:
+    cells = list(CELL_PATTERN.finditer(row_xml))
+    if len(cells) < 4:
+        return row_xml, 0
 
-        values = [get_cell_text(cell.group(0)).strip() for cell in cells]
-        if not looks_like_unlabeled_header_metadata_row(values):
-            continue
+    values = [get_cell_text(cell.group(0)).strip() for cell in cells]
+    if not looks_like_unlabeled_header_metadata_row(values):
+        return row_xml, 0
 
-        header_revision_date = format_date_like_existing(revision_date, values[2])
-        updates = [(1, UNLABELED_HEADER_VERSION_VALUE), (2, header_revision_date), (3, author)]
-        updated_row = row_xml
-        offset = 0
-        count = 0
-        for cell_index, new_text in updates:
-            cell = cells[cell_index]
-            old_text = get_cell_text(cell.group(0)).strip()
-            if old_text == new_text:
-                continue
-            updated_cell, _old_value = replace_cell_text(cell.group(0), new_text)
-            start = cell.start() + offset
-            end = cell.end() + offset
-            updated_row = updated_row[:start] + updated_cell + updated_row[end:]
-            offset += len(updated_cell) - len(cell.group(0))
-            count += 1
-        if not count:
-            return header_xml, 0
-        return header_xml[:row_match.start()] + updated_row + header_xml[row_match.end():], count
-    return header_xml, 0
+    updates = [(1, UNLABELED_HEADER_VERSION_VALUE), (2, revision_date), (3, author)]
+    updated_row = row_xml
+    offset = 0
+    count = 0
+    for cell_index, new_text in updates:
+        cell = cells[cell_index]
+        old_text = get_cell_text(cell.group(0)).strip()
+        if old_text == new_text:
+            continue
+        updated_cell, _old_value = replace_cell_text(cell.group(0), new_text)
+        start = cell.start() + offset
+        end = cell.end() + offset
+        updated_row = updated_row[:start] + updated_cell + updated_row[end:]
+        offset += len(updated_cell) - len(cell.group(0))
+        count += 1
+    return updated_row, count
 
 
 def format_date_like_existing(revision_date: str, existing_date: str) -> str:

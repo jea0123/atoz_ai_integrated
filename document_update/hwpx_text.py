@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import importlib.util
+import os
 import re
 import shutil
 import struct
@@ -46,18 +47,28 @@ LINESEG_ARRAY_PATTERN = re.compile(
     r"<(?P<tag2>(?:\w+:)?linesegarray)\b[^>]*>.*?</(?P=tag2)>",
     re.DOTALL | re.IGNORECASE,
 )
+def windows_long_path(path: Path) -> str:
+    if os.name != "nt":
+        return str(path)
+
+    absolute = str(path.resolve(strict=False))
+    if absolute.startswith("\\\\?\\"):
+        return absolute
+    if absolute.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + absolute.lstrip("\\")
+    return "\\\\?\\" + absolute
 
 
 def is_hwpx_zip(file_path: Path) -> bool:
     try:
-        with zipfile.ZipFile(file_path, "r") as zf:
+        with zipfile.ZipFile(windows_long_path(file_path), "r") as zf:
             return "Contents/section0.xml" in zf.namelist()
     except (OSError, zipfile.BadZipFile):
         return False
 
 
 def strip_hwpx_line_seg_arrays(xml: str) -> tuple[str, int]:
-    """텍스트 직접 수정 후 무효가 되는 HWPX 문단 레이아웃 캐시를 제거한다."""
+    """Remove stale HWPX layout cache after direct text edits."""
     return LINESEG_ARRAY_PATTERN.subn("", xml)
 
 

@@ -15,27 +15,33 @@ PARENTHETICAL_CONTENT_PATTERN = re.compile(r"\([^()]*\)|\uFF08[^\uFF08\uFF09]*\u
 def score_file(
     output: StandardOutput,
     scanned_file: ScannedFile,
+    *,
+    use_output_id: bool = False,
 ) -> MatchCandidate | None:
     file_stem = strip_attachment_tail(scanned_file.stem)
     file_stem_upper = file_stem.upper()
     file_normalized = normalize_for_match(file_stem)
 
-    if has_document_title_conflict(output, scanned_file) and not filename_matches_output(output, file_stem):
+    if has_document_title_conflict(output, scanned_file) and not filename_matches_output(
+        output,
+        file_stem,
+        use_output_id=use_output_id,
+    ):
         return None
 
-    if output.output_id.upper() in file_stem_upper:
+    if use_output_id and output.output_id.upper() in file_stem_upper:
         return MatchCandidate(output, scanned_file, 1.0, "파일명 산출물ID 전체 일치")
 
     prefix = output_id_prefix(output.output_id)
-    if prefix and prefix.upper() in file_stem_upper:
+    if use_output_id and prefix and prefix.upper() in file_stem_upper:
         return MatchCandidate(output, scanned_file, 0.98, "파일명 산출물ID prefix 일치")
 
-    conflicting_output_id = has_conflicting_output_id(file_stem, output)
+    conflicting_output_id = use_output_id and has_conflicting_output_id(file_stem, output)
     best_score = 0.0
     best_reason = ""
 
     if scanned_file.identity:
-        content_candidate = score_content(output, scanned_file)
+        content_candidate = score_content(output, scanned_file, use_output_id=use_output_id)
         if content_candidate and content_candidate.score > best_score:
             best_score = content_candidate.score
             best_reason = content_candidate.reason
@@ -67,13 +73,13 @@ def score_file(
     return MatchCandidate(output, scanned_file, best_score, best_reason)
 
 
-def filename_matches_output(output: StandardOutput, file_stem: str) -> bool:
+def filename_matches_output(output: StandardOutput, file_stem: str, *, use_output_id: bool = False) -> bool:
     file_stem_upper = file_stem.upper()
-    if output.output_id.upper() in file_stem_upper:
+    if use_output_id and output.output_id.upper() in file_stem_upper:
         return True
 
     prefix = output_id_prefix(output.output_id)
-    if prefix and prefix.upper() in file_stem_upper:
+    if use_output_id and prefix and prefix.upper() in file_stem_upper:
         return True
 
     file_normalized = normalize_for_match(file_stem)
@@ -96,7 +102,12 @@ def has_conflicting_output_id(file_stem: str, output: StandardOutput) -> bool:
     return bool(STANDARD_ID_IN_NAME_PATTERN.search(file_stem))
 
 
-def score_content(output: StandardOutput, scanned_file: ScannedFile) -> MatchCandidate | None:
+def score_content(
+    output: StandardOutput,
+    scanned_file: ScannedFile,
+    *,
+    use_output_id: bool = False,
+) -> MatchCandidate | None:
     identity = scanned_file.identity
     if identity is None or identity.error:
         return None
@@ -106,11 +117,11 @@ def score_content(output: StandardOutput, scanned_file: ScannedFile) -> MatchCan
     output_id_upper = output.output_id.upper()
     preview_upper = identity.preview_text.upper()
 
-    if output_id_upper and output_id_upper in preview_upper:
+    if use_output_id and output_id_upper and output_id_upper in preview_upper:
         return MatchCandidate(output, scanned_file, 1.0, "문서 내부 산출물ID 전체 일치")
 
     prefix = output_id_prefix(output.output_id)
-    if prefix and prefix.upper() in preview_upper:
+    if use_output_id and prefix and prefix.upper() in preview_upper:
         return MatchCandidate(output, scanned_file, 0.98, "문서 내부 산출물ID prefix 일치")
 
     best_score = 0.0

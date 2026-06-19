@@ -345,15 +345,18 @@ def parse_identity_from_text(document_text: str) -> tuple[str, str]:
     rule_project_title, rule_document_title = find_target_identity_by_rule(document_text)
     lines = meaningful_lines(document_text[:8000])
     cover_project_title, cover_document_title = find_cover_identity(lines)
+    combined_project_title, combined_document_title = find_combined_cover_identity(lines)
 
     project_title = (
         find_labeled_project_title(lines)
         or cover_project_title
+        or combined_project_title
         or clean_project_title_if_valid(rule_project_title)
     )
     document_title = (
         find_labeled_document_title(lines)
         or cover_document_title
+        or combined_document_title
         or clean_document_title_if_valid(rule_document_title)
     )
 
@@ -364,6 +367,56 @@ def parse_identity_from_text(document_text: str) -> tuple[str, str]:
         project_title = find_project_title_near_document_title(lines, document_title)
 
     return project_title, document_title
+
+
+def find_combined_cover_identity(lines: list[str]) -> tuple[str, str]:
+    # HWP 추출에서 '<프로젝트명 문서명> <문서번호> ...'가 한 줄로 붙는 표지를 나눈다.
+    for line in lines[:20]:
+        head = cover_head_before_metadata(line)
+        if not head:
+            continue
+        project_title, document_title = split_project_and_document_title(head)
+        if project_title and document_title:
+            return project_title, document_title
+    return "", ""
+
+
+def cover_head_before_metadata(line: str) -> str:
+    text = clean_text(line)
+    for marker in ("문서번호", "문서버전", "Version", "개정일자", "작성자"):
+        index = text.find(marker)
+        if index > 0:
+            text = text[:index]
+            break
+    return clean_text(text)
+
+
+def split_project_and_document_title(value: str) -> tuple[str, str]:
+    text = clean_text(value)
+    parts = text.split()
+    if len(parts) < 2:
+        return "", ""
+
+    for index in range(len(parts) - 1, 0, -1):
+        title_parts = parts[index:]
+        if (
+            title_parts[-1] == "매뉴얼"
+            and index > 0
+            and parts[index - 1] in {"사용자", "운영자", "관리자"}
+        ):
+            title_parts = parts[index - 1:]
+            project_parts = parts[:index - 1]
+        else:
+            project_parts = parts[:index]
+
+        document_title = clean_document_title(" ".join(title_parts))
+        project_title = clean_project_title(" ".join(project_parts))
+        if not project_title or not document_title:
+            continue
+        if any(keyword in document_title for keyword in TITLE_KEYWORDS):
+            return project_title, document_title
+
+    return "", ""
 
 
 def meaningful_lines(document_text: str) -> list[str]:
@@ -432,6 +485,8 @@ def find_cover_identity(lines: list[str]) -> tuple[str, str]:
 def is_cover_value(line: str) -> bool:
     # 표지의 실제 값으로 쓸 수 있는 줄인지 필터링한다.
     if not line or len(line) > 120:
+        return False
+    if OUTPUT_ID_PATTERN.fullmatch(line):
         return False
     if any(line.startswith(prefix) for prefix in NOISE_PREFIXES):
         return False

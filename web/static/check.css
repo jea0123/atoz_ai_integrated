@@ -355,6 +355,11 @@ h2 {
   background: #fffbf0;
 }
 
+.drop-zone.requirement-source {
+  border-color: #98c6a9;
+  background: #f1fbf5;
+}
+
 .drop-zone:hover {
   border-color: var(--blue);
   background: #eff6ff;
@@ -411,6 +416,33 @@ h2 {
   background: var(--paper-soft);
   padding: 0 11px;
   color: var(--ink);
+}
+
+.revision-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0 16px;
+  padding: 12px;
+  border: 1px solid #d7e1ee;
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.revision-fields legend {
+  grid-column: 1 / -1;
+  margin-bottom: 2px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.revision-fields .field {
+  margin: 0;
+}
+
+.revision-year-field {
+  grid-column: 1 / -1;
 }
 
 .primary-button,
@@ -1260,6 +1292,7 @@ body {
 .apply-error-card,
 .candidate-card,
 .drop-zone,
+.revision-fields,
 .mode-toggle,
 .mode-summary,
 .mode-check,
@@ -1329,6 +1362,12 @@ body {
   margin: 0 14px;
   padding: 10px;
   background: #f8fafc;
+}
+
+.revision-fields {
+  margin: 0 14px;
+  padding: 10px;
+  background: #ffffff;
 }
 
 .mode-summary {
@@ -1679,6 +1718,7 @@ body {
 .detail-panel,
 .candidate-row,
 .drop-zone,
+.revision-fields,
 .field input,
 #resultFilter {
   border-color: var(--line);

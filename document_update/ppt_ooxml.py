@@ -493,12 +493,10 @@ def is_document_version_value_cell(value: str) -> bool:
 def write_updated_ppt_document(
     file_path: Path,
     new_document_number: str,
-    old_title: str | None = None,
-    new_title: str | None = None,
     old_project_title: str | None = None,
     new_project_title: str | None = None,
     output_path: Path | None = None,
-) -> tuple[str, Path, int, int, int, Path]:
+) -> tuple[str, Path, int, int, Path]:
     """PowerPoint OOXML 문서의 첫 표지값을 읽고 동일 텍스트 노드를 치환한다."""
     backup_path = backup_path_for(file_path)
     write_path = output_path or file_path.parent / f"working_output{file_path.suffix}"
@@ -513,14 +511,12 @@ def write_updated_ppt_document(
         if output_path is None:
             write_path.replace(file_path)
             updated_path = file_path
-        return ("", backup_path, 0, 0, 0, updated_path)
+        return ("", backup_path, 0, 0, updated_path)
 
     cover = read_ppt_cover_identity(file_path)
     old_document_number = cover.document_number
-    old_title = old_title or cover.document_title
-    old_project_title = old_project_title or cover.project_title
+    project_titles_to_scan = unique_text_values(old_project_title or "", cover.project_title)
 
-    title_replace_count = 0
     project_title_replace_count = 0
     document_number_replace_count = 0
 
@@ -533,15 +529,11 @@ def write_updated_ppt_document(
                         xml = data.decode("utf-8", errors="ignore")
                         changed = False
 
-                        xml, count = replace_matching_text_nodes(xml, old_title, new_title)
-                        if count:
-                            title_replace_count += count
-                            changed = True
-
-                        xml, count = replace_matching_text_nodes(xml, old_project_title, new_project_title)
-                        if count:
-                            project_title_replace_count += count
-                            changed = True
+                        for project_title_to_scan in project_titles_to_scan:
+                            xml, count = replace_matching_text_nodes(xml, project_title_to_scan, new_project_title)
+                            if count:
+                                project_title_replace_count += count
+                                changed = True
 
                         xml, replaced_document_number, count = replace_document_number_cell(xml, new_document_number)
                         if count:
@@ -571,7 +563,6 @@ def write_updated_ppt_document(
         return (
             old_document_number,
             backup_path,
-            title_replace_count,
             project_title_replace_count,
             document_number_replace_count,
             updated_path,
@@ -583,3 +574,12 @@ def write_updated_ppt_document(
             except OSError:
                 pass
         raise
+
+
+def unique_text_values(*values: str) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        text = clean_cover_text(value)
+        if text and text not in result:
+            result.append(text)
+    return result

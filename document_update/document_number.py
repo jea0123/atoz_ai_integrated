@@ -49,6 +49,7 @@ DOCUMENT_NUMBER_LABEL_LIKE_VALUES = {
 VERSION_PATTERN = re.compile(r"^[vV]?\d+(?:\.\d+)*$")
 DATE_VALUE_PATTERN = re.compile(r"^\d{4}[-./]\d{1,2}[-./]\d{1,2}$")
 HEADER_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?header)\b[^>]*>.*?</(?P=tag)>", re.DOTALL)
+PARAGRAPH_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?p)\b[^>]*>.*?</(?P=tag)>", re.DOTALL)
 
 
 def normalize_document_number_label(value: str) -> str:
@@ -72,6 +73,51 @@ def infer_document_number_from_filename(file_path: Path) -> str:
         return match.group(0)
 
     return ""
+
+
+def clean_text_node_value(value: str) -> str:
+    return re.sub(r"\s+", " ", unescape(value)).strip()
+
+
+def infer_cover_project_title_from_xml(xml: str) -> str:
+    """표지의 '문서번호' 앞 제목 묶음에서 프로젝트명 줄을 보조 추정한다."""
+    text_values = [
+        clean_text_node_value(match.group("body"))
+        for match in TEXT_NODE_PATTERN.finditer(xml)
+    ]
+    for index, value in enumerate(text_values):
+        if not is_document_number_label(value):
+            continue
+
+        candidates = [
+            item
+            for item in text_values[:index]
+            if is_cover_title_value(item)
+        ]
+        if len(candidates) >= 2:
+            return candidates[-2]
+        return ""
+    return ""
+
+
+def is_cover_title_value(value: str) -> bool:
+    text = clean_text_node_value(value)
+    if not text or len(text) > 120:
+        return False
+    if is_document_number_label(text) or is_document_version_label(text):
+        return False
+    if normalize_document_number_label(text) in {
+        normalize_document_number_label(item)
+        for item in DOCUMENT_NUMBER_LABEL_LIKE_VALUES
+    }:
+        return False
+    if OUTPUT_ID_PATTERN.fullmatch(text):
+        return False
+    if VERSION_PATTERN.fullmatch(text) or DATE_VALUE_PATTERN.fullmatch(text):
+        return False
+    if text.startswith("㈜") or text.startswith("(주)"):
+        return False
+    return True
 
 
 def unique_scan_values(*values: str) -> list[str]:
@@ -340,9 +386,9 @@ def looks_like_unlabeled_header_metadata_row(values: list[str]) -> bool:
     )
 
 
-def replace_matching_text_nodes(xml: str, old_text: str, new_text: str) -> tuple[str, int]:
+def replace_matching_text_nodes(xml: str, old_text: str | None, new_text: str | None) -> tuple[str, int]:
     """머리글 같은 곳에 반복된 동일 텍스트 노드를 정확히 일치할 때만 바꾼다."""
-    if not old_text or old_text == new_text:
+    if not old_text or not new_text or old_text == new_text:
         return xml, 0
 
     escaped_new_text = escape(new_text)
@@ -361,21 +407,46 @@ def replace_matching_text_nodes(xml: str, old_text: str, new_text: str) -> tuple
         replace_count += 1
 
     if replace_count == 0:
-        return xml, 0
+        return replace_matching_paragraph_text(xml, old_text, new_text)
 
     pieces.append(xml[last:])
     return "".join(pieces), replace_count
 
 
-def replace_title_text(xml: str, old_title: str | None, new_title: str | None) -> tuple[str, int]:
-    """기존 제목 텍스트 노드를 표준에서 찾은 새 제목으로 바꾼다."""
-    if not old_title or not new_title:
+def replace_matching_paragraph_text(xml: str, old_text: str, new_text: str) -> tuple[str, int]:
+    escaped_new_text = escape(new_text)
+    pieces: list[str] = []
+    last = 0
+    replace_count = 0
+
+    for paragraph_match in PARAGRAPH_PATTERN.finditer(xml):
+        paragraph_xml = paragraph_match.group(0)
+        text_nodes = list(TEXT_NODE_PATTERN.finditer(paragraph_xml))
+        if not text_nodes:
+            continue
+
+        combined = "".join(unescape(match.group("body")) for match in text_nodes).strip()
+        if combined != old_text:
+            continue
+
+        paragraph_pieces: list[str] = []
+        paragraph_last = 0
+        for index, text_match in enumerate(text_nodes):
+            paragraph_pieces.append(paragraph_xml[paragraph_last:text_match.start("body")])
+            paragraph_pieces.append(escaped_new_text if index == 0 else "")
+            paragraph_last = text_match.end("body")
+        paragraph_pieces.append(paragraph_xml[paragraph_last:])
+
+        pieces.append(xml[last:paragraph_match.start()])
+        pieces.append("".join(paragraph_pieces))
+        last = paragraph_match.end()
+        replace_count += 1
+
+    if replace_count == 0:
         return xml, 0
 
-    if old_title == new_title:
-        return xml, 0
-
-    return replace_matching_text_nodes(xml, old_title, new_title)
+    pieces.append(xml[last:])
+    return "".join(pieces), replace_count
 
 
 def backup_path_for(file_path: Path) -> Path:
@@ -385,12 +456,10 @@ def backup_path_for(file_path: Path) -> Path:
 def write_updated_document(
     file_path: Path,
     new_document_number: str,
-    old_title: str | None = None,
-    new_title: str | None = None,
     old_project_title: str | None = None,
     new_project_title: str | None = None,
     output_path: Path | None = None,
-) -> tuple[str, Path, int, int, int, Path]:
+) -> tuple[str, Path, int, int, Path]:
     """대상 파일 형식에 맞는 수정 함수로 분기한다."""
     suffix = file_path.suffix.lower()
 
@@ -398,8 +467,6 @@ def write_updated_document(
         return write_updated_hwpx_document(
             file_path,
             new_document_number,
-            old_title,
-            new_title,
             old_project_title,
             new_project_title,
             output_path,
@@ -409,8 +476,6 @@ def write_updated_document(
         return write_updated_excel_document(
             file_path,
             new_document_number,
-            old_title,
-            new_title,
             old_project_title,
             new_project_title,
             output_path,
@@ -420,8 +485,6 @@ def write_updated_document(
         return write_updated_ppt_document(
             file_path,
             new_document_number,
-            old_title,
-            new_title,
             old_project_title,
             new_project_title,
             output_path,
@@ -437,12 +500,10 @@ def write_updated_document(
 def write_updated_hwpx_document(
     file_path: Path,
     new_document_number: str,
-    old_title: str | None = None,
-    new_title: str | None = None,
     old_project_title: str | None = None,
     new_project_title: str | None = None,
     output_path: Path | None = None,
-) -> tuple[str, Path, int, int, int, Path]:
+) -> tuple[str, Path, int, int, Path]:
     """업로드된 대상 파일을 기준으로 수정된 한글 확장 결과 파일을 만든다."""
     backup_path = backup_path_for(file_path)
     write_path = output_path or file_path.parent / "working_output.hwpx"
@@ -450,17 +511,21 @@ def write_updated_hwpx_document(
     with zipfile.ZipFile(file_path, "r") as source_zip:
         section_xml = source_zip.read("Contents/section0.xml").decode("utf-8", errors="ignore")
         old_document_number = find_document_number_cell_value(section_xml)
+        inferred_project_title = infer_cover_project_title_from_xml(section_xml)
 
     document_numbers_to_scan = unique_scan_values(
         old_document_number,
         infer_document_number_from_filename(file_path),
+    )
+    project_titles_to_scan = unique_scan_values(
+        old_project_title or "",
+        inferred_project_title,
     )
 
     if output_path is None:
         # 원본을 덮어쓸 때는 먼저 시각이 들어간 백업을 만든다.
         shutil.copy2(file_path, backup_path)
 
-    title_replace_count = 0
     project_title_replace_count = 0
     matching_document_number_replace_count = 0
     document_number_position_found = False
@@ -475,20 +540,15 @@ def write_updated_hwpx_document(
                         xml = data.decode("utf-8", errors="ignore")
                         changed = False
 
-                        # 문서제목, 프로젝트명, 기존 문서번호를 순서대로 바꾼다.
-                        xml, count = replace_title_text(xml, old_title, new_title)
-                        if count:
-                            title_replace_count += count
-                            changed = True
-
-                        xml, count = replace_title_text(
-                            xml,
-                            old_project_title,
-                            new_project_title,
-                        )
-                        if count:
-                            project_title_replace_count += count
-                            changed = True
+                        for project_title_to_scan in project_titles_to_scan:
+                            xml, count = replace_matching_text_nodes(
+                                xml,
+                                project_title_to_scan,
+                                new_project_title,
+                            )
+                            if count:
+                                project_title_replace_count += count
+                                changed = True
 
                         (
                             xml,
@@ -538,7 +598,6 @@ def write_updated_hwpx_document(
         return (
             old_document_number,
             backup_path,
-            title_replace_count,
             project_title_replace_count,
             matching_document_number_replace_count,
             updated_path,
@@ -556,12 +615,10 @@ def write_updated_hwpx_document(
 def write_updated_excel_document(
     file_path: Path,
     new_document_number: str,
-    old_title: str | None = None,
-    new_title: str | None = None,
     old_project_title: str | None = None,
     new_project_title: str | None = None,
     output_path: Path | None = None,
-) -> tuple[str, Path, int, int, int, Path]:
+) -> tuple[str, Path, int, int, Path]:
     """엑셀 통합문서의 표지 시트 셀을 수정한다."""
     backup_path = backup_path_for(file_path)
     write_path = output_path or file_path.parent / f"working_output{file_path.suffix}"
@@ -576,14 +633,12 @@ def write_updated_excel_document(
                 cover_sheet_path,
                 updated_cover_sheet,
                 old_document_number,
-                title_replace_count,
                 project_title_replace_count,
                 document_number_replace_count,
+                project_titles_to_scan,
             ) = build_updated_excel_cover_sheet(
                 zin,
                 new_document_number,
-                old_title,
-                new_title,
                 old_project_title,
                 new_project_title,
             )
@@ -607,7 +662,7 @@ def write_updated_excel_document(
                 ) = replace_excel_sheet_header_values(
                     sheet_xml,
                     shared_strings,
-                    old_project_title,
+                    project_titles_to_scan,
                     new_project_title,
                     document_numbers_to_scan,
                     new_document_number,
@@ -625,19 +680,15 @@ def write_updated_excel_document(
                     elif item.filename.startswith("xl/drawings/") and item.filename.endswith(".xml"):
                         (
                             data,
-                            drawing_title_count,
                             drawing_project_count,
                             drawing_document_number_count,
                         ) = replace_excel_drawing_header_values(
                             data.decode("utf-8", errors="ignore"),
-                            old_title,
-                            new_title,
-                            old_project_title,
+                            project_titles_to_scan,
                             new_project_title,
                             document_numbers_to_scan,
                             new_document_number,
                         )
-                        title_replace_count += drawing_title_count
                         project_title_replace_count += drawing_project_count
                         document_number_replace_count += drawing_document_number_count
                     zout.writestr(item, data)
@@ -650,7 +701,6 @@ def write_updated_excel_document(
         return (
             old_document_number,
             backup_path,
-            title_replace_count,
             project_title_replace_count,
             document_number_replace_count,
             updated_path,
