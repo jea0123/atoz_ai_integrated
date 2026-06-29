@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 
 from app_runtime import (
+    log_event,
     read_runtime_env,
     resolve_runtime_model,
     resolve_runtime_ollama_generate_url,
@@ -24,12 +25,13 @@ from output_file_check.folder_scanner import scan_folder
 from output_file_check.matcher import DEFAULT_MATCH_THRESHOLD
 from output_file_check.models import OutputMatch, PathTemplate, ScannedFile, StandardOutput
 from output_file_check.path_template_reader import read_path_templates
-from output_file_check.standard_reader import extract_standard_text, read_standard_outputs
+from output_file_check.standard_reader import extract_standard_text, normalize_artifact_category, read_standard_outputs
 
 
 @dataclass(frozen=True)
 class FolderMappingResult:
     standard_project_title: str
+    artifact_category: str
     outputs: list[StandardOutput]
     path_templates: list[PathTemplate]
     files: list[ScannedFile]
@@ -85,9 +87,19 @@ def build_folder_mapping(
         raise RuntimeError(f"문서 텍스트를 추출하지 못했습니다: {standard_file}")
     standard_project_title = project_title_override or read_standard_project_title(standard_file, standard_text)
     threshold = float(fields.get("threshold") or DEFAULT_MATCH_THRESHOLD)
-    standard_outputs = read_standard_outputs(standard_file, standard_text)
+    artifact_category = normalize_artifact_category(fields.get("artifact_category"))
+    standard_outputs = read_standard_outputs(standard_file, standard_text, category=artifact_category)
     path_templates = read_path_templates(standard_file, standard_outputs, standard_text)
     outputs = build_outputs_from_path_templates(standard_outputs, path_templates)
+    if artifact_category == "management" and not outputs:
+        outputs = standard_outputs
+    log_standard_extraction(
+        artifact_category,
+        standard_text,
+        standard_outputs,
+        path_templates,
+        outputs,
+    )
     runtime_env = read_runtime_env()
     ollama_url = resolve_runtime_ollama_generate_url(runtime_env)
     model = resolve_runtime_model(runtime_env)
@@ -116,11 +128,41 @@ def build_folder_mapping(
 
     return FolderMappingResult(
         standard_project_title=standard_project_title,
+        artifact_category=artifact_category,
         outputs=outputs,
         path_templates=path_templates,
         files=files,
         matches=matches,
         match_mode=match_mode,
+    )
+
+
+def log_standard_extraction(
+    artifact_category: str,
+    standard_text: str,
+    standard_outputs: list[StandardOutput],
+    path_templates: list[PathTemplate],
+    outputs: list[StandardOutput],
+) -> None:
+    id_lines = [
+        " ".join(line.split())[:180]
+        for line in standard_text.splitlines()
+        if "MFDS-" in line
+    ][:8]
+    log_event(
+        "standard.extract",
+        artifact_category=artifact_category,
+        standard_output_count=len(standard_outputs),
+        path_template_count=len(path_templates),
+        output_count=len(outputs),
+        has_management_marker=bool(re.search(r"관리\s*문서\s*ID", standard_text, re.IGNORECASE)),
+        has_output_marker=bool(re.search(r"산출물\s*코드", standard_text, re.IGNORECASE)),
+        has_mfds_p=bool(re.search(r"MFDS-P", standard_text, re.IGNORECASE)),
+        sample_id_lines=id_lines,
+        sample_outputs=[
+            {"output_id": output.output_id, "output_name": output.output_name}
+            for output in standard_outputs[:8]
+        ],
     )
 
 

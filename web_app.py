@@ -530,8 +530,16 @@ class WebHandler(BaseHTTPRequestHandler):
             self.send_json(runtime_mode_payload())
             return
 
-        if request_path in {"/", "/check", "/check.html"}:
+        if request_path == "/":
+            self.serve_file(WEB_DIR / "management.html")
+            return
+
+        if request_path in {"/check", "/check.html"}:
             self.serve_file(WEB_DIR / "check.html")
+            return
+
+        if request_path in {"/management", "/management.html"}:
+            self.serve_file(WEB_DIR / "management.html")
             return
 
         if request_path in {"/qa", "/qa.html"}:

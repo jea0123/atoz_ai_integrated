@@ -16,6 +16,9 @@ web_runtime/
 backup_*
 working_output*
 *_updated.*
+.test-artifacts/
+tmp/
+tmp*/
 
 # Local sample dumps can be large and are shared outside Git.
 data/테스트/

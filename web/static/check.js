@@ -3,9 +3,11 @@ const form = document.querySelector("#checkForm");
 const standardFile = document.querySelector("#standardFile");
 const folderFiles = document.querySelector("#folderFiles");
 const requirementFiles = document.querySelector("#requirementFiles");
+const proposalFiles = document.querySelector("#proposalFiles");
 const standardName = document.querySelector("#standardName");
 const folderName = document.querySelector("#folderName");
 const requirementName = document.querySelector("#requirementName");
+const proposalName = document.querySelector("#proposalName");
 const statusBadge = document.querySelector("#statusBadge");
 const runButton = document.querySelector("#runButton");
 const applyButton = document.querySelector("#applyButton");
@@ -23,7 +25,11 @@ const loadingOverlay = document.querySelector("#loadingOverlay");
 const applyReport = document.querySelector("#applyReport");
 const runtimeMode = document.querySelector("#runtimeMode");
 const aiFallbackToggle = document.querySelector("#aiFallbackToggle");
+const initialRevisionYear = document.querySelector("#initialRevisionYear");
+const initialRevisionAuthor = document.querySelector("#initialRevisionAuthor");
+const initialRevisionApprovalAuthor = document.querySelector("#initialRevisionApprovalAuthor");
 const LAST_DUMP_ROOT_KEY = "atoz:lastDumpRoot";
+const emptyFolderLabel = form?.dataset.emptyFolderLabel || "기본 폴더: data\\테스트";
 
 const expandedOutputs = new Set();
 const excludedCandidatePaths = new Set();
@@ -113,8 +119,17 @@ function setFileSummary() {
         : requirementFiles.files[0].name;
     }
   }
+  if (proposalFiles && proposalName) {
+    if (!proposalFiles.files.length) {
+      proposalName.textContent = "요구사항목록표 SFR ID 추출";
+    } else {
+      proposalName.textContent = proposalFiles.files.length > 1
+        ? `${proposalFiles.files[0].name} 외 ${proposalFiles.files.length - 1}개`
+        : proposalFiles.files[0].name;
+    }
+  }
   if (!folderFiles.files.length) {
-    folderName.textContent = "기본 폴더: data\\테스트";
+    folderName.textContent = emptyFolderLabel;
     return;
   }
 
@@ -133,6 +148,11 @@ function buildFormData({ includeRequirementFiles = true } = {}) {
   if (includeRequirementFiles && requirementFiles) {
     for (const file of requirementFiles.files) {
       body.append("requirement_files", file, file.webkitRelativePath || file.name);
+    }
+  }
+  if (includeRequirementFiles && proposalFiles) {
+    for (const file of proposalFiles.files) {
+      body.append("proposal_files", file, file.webkitRelativePath || file.name);
     }
   }
 
@@ -232,9 +252,15 @@ function renderApplyReport(data) {
   const requirementWarnings = Number(data.requirement_generation_warning_count || 0);
   const requirementErrors = Number(data.requirement_generation_error_count || 0);
   const requirementReadme = data.requirement_generation_readme_path || "";
+  const requirementGenerationLabel = data.artifact_category === "management"
+    ? "제안요청서 요구사항별 자동 생성"
+    : "요구사항 파일명별 자동 생성";
   const initialRevisionUpdated = Number(data.initial_revision_updated_count || 0);
   const initialRevisionSkipped = Number(data.initial_revision_skipped_count || 0);
   const initialRevisionFailed = Number(data.initial_revision_failed_count || 0);
+  const revisionDate = data.initial_revision_date || `${initialRevisionYear?.value || new Date().getFullYear()}-00-00`;
+  const revisionAuthor = data.initial_revision_author || initialRevisionAuthor?.value || "송아름";
+  const revisionApprovalAuthor = data.initial_revision_approval_author || initialRevisionApprovalAuthor?.value || "임채현";
   const hasErrors = failed.length || requirementErrors || initialRevisionFailed;
   const dumpRoot = data.dump_root || "";
   if (dumpRoot) {
@@ -258,7 +284,7 @@ function renderApplyReport(data) {
     ${
       requirementEnabled
         ? `<div class="apply-folder-result">
-            <span>요구사항 파일명별 자동 생성</span>
+            <span>${requirementGenerationLabel}</span>
             <code>ID 폴더 ${requirementFolders}건 · 생성 ${requirementCreated}건 · 기존 삭제 ${requirementRemoved}건 · ID 없음 ${requirementSkipped}건 · 경고 ${requirementWarnings}건 · 오류 ${requirementErrors}건</code>
             ${requirementReadme ? `<code>${escapeHtml(requirementReadme)}</code>` : ""}
           </div>`
@@ -266,7 +292,7 @@ function renderApplyReport(data) {
     }
     <div class="apply-folder-result">
       <span>개정이력 v0.1 초기화</span>
-      <code>날짜 ${new Date().getFullYear()}-00-00 · 작성자 송아름 · 승인자 임채현 · 성공 ${initialRevisionUpdated}건 · 스킵 ${initialRevisionSkipped}건 · 오류 ${initialRevisionFailed}건</code>
+      <code>날짜 ${escapeHtml(revisionDate)} · 작성자 ${escapeHtml(revisionAuthor)} · 승인자 ${escapeHtml(revisionApprovalAuthor)} · 성공 ${initialRevisionUpdated}건 · 스킵 ${initialRevisionSkipped}건 · 오류 ${initialRevisionFailed}건</code>
     </div>
     ${
       dumpRoot
@@ -454,6 +480,7 @@ function clearResults(message) {
 standardFile.addEventListener("change", setFileSummary);
 folderFiles.addEventListener("change", setFileSummary);
 requirementFiles?.addEventListener("change", setFileSummary);
+proposalFiles?.addEventListener("change", setFileSummary);
 aiFallbackToggle?.addEventListener("change", syncMatchModeDisplay);
 resultFilter.addEventListener("input", () => renderMatches(lastMatches));
 resultRows.addEventListener("change", (event) => {
@@ -467,10 +494,42 @@ resultRows.addEventListener("change", (event) => {
   renderMatches(lastMatches);
 });
 
-function validateRequiredFiles() {
+function validateInitialRevisionInputs() {
+  const year = initialRevisionYear?.value.trim() || "";
+  const author = initialRevisionAuthor?.value.trim() || "";
+  const approvalAuthor = initialRevisionApprovalAuthor?.value.trim() || "";
+  if (!/^\d{4}$/.test(year)) {
+    resultMeta.textContent = "개정연도는 4자리 숫자로 입력하세요.";
+    initialRevisionYear?.focus();
+    return false;
+  }
+  if (!author) {
+    resultMeta.textContent = "개정이력 작성자를 입력하세요.";
+    initialRevisionAuthor?.focus();
+    return false;
+  }
+  if (!approvalAuthor) {
+    resultMeta.textContent = "개정이력 승인자를 입력하세요.";
+    initialRevisionApprovalAuthor?.focus();
+    return false;
+  }
+  return true;
+}
+
+function validateRequiredFiles({ applyMode = false } = {}) {
   if (!standardFile.files.length) {
     setBadge("확인", "error");
     resultMeta.textContent = "문서관리표준 PDF를 선택하세요.";
+    return false;
+  }
+  const requireFolder = Boolean(form.querySelector('[name="require_folder"][value="true"]'));
+  if (requireFolder && !folderFiles.files.length) {
+    setBadge("확인", "error");
+    resultMeta.textContent = "검사할 폴더를 선택하세요.";
+    return false;
+  }
+  if (applyMode && !validateInitialRevisionInputs()) {
+    setBadge("확인", "error");
     return false;
   }
 
@@ -478,7 +537,7 @@ function validateRequiredFiles() {
 }
 
 async function runRequest({ endpoint, busyText, preparingText, doneText, applyMode = false }) {
-  if (!validateRequiredFiles()) return;
+  if (!validateRequiredFiles({ applyMode })) return;
 
   setBadge("처리중", "busy");
   setLoading(true);

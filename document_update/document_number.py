@@ -15,7 +15,14 @@ from .excel_ooxml import (
     read_shared_strings,
     replace_excel_drawing_header_values,
     replace_excel_sheet_header_values,
+    rewrite_excel_part_for_modified_workbook,
     workbook_sheets,
+)
+from .header_metadata import (
+    unlabeled_author_value_ok,
+    unlabeled_document_code_value_ok,
+    unlabeled_header_metadata_indexes as shared_unlabeled_header_metadata_indexes,
+    unlabeled_header_slot_is_clean,
 )
 from .hwpx_text import is_hwpx_zip, strip_hwpx_line_seg_arrays
 from .patterns import (
@@ -27,6 +34,10 @@ from .patterns import (
     TEXT_NODE_PATTERN,
 )
 from .ppt_ooxml import PPT_DOCUMENT_SUFFIXES, write_updated_ppt_document
+from .project_title_match import (
+    best_matching_project_title,
+    is_project_title_label_text,
+)
 
 
 DOCUMENT_NUMBER_LABEL = "\ubb38\uc11c\ubc88\ud638"
@@ -47,8 +58,9 @@ DOCUMENT_NUMBER_LABEL_LIKE_VALUES = {
     "개정이력",
 }
 VERSION_PATTERN = re.compile(r"^[vV]?\d+(?:\.\d+)*$")
-DATE_VALUE_PATTERN = re.compile(r"^\d{4}[-./]\d{1,2}[-./]\d{1,2}$")
+DATE_VALUE_PATTERN = re.compile(r"^\d{4}(?:[-./]\d{1,2}[-./]\d{1,2}|\s+\d{1,2}\s+\d{1,2})$")
 HEADER_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?header)\b[^>]*>.*?</(?P=tag)>", re.DOTALL)
+PARAGRAPH_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?p)\b[^>]*>.*?</(?P=tag)>", re.DOTALL)
 
 
 def normalize_document_number_label(value: str) -> str:
@@ -65,6 +77,10 @@ def is_document_version_label(value: str) -> bool:
     return label in {normalize_document_number_label(item) for item in DOCUMENT_VERSION_LABELS}
 
 
+def is_project_title_label(value: str) -> bool:
+    return is_project_title_label_text(value)
+
+
 def infer_document_number_from_filename(file_path: Path) -> str:
     """문서번호 셀이 비어 있을 때 대상 파일명에서 문서번호를 보조로 추정한다."""
     match = OUTPUT_ID_PATTERN.search(file_path.stem)
@@ -72,6 +88,88 @@ def infer_document_number_from_filename(file_path: Path) -> str:
         return match.group(0)
 
     return ""
+
+
+def clean_text_node_value(value: str) -> str:
+    return re.sub(r"\s+", " ", unescape(value)).strip()
+
+
+def infer_cover_project_title_from_xml(xml: str, expected_project_title: str | None = None) -> str:
+    """표지에서 사업명/프로젝트명 값을 보조 추정한다."""
+    labeled_project_title = find_labeled_project_title_in_xml(xml)
+    if labeled_project_title:
+        return labeled_project_title
+
+    text_values = [
+        clean_text_node_value(match.group("body"))
+        for match in TEXT_NODE_PATTERN.finditer(xml)
+    ]
+    for index, value in enumerate(text_values):
+        if not is_document_number_label(value):
+            continue
+
+        candidates = [
+            item
+            for item in text_values[:index]
+            if is_cover_title_value(item)
+        ]
+        if expected_project_title:
+            return best_matching_project_title(candidates, expected_project_title)
+        break
+
+    return ""
+
+
+def find_labeled_project_title_in_xml(xml: str) -> str:
+    for row_match in ROW_PATTERN.finditer(xml):
+        row_xml = row_match.group(0)
+        cells = list(CELL_PATTERN.finditer(row_xml))
+        for cell_index, cell_match in enumerate(cells[:-1]):
+            label = get_cell_text(cell_match.group(0)).strip()
+            if not is_project_title_label(label):
+                continue
+            for target_cell in cells[cell_index + 1:]:
+                value = get_cell_text(target_cell.group(0)).strip()
+                if is_project_title_value(value):
+                    return value
+
+    text_values = [
+        clean_text_node_value(match.group("body"))
+        for match in TEXT_NODE_PATTERN.finditer(xml)
+    ]
+    for index, value in enumerate(text_values):
+        match = re.search(r"^(?:사업명|프로젝트\s*명|프로젝트\s*제목)\s*[:：]\s*(.+)$", value)
+        if match and is_project_title_value(match.group(1)):
+            return clean_text_node_value(match.group(1))
+        if is_project_title_label(value) and index + 1 < len(text_values):
+            candidate = text_values[index + 1]
+            if is_project_title_value(candidate):
+                return candidate
+    return ""
+
+
+def is_project_title_value(value: str) -> bool:
+    return is_cover_title_value(value) and not is_project_title_label(value)
+
+
+def is_cover_title_value(value: str) -> bool:
+    text = clean_text_node_value(value)
+    if not text or len(text) > 120:
+        return False
+    if is_document_number_label(text) or is_document_version_label(text):
+        return False
+    if normalize_document_number_label(text) in {
+        normalize_document_number_label(item)
+        for item in DOCUMENT_NUMBER_LABEL_LIKE_VALUES
+    }:
+        return False
+    if OUTPUT_ID_PATTERN.fullmatch(text):
+        return False
+    if VERSION_PATTERN.fullmatch(text) or DATE_VALUE_PATTERN.fullmatch(text):
+        return False
+    if text.startswith("㈜") or text.startswith("(주)"):
+        return False
+    return True
 
 
 def unique_scan_values(*values: str) -> list[str]:
@@ -314,11 +412,13 @@ def replace_unlabeled_header_version_block(header_xml: str) -> tuple[str, int]:
             continue
 
         values = [get_cell_text(cell.group(0)).strip() for cell in cells]
-        if not looks_like_unlabeled_header_metadata_row(values):
+        indexes = unlabeled_header_metadata_indexes(values)
+        if indexes is None:
             continue
 
-        version_cell = cells[1]
-        old_version = values[1]
+        _code_index, version_index, _date_index, _author_index = indexes
+        version_cell = cells[version_index]
+        old_version = values[version_index]
         if old_version == UNLABELED_HEADER_VERSION_VALUE:
             return header_xml, 0
 
@@ -329,20 +429,89 @@ def replace_unlabeled_header_version_block(header_xml: str) -> tuple[str, int]:
     return header_xml, 0
 
 
-def looks_like_unlabeled_header_metadata_row(values: list[str]) -> bool:
-    if len(values) < 4:
-        return False
-    return (
-        bool(OUTPUT_ID_PATTERN.search(values[0]))
-        and (not values[1] or bool(VERSION_PATTERN.fullmatch(values[1])))
-        and bool(DATE_VALUE_PATTERN.fullmatch(values[2].strip()))
-        and normalize_document_number_label(values[3]) not in {normalize_document_number_label(item) for item in DOCUMENT_NUMBER_LABEL_LIKE_VALUES}
+def unlabeled_header_metadata_indexes(values: list[str]) -> tuple[int, int, int, int] | None:
+    return shared_unlabeled_header_metadata_indexes(
+        values,
+        clean_text=clean_text_node_value,
+        normalize_label=normalize_document_number_label,
+        label_like_values=DOCUMENT_NUMBER_LABEL_LIKE_VALUES,
+        version_pattern=VERSION_PATTERN,
+        date_pattern=DATE_VALUE_PATTERN,
     )
 
 
-def replace_matching_text_nodes(xml: str, old_text: str, new_text: str) -> tuple[str, int]:
+def looks_like_unlabeled_document_number_code_slot(value: str) -> bool:
+    return unlabeled_header_slot_is_clean(
+        value,
+        "code",
+        clean_text=clean_text_node_value,
+        normalize_label=normalize_document_number_label,
+        label_like_values=DOCUMENT_NUMBER_LABEL_LIKE_VALUES,
+        version_pattern=VERSION_PATTERN,
+        date_pattern=DATE_VALUE_PATTERN,
+    )
+
+
+def looks_like_unlabeled_document_number_code_value(value: str) -> bool:
+    return unlabeled_document_code_value_ok(
+        value,
+        clean_text=clean_text_node_value,
+        normalize_label=normalize_document_number_label,
+        label_like_values=DOCUMENT_NUMBER_LABEL_LIKE_VALUES,
+        date_pattern=DATE_VALUE_PATTERN,
+    )
+
+
+def looks_like_unlabeled_document_number_version_slot(value: str) -> bool:
+    return unlabeled_header_slot_is_clean(
+        value,
+        "version",
+        clean_text=clean_text_node_value,
+        normalize_label=normalize_document_number_label,
+        label_like_values=DOCUMENT_NUMBER_LABEL_LIKE_VALUES,
+        version_pattern=VERSION_PATTERN,
+        date_pattern=DATE_VALUE_PATTERN,
+    )
+
+
+def looks_like_unlabeled_document_number_date_slot(value: str) -> bool:
+    return unlabeled_header_slot_is_clean(
+        value,
+        "date",
+        clean_text=clean_text_node_value,
+        normalize_label=normalize_document_number_label,
+        label_like_values=DOCUMENT_NUMBER_LABEL_LIKE_VALUES,
+        version_pattern=VERSION_PATTERN,
+        date_pattern=DATE_VALUE_PATTERN,
+    )
+
+
+def looks_like_unlabeled_document_number_author_slot(value: str) -> bool:
+    return unlabeled_header_slot_is_clean(
+        value,
+        "author",
+        clean_text=clean_text_node_value,
+        normalize_label=normalize_document_number_label,
+        label_like_values=DOCUMENT_NUMBER_LABEL_LIKE_VALUES,
+        version_pattern=VERSION_PATTERN,
+        date_pattern=DATE_VALUE_PATTERN,
+    )
+
+
+def looks_like_unlabeled_document_number_author_value(value: str) -> bool:
+    return unlabeled_author_value_ok(
+        value,
+        clean_text=clean_text_node_value,
+        normalize_label=normalize_document_number_label,
+        label_like_values=DOCUMENT_NUMBER_LABEL_LIKE_VALUES,
+        version_pattern=VERSION_PATTERN,
+        date_pattern=DATE_VALUE_PATTERN,
+    )
+
+
+def replace_matching_text_nodes(xml: str, old_text: str | None, new_text: str | None) -> tuple[str, int]:
     """머리글 같은 곳에 반복된 동일 텍스트 노드를 정확히 일치할 때만 바꾼다."""
-    if not old_text or old_text == new_text:
+    if not old_text or not new_text or old_text == new_text:
         return xml, 0
 
     escaped_new_text = escape(new_text)
@@ -361,21 +530,46 @@ def replace_matching_text_nodes(xml: str, old_text: str, new_text: str) -> tuple
         replace_count += 1
 
     if replace_count == 0:
-        return xml, 0
+        return replace_matching_paragraph_text(xml, old_text, new_text)
 
     pieces.append(xml[last:])
     return "".join(pieces), replace_count
 
 
-def replace_title_text(xml: str, old_title: str | None, new_title: str | None) -> tuple[str, int]:
-    """기존 제목 텍스트 노드를 표준에서 찾은 새 제목으로 바꾼다."""
-    if not old_title or not new_title:
+def replace_matching_paragraph_text(xml: str, old_text: str, new_text: str) -> tuple[str, int]:
+    escaped_new_text = escape(new_text)
+    pieces: list[str] = []
+    last = 0
+    replace_count = 0
+
+    for paragraph_match in PARAGRAPH_PATTERN.finditer(xml):
+        paragraph_xml = paragraph_match.group(0)
+        text_nodes = list(TEXT_NODE_PATTERN.finditer(paragraph_xml))
+        if not text_nodes:
+            continue
+
+        combined = "".join(unescape(match.group("body")) for match in text_nodes).strip()
+        if combined != old_text:
+            continue
+
+        paragraph_pieces: list[str] = []
+        paragraph_last = 0
+        for index, text_match in enumerate(text_nodes):
+            paragraph_pieces.append(paragraph_xml[paragraph_last:text_match.start("body")])
+            paragraph_pieces.append(escaped_new_text if index == 0 else "")
+            paragraph_last = text_match.end("body")
+        paragraph_pieces.append(paragraph_xml[paragraph_last:])
+
+        pieces.append(xml[last:paragraph_match.start()])
+        pieces.append("".join(paragraph_pieces))
+        last = paragraph_match.end()
+        replace_count += 1
+
+    if replace_count == 0:
         return xml, 0
 
-    if old_title == new_title:
-        return xml, 0
-
-    return replace_matching_text_nodes(xml, old_title, new_title)
+    pieces.append(xml[last:])
+    return "".join(pieces), replace_count
 
 
 def backup_path_for(file_path: Path) -> Path:
@@ -385,12 +579,12 @@ def backup_path_for(file_path: Path) -> Path:
 def write_updated_document(
     file_path: Path,
     new_document_number: str,
-    old_title: str | None = None,
-    new_title: str | None = None,
     old_project_title: str | None = None,
     new_project_title: str | None = None,
     output_path: Path | None = None,
-) -> tuple[str, Path, int, int, int, Path]:
+    *,
+    allow_missing_document_number: bool = False,
+) -> tuple[str, Path, int, int, Path]:
     """대상 파일 형식에 맞는 수정 함수로 분기한다."""
     suffix = file_path.suffix.lower()
 
@@ -398,33 +592,30 @@ def write_updated_document(
         return write_updated_hwpx_document(
             file_path,
             new_document_number,
-            old_title,
-            new_title,
             old_project_title,
             new_project_title,
             output_path,
+            allow_missing_document_number=allow_missing_document_number,
         )
 
     if suffix in EXCEL_DOCUMENT_SUFFIXES:
         return write_updated_excel_document(
             file_path,
             new_document_number,
-            old_title,
-            new_title,
             old_project_title,
             new_project_title,
             output_path,
+            allow_missing_document_number=allow_missing_document_number,
         )
 
     if suffix in PPT_DOCUMENT_SUFFIXES:
         return write_updated_ppt_document(
             file_path,
             new_document_number,
-            old_title,
-            new_title,
             old_project_title,
             new_project_title,
             output_path,
+            allow_missing_document_number=allow_missing_document_number,
         )
 
     raise RuntimeError(
@@ -433,16 +624,67 @@ def write_updated_document(
     )
 
 
+def write_updated_project_title(
+    file_path: Path,
+    old_project_title: str,
+    new_project_title: str,
+    output_path: Path | None = None,
+) -> tuple[int, Path]:
+    """표준 산출물 매칭 없이 표지/문서 안의 기존 프로젝트명만 교체한다."""
+    old_project_title = clean_text_node_value(old_project_title)
+    new_project_title = clean_text_node_value(new_project_title)
+    if not old_project_title or not new_project_title or old_project_title == new_project_title:
+        return 0, file_path
+
+    suffix = file_path.suffix.lower()
+    if not (is_hwpx_zip(file_path) or suffix in EXCEL_DOCUMENT_SUFFIXES or suffix in PPT_DOCUMENT_SUFFIXES):
+        raise RuntimeError("프로젝트명만 교체할 수 있는 지원 형식이 아닙니다.")
+
+    backup_path = backup_path_for(file_path)
+    write_path = output_path or file_path.parent / f"working_project_title{file_path.suffix}"
+    if output_path is None:
+        shutil.copy2(file_path, backup_path)
+
+    replace_count = 0
+    try:
+        with zipfile.ZipFile(file_path, "r") as zin:
+            with zipfile.ZipFile(write_path, "w", zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    data = zin.read(item.filename)
+                    if item.filename.lower().endswith(".xml"):
+                        xml = data.decode("utf-8", errors="ignore")
+                        xml, count = replace_matching_text_nodes(xml, old_project_title, new_project_title)
+                        if count:
+                            replace_count += count
+                            if is_hwpx_zip(file_path):
+                                xml, _line_seg_count = strip_hwpx_line_seg_arrays(xml)
+                            data = xml.encode("utf-8")
+                    zout.writestr(item, data)
+
+        updated_path = write_path
+        if output_path is None:
+            write_path.replace(file_path)
+            updated_path = file_path
+        return replace_count, updated_path
+    except Exception:
+        if output_path is None and write_path.exists():
+            try:
+                write_path.unlink()
+            except OSError:
+                pass
+        raise
+
+
 # 한글 확장 문서는 압축 파일 안에 문서 조각이 들어 있으므로 내부 텍스트 노드를 수정한다.
 def write_updated_hwpx_document(
     file_path: Path,
     new_document_number: str,
-    old_title: str | None = None,
-    new_title: str | None = None,
     old_project_title: str | None = None,
     new_project_title: str | None = None,
     output_path: Path | None = None,
-) -> tuple[str, Path, int, int, int, Path]:
+    *,
+    allow_missing_document_number: bool = False,
+) -> tuple[str, Path, int, int, Path]:
     """업로드된 대상 파일을 기준으로 수정된 한글 확장 결과 파일을 만든다."""
     backup_path = backup_path_for(file_path)
     write_path = output_path or file_path.parent / "working_output.hwpx"
@@ -450,17 +692,24 @@ def write_updated_hwpx_document(
     with zipfile.ZipFile(file_path, "r") as source_zip:
         section_xml = source_zip.read("Contents/section0.xml").decode("utf-8", errors="ignore")
         old_document_number = find_document_number_cell_value(section_xml)
+        inferred_project_title = infer_cover_project_title_from_xml(
+            section_xml,
+            expected_project_title=new_project_title,
+        )
 
     document_numbers_to_scan = unique_scan_values(
         old_document_number,
         infer_document_number_from_filename(file_path),
+    )
+    project_titles_to_scan = unique_scan_values(
+        old_project_title or "",
+        inferred_project_title,
     )
 
     if output_path is None:
         # 원본을 덮어쓸 때는 먼저 시각이 들어간 백업을 만든다.
         shutil.copy2(file_path, backup_path)
 
-    title_replace_count = 0
     project_title_replace_count = 0
     matching_document_number_replace_count = 0
     document_number_position_found = False
@@ -475,20 +724,15 @@ def write_updated_hwpx_document(
                         xml = data.decode("utf-8", errors="ignore")
                         changed = False
 
-                        # 문서제목, 프로젝트명, 기존 문서번호를 순서대로 바꾼다.
-                        xml, count = replace_title_text(xml, old_title, new_title)
-                        if count:
-                            title_replace_count += count
-                            changed = True
-
-                        xml, count = replace_title_text(
-                            xml,
-                            old_project_title,
-                            new_project_title,
-                        )
-                        if count:
-                            project_title_replace_count += count
-                            changed = True
+                        for project_title_to_scan in project_titles_to_scan:
+                            xml, count = replace_matching_text_nodes(
+                                xml,
+                                project_title_to_scan,
+                                new_project_title,
+                            )
+                            if count:
+                                project_title_replace_count += count
+                                changed = True
 
                         (
                             xml,
@@ -527,7 +771,11 @@ def write_updated_hwpx_document(
 
                     zout.writestr(item, data)
 
-        if not document_number_position_found and not matching_document_number_replace_count:
+        if (
+            not allow_missing_document_number
+            and not document_number_position_found
+            and not matching_document_number_replace_count
+        ):
             raise RuntimeError("첫 번째 장에서 문서번호 바로 오른쪽 ID 칸을 찾지 못했습니다.")
 
         updated_path = write_path
@@ -538,7 +786,6 @@ def write_updated_hwpx_document(
         return (
             old_document_number,
             backup_path,
-            title_replace_count,
             project_title_replace_count,
             matching_document_number_replace_count,
             updated_path,
@@ -556,12 +803,12 @@ def write_updated_hwpx_document(
 def write_updated_excel_document(
     file_path: Path,
     new_document_number: str,
-    old_title: str | None = None,
-    new_title: str | None = None,
     old_project_title: str | None = None,
     new_project_title: str | None = None,
     output_path: Path | None = None,
-) -> tuple[str, Path, int, int, int, Path]:
+    *,
+    allow_missing_document_number: bool = False,
+) -> tuple[str, Path, int, int, Path]:
     """엑셀 통합문서의 표지 시트 셀을 수정한다."""
     backup_path = backup_path_for(file_path)
     write_path = output_path or file_path.parent / f"working_output{file_path.suffix}"
@@ -576,16 +823,15 @@ def write_updated_excel_document(
                 cover_sheet_path,
                 updated_cover_sheet,
                 old_document_number,
-                title_replace_count,
                 project_title_replace_count,
                 document_number_replace_count,
+                project_titles_to_scan,
             ) = build_updated_excel_cover_sheet(
                 zin,
                 new_document_number,
-                old_title,
-                new_title,
                 old_project_title,
                 new_project_title,
+                allow_missing_document_number=allow_missing_document_number,
             )
             document_numbers_to_scan = unique_scan_values(
                 old_document_number,
@@ -607,7 +853,7 @@ def write_updated_excel_document(
                 ) = replace_excel_sheet_header_values(
                     sheet_xml,
                     shared_strings,
-                    old_project_title,
+                    project_titles_to_scan,
                     new_project_title,
                     document_numbers_to_scan,
                     new_document_number,
@@ -625,21 +871,21 @@ def write_updated_excel_document(
                     elif item.filename.startswith("xl/drawings/") and item.filename.endswith(".xml"):
                         (
                             data,
-                            drawing_title_count,
                             drawing_project_count,
                             drawing_document_number_count,
                         ) = replace_excel_drawing_header_values(
                             data.decode("utf-8", errors="ignore"),
-                            old_title,
-                            new_title,
-                            old_project_title,
+                            project_titles_to_scan,
                             new_project_title,
                             document_numbers_to_scan,
                             new_document_number,
                         )
-                        title_replace_count += drawing_title_count
                         project_title_replace_count += drawing_project_count
                         document_number_replace_count += drawing_document_number_count
+                    rewritten = rewrite_excel_part_for_modified_workbook(item.filename, data)
+                    if rewritten is None:
+                        continue
+                    data = rewritten
                     zout.writestr(item, data)
 
         updated_path = write_path
@@ -650,7 +896,6 @@ def write_updated_excel_document(
         return (
             old_document_number,
             backup_path,
-            title_replace_count,
             project_title_replace_count,
             document_number_replace_count,
             updated_path,

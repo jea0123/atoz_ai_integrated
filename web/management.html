@@ -3,26 +3,31 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>산출물 매핑 확인</title>
-  <link rel="stylesheet" href="/static/check.css?v=20260616-revision-inputs">
+  <title>관리산출물 매핑 확인</title>
+  <link rel="stylesheet" href="/static/check.css?v=20260618-management">
 </head>
 <body>
   <main class="app-shell">
-    <section class="workspace" aria-label="산출물 매핑 확인">
+    <section class="workspace" aria-label="관리산출물 매핑 확인">
       <header
         class="topbar"
         data-app-header
-        data-active="check"
-        data-eyebrow="Output Mapping"
-        data-title="산출물 매핑 확인"
+        data-active="management"
+        data-eyebrow="Management Outputs"
+        data-title="관리산출물 매핑 확인"
         data-status-id="statusBadge"
       ></header>
 
       <section class="layout">
-        <form id="checkForm" class="control-panel">
+        <form id="checkForm" class="control-panel" data-empty-folder-label="관리산출물 폴더 선택">
+          <input type="hidden" name="artifact_category" value="management">
+          <input type="hidden" name="require_folder" value="true">
+          <input type="hidden" name="requirement_generation_targets" value="__applied__">
+          <input type="hidden" name="requirement_generation_create_source_folders" value="false">
+
           <div class="panel-head">
             <h2>입력</h2>
-            <span>01</span>
+            <span>관리</span>
           </div>
 
           <fieldset class="mode-toggle">
@@ -31,8 +36,8 @@
               <small id="runtimeMode">실행 모드 확인 중</small>
             </legend>
             <div class="mode-summary">
-              <strong>규칙 매칭</strong>
-              <small>파일명, 경로, 문서명 기준</small>
+              <strong>산출물명 기준</strong>
+              <small>파일명, 산출물명, 폴더 기준</small>
             </div>
             <label class="mode-check">
               <input id="aiFallbackToggle" type="checkbox" checked>
@@ -44,21 +49,21 @@
             <input id="standardFile" name="standard_file" type="file" accept=".pdf">
             <span class="file-mark">PDF</span>
             <strong>문서관리표준</strong>
-            <small id="standardName">파일 선택</small>
+            <small id="standardName">관리문서 ID 범위를 읽습니다</small>
           </label>
 
           <label class="drop-zone folder" for="folderFiles">
             <input id="folderFiles" name="folder_files" type="file" webkitdirectory directory multiple>
             <span class="file-mark">DIR</span>
-            <strong>검사 폴더</strong>
-            <small id="folderName">미선택 시 data\테스트 사용</small>
+            <strong>관리산출물 폴더</strong>
+            <small id="folderName">폴더 선택</small>
           </label>
 
-          <label class="drop-zone" for="requirementFiles">
-            <input id="requirementFiles" name="requirement_files" type="file" multiple>
-            <span class="file-mark">REQ</span>
-            <strong>요구사항 파일명</strong>
-            <small id="requirementName">파일명 기준 SFR별 복제</small>
+          <label class="drop-zone requirement-source" for="proposalFiles">
+            <input id="proposalFiles" name="proposal_files" type="file" accept=".pdf,.hwp,.hwpx,.docx,.docm,.xlsx,.xlsm,.xltx,.xltm" multiple>
+            <span class="file-mark">RFP</span>
+            <strong>제안요청서</strong>
+            <small id="proposalName">요구사항목록표 SFR ID 추출</small>
           </label>
 
           <fieldset class="revision-fields">
@@ -90,7 +95,7 @@
 
         <section class="result-panel">
           <div class="summary-grid" id="summaryGrid">
-            <div><span>참고 산출물</span><strong id="outputCount">-</strong></div>
+            <div><span>관리산출물</span><strong id="outputCount">-</strong></div>
             <div><span>검사 파일</span><strong id="fileCount">-</strong></div>
             <div><span>매칭 산출물</span><strong id="matchCount">-</strong></div>
             <div><span>매칭 파일</span><strong id="matchedFileCount">-</strong></div>
@@ -99,7 +104,7 @@
           <div class="result-toolbar">
             <div>
               <h2>매칭 결과</h2>
-              <p id="resultMeta">준비됨</p>
+              <p id="resultMeta">문서관리표준의 관리문서 ID와 관리산출물 폴더를 선택하세요.</p>
             </div>
             <input id="resultFilter" type="search" placeholder="검색">
           </div>
@@ -118,7 +123,7 @@
               <table class="audit-table">
                 <thead>
                   <tr>
-                    <th>산출물</th>
+                    <th>관리산출물</th>
                     <th>반영 대상 파일</th>
                     <th>점수</th>
                   </tr>
@@ -133,10 +138,10 @@
           <div class="loading-overlay" id="loadingOverlay" hidden>
             <div class="loading-card">
               <span class="loader"></span>
-              <strong>산출물 매핑 검사 중</strong>
+              <strong>관리산출물 매핑 검사 중</strong>
               <p>
-                PDF와 폴더 안 문서를 읽어 파일명, 내부 문서명, <br>
-                템플릿 경로를 비교하고 있습니다.
+                문서관리표준의 관리문서 ID와 폴더 안 문서를 읽어<br>
+                파일명, 산출물명, 폴더를 비교하고 있습니다.
               </p>
             </div>
           </div>
@@ -145,7 +150,7 @@
     </section>
   </main>
 
-  <script src="/static/header.js?v=20260508-apply-errors"></script>
-  <script src="/static/check.js?v=20260616-revision-inputs"></script>
+  <script src="/static/header.js?v=20260618-management"></script>
+  <script src="/static/check.js?v=20260618-management"></script>
 </body>
 </html>

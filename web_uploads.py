@@ -5,8 +5,36 @@ from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path
 import re
+import unicodedata
 
+from document_update.hwpx_text import extract_document_text, extract_text_from_ooxml, is_zip_container
 from output_file_check.file_noise import is_noise_filename
+from output_file_check.requirement_generation import extract_requirement_ids
+
+
+PROPOSAL_FILE_FIELDS = ("proposal_files", "proposal_file", "rfp_files", "rfp_file")
+PROPOSAL_SUPPORTED_SUFFIXES = {
+    ".pdf",
+    ".hwp",
+    ".hwpx",
+    ".docx",
+    ".docm",
+    ".xlsx",
+    ".xlsm",
+    ".xltx",
+    ".xltm",
+}
+PROPOSAL_OOXML_TEXT_SUFFIXES = {".docx", ".docm"}
+REQUIREMENT_LIST_MARKER_PATTERN = re.compile(
+    r"요구\s*사항\s*(?:목록\s*표?|리스트|명세|정의)|기능\s*요구\s*사항",
+    re.IGNORECASE,
+)
+TOLERANT_REQUIREMENT_ID_PATTERN = re.compile(
+    r"(?<![A-Z0-9])S\s*F\s*R\s*[-_\s]*"
+    r"(?P<body>[A-Z0-9]+(?:[-_\s]+[A-Z0-9]+)*[-_\s]+\d+)(?![A-Z0-9])",
+    re.IGNORECASE,
+)
+REQUIREMENT_LIST_WINDOW_CHARS = 100_000
 
 
 def parse_multipart_items(content_type: str, body: bytes) -> tuple[dict[str, str], dict[str, list[tuple[str, bytes]]]]:
@@ -137,3 +165,157 @@ def save_requirement_uploads(
         saved_paths.append(target_path)
 
     return saved_paths
+
+
+def save_proposal_requirement_uploads(
+    temp_dir: Path,
+    file_items: dict[str, list[tuple[str, bytes]]],
+) -> list[Path]:
+    # 제안요청서 본문에서 SFR 요구사항 ID를 읽어 기존 요구사항 생성기가 쓰는 소스 파일로 만든다.
+    """제안요청서/RFP 파일 안의 요구사항목록표에서 SFR ID를 추출한다."""
+    proposal_items = proposal_upload_items(file_items)
+    if not proposal_items:
+        return []
+
+    source_dir = temp_dir / "proposal_sources"
+    marker_dir = temp_dir / "proposal_requirement_ids"
+    source_dir.mkdir(exist_ok=True)
+    marker_dir.mkdir(exist_ok=True)
+
+    saved_paths: list[Path] = []
+    seen_ids: set[str] = set()
+    for index, (filename, payload) in enumerate(proposal_items, start=1):
+        if not payload or is_noise_filename(filename):
+            continue
+
+        suffix = Path(filename).suffix.lower()
+        safe_name = safe_upload_filename(filename, "proposal_file", suffix or ".bin")
+        source_path = source_dir / safe_name
+        if source_path.exists():
+            source_path = source_dir / f"{source_path.stem}_{index}{source_path.suffix}"
+        source_path.write_bytes(payload)
+
+        if suffix not in PROPOSAL_SUPPORTED_SUFFIXES:
+            saved_paths.append(
+                write_requirement_marker(
+                    marker_dir,
+                    f"ID없음_{index}.txt",
+                    f"{filename}: 지원하지 않는 제안요청서 형식입니다: {suffix or '확장자 없음'}",
+                )
+            )
+            continue
+
+        try:
+            text = extract_proposal_text(source_path)
+        except Exception as exc:
+            saved_paths.append(
+                write_requirement_marker(
+                    marker_dir,
+                    f"ID없음_{index}.txt",
+                    f"{filename}: 제안요청서 텍스트를 읽지 못했습니다: {exc}",
+                )
+            )
+            continue
+
+        requirement_ids = extract_requirement_ids_from_proposal_text(text)
+        if not requirement_ids:
+            saved_paths.append(
+                write_requirement_marker(
+                    marker_dir,
+                    f"ID없음_{index}.txt",
+                    f"{filename}: 제안요청서의 요구사항목록표에서 SFR 요구사항 ID를 찾지 못했습니다.",
+                )
+            )
+            continue
+
+        for requirement_id in requirement_ids:
+            if requirement_id in seen_ids:
+                continue
+            seen_ids.add(requirement_id)
+            saved_paths.append(
+                write_requirement_marker(
+                    marker_dir,
+                    f"{requirement_id}.txt",
+                    f"source: {filename}\nrequirement_id: {requirement_id}",
+                )
+            )
+
+    return saved_paths
+
+
+def proposal_upload_items(file_items: dict[str, list[tuple[str, bytes]]]) -> list[tuple[str, bytes]]:
+    items: list[tuple[str, bytes]] = []
+    for field_name in PROPOSAL_FILE_FIELDS:
+        items.extend(file_items.get(field_name) or [])
+    return items
+
+
+def extract_proposal_text(path: Path) -> str:
+    if path.suffix.lower() in PROPOSAL_OOXML_TEXT_SUFFIXES:
+        if not is_zip_container(path):
+            raise RuntimeError(f"Office XML 형식이 아닙니다: {path.name}")
+        return extract_text_from_ooxml(path)
+    return extract_document_text(path)
+
+
+def extract_requirement_ids_from_proposal_text(text: str) -> tuple[str, ...]:
+    # 요구사항목록표 주변을 우선 보고, 표제가 잘 안 잡히면 문서 전체에서 SFR ID를 찾는다.
+    normalized_text = normalize_requirement_text(text)
+    section_text = requirement_list_section(normalized_text)
+    ids = extract_requirement_ids_from_text(section_text) if section_text else ()
+    return ids or extract_requirement_ids_from_text(normalized_text)
+
+
+def normalize_requirement_text(text: str) -> str:
+    value = unicodedata.normalize("NFKC", text or "")
+    return (
+        value
+        .replace("－", "-")
+        .replace("–", "-")
+        .replace("—", "-")
+        .replace("―", "-")
+    )
+
+
+def requirement_list_section(text: str) -> str:
+    matches = list(REQUIREMENT_LIST_MARKER_PATTERN.finditer(text))
+    if not matches:
+        return ""
+    start = matches[0].start()
+    return text[start:start + REQUIREMENT_LIST_WINDOW_CHARS]
+
+
+def extract_requirement_ids_from_text(text: str) -> tuple[str, ...]:
+    seen: set[str] = set()
+    found: list[tuple[int, str]] = []
+    result: list[str] = []
+
+    for match in re.finditer(r"(?<![A-Z0-9])SFR-(?:[A-Z0-9]+-)*\d+(?![A-Z0-9])", text, re.IGNORECASE):
+        found.append((match.start(), match.group(0).upper()))
+
+    for match in TOLERANT_REQUIREMENT_ID_PATTERN.finditer(text):
+        body = re.sub(r"[^A-Za-z0-9]+", "-", match.group("body")).strip("-")
+        requirement_id = f"SFR-{body}".upper()
+        if not extract_requirement_ids(requirement_id):
+            continue
+        found.append((match.start(), requirement_id))
+
+    for _position, requirement_id in sorted(found, key=lambda item: item[0]):
+        if requirement_id in seen:
+            continue
+        result.append(requirement_id)
+        seen.add(requirement_id)
+
+    return tuple(result)
+
+
+def write_requirement_marker(marker_dir: Path, filename: str, text: str) -> Path:
+    target_path = marker_dir / safe_upload_filename(filename, "requirement_source", ".txt")
+    if target_path.exists():
+        for index in range(2, 1000):
+            candidate = marker_dir / f"{target_path.stem}_{index}{target_path.suffix}"
+            if not candidate.exists():
+                target_path = candidate
+                break
+    target_path.write_text(text, encoding="utf-8")
+    return target_path

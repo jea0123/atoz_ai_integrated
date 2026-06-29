@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .content_identity import read_file_identity
+from .file_noise import is_noise_filename
 from .folder_policy import FolderPolicy
 from .models import ScannedFile
 
@@ -45,6 +46,8 @@ def scan_folder(
     files: list[ScannedFile] = []
     for path in iterator:
         if not path.is_file() or path.suffix.lower() not in suffixes:
+            continue
+        if is_noise_filename(path.name):
             continue
         if folder_policy and not folder_policy.should_scan(path, folder):
             continue

@@ -21,6 +21,7 @@ def serialize_check_result(
         "request_id": request_id,
         "standard_file": standard_file.name,
         "standard_project_title": mapping.standard_project_title,
+        "artifact_category": mapping.artifact_category,
         "match_mode": mapping.match_mode,
         "scanned_files": len(mapping.files),
         "reference_output_count": len(mapping.outputs),

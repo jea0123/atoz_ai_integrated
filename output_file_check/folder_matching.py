@@ -8,7 +8,7 @@ from app_runtime import log_event, parse_json_object
 from document_update.ollama_client import generate
 from output_file_check.content_identity import extract_file_cover_text, find_document_number, read_file_identity
 from output_file_check.folder_policy import FolderPolicy, relative_parent_parts
-from output_file_check.matcher import score_file, strip_parenthetical_content
+from output_file_check.matcher import filename_core_matches_output, score_file, strip_parenthetical_content
 from output_file_check.models import FileIdentity, MatchCandidate, OutputMatch, PathTemplate, ScannedFile, StandardOutput
 from output_file_check.normalization import normalize_for_match, strip_attachment_tail
 
@@ -62,6 +62,7 @@ def match_files_by_folder_path(
     *,
     threshold: float,
     folder_policy: FolderPolicy | None,
+    use_output_id: bool = False,
 ) -> list[OutputMatch]:
     """사용자가 규칙 기반을 선택했을 때만 쓰는 경로/파일명 기반 매칭 흐름이다."""
     output_by_name = index_outputs_by_name(outputs)
@@ -75,6 +76,15 @@ def match_files_by_folder_path(
         for output in outputs
     }
 
+    if not templates:
+        for file in files:
+            for output in outputs:
+                candidate = score_file(output, file, use_output_id=use_output_id)
+                if candidate is None or candidate.score < threshold:
+                    continue
+                candidates_by_output.setdefault(normalize_for_check_key(output.output_name), []).append(candidate)
+        return output_matches_from_candidates(outputs, candidates_by_output)
+
     for file in files:
         template = find_template_for_file_path(file.path, root_folder, templates, folder_policy)
         if template is None:
@@ -84,7 +94,7 @@ def match_files_by_folder_path(
         if output is None:
             continue
 
-        candidate = score_file(output, file)
+        candidate = score_file(output, file, use_output_id=use_output_id)
         if candidate is None or candidate.score < threshold:
             continue
 
@@ -105,6 +115,7 @@ def match_files_by_ai_first(
     ollama_url: str,
     model: str,
     all_outputs: list[StandardOutput] | None = None,
+    use_output_id: bool = False,
 ) -> list[OutputMatch]:
     """AI 우선 매칭의 메인 흐름이다. 규칙은 AI에 보낼 후보 축소에만 관여한다."""
     output_by_name = index_outputs_by_name(outputs)
@@ -184,6 +195,7 @@ def match_files_by_ai_first(
             ollama_url=ollama_url,
             model=model,
             all_outputs=all_outputs_for_filter,
+            use_output_id=use_output_id,
         )
         candidates_by_output.setdefault(key, []).extend(scored_candidates)
         if ai_batch_failed:
@@ -208,6 +220,7 @@ def match_files_by_rule_with_ai_fallback(
     folder_policy: FolderPolicy | None,
     ollama_url: str,
     model: str,
+    use_output_id: bool = False,
 ) -> list[OutputMatch]:
     """규칙 매칭을 먼저 실행하고, 매칭이 비어 있는 산출물만 AI로 보강한다."""
     rule_matches = match_files_by_folder_path(
@@ -217,6 +230,7 @@ def match_files_by_rule_with_ai_fallback(
         root_folder,
         threshold=threshold,
         folder_policy=folder_policy,
+        use_output_id=use_output_id,
     )
     missing_outputs = [match.output for match in rule_matches if not match.candidates]
     if not missing_outputs or not ollama_url:
@@ -249,6 +263,7 @@ def match_files_by_rule_with_ai_fallback(
         ollama_url=ollama_url,
         model=model,
         all_outputs=outputs,
+        use_output_id=use_output_id,
     )
     return merge_rule_matches_with_ai_fallback(rule_matches, ai_matches)
 
@@ -549,6 +564,7 @@ def ai_score_files_for_output(
     ollama_url: str,
     model: str,
     all_outputs: list[StandardOutput],
+    use_output_id: bool = False,
 ) -> tuple[list[MatchCandidate], bool]:
     """산출물 하나의 후보 파일 묶음을 AI가 한 번에 보고 실제 반영 대상을 고른다."""
     ai_batch_failed = False
@@ -561,6 +577,7 @@ def ai_score_files_for_output(
             ollama_url,
             model,
             all_outputs,
+            use_output_id=use_output_id,
         )
     except Exception as exc:
         ai_batch_failed = True
@@ -576,6 +593,15 @@ def ai_score_files_for_output(
     candidates: list[MatchCandidate] = []
     for index in selected_indexes:
         if index < 1 or index > len(files):
+            continue
+        if not filename_core_matches_output(output, files[index - 1].path.stem):
+            log_event(
+                "ai_match.rejected_filename_core",
+                file=str(files[index - 1].path),
+                output_id=output.output_id,
+                output_name=output.output_name,
+                reason="filename_core_mismatch",
+            )
             continue
         file = file_with_cover_identity(files[index - 1], output)
         candidate = MatchCandidate(
@@ -619,6 +645,7 @@ def ask_ai_for_output_file_matches(
     ollama_url: str,
     model: str,
     all_outputs: list[StandardOutput],
+    use_output_id: bool = False,
 ) -> list[int]:
     """AI에게 산출물 하나와 후보 파일 묶음을 주고 실제 매칭 파일 index 목록을 받는다."""
     file_lines: list[str] = []
@@ -635,15 +662,22 @@ def ask_ai_for_output_file_matches(
             f"   cover_text={cover_text}"
         )
 
+    output_id_line = f"- output_id: {output.output_id}" if use_output_id else "- output_id: ignore for matching"
+    id_instruction = (
+        "Use output_id as a strong hint when file names or cover text contain it."
+        if use_output_id
+        else "Ignore existing document numbers/output IDs in candidate files; match by document type/name and path."
+    )
     prompt = f"""
 You are matching project output files.
 Output target:
-- output_id: {output.output_id}
+{output_id_line}
 - output_name: {output.output_name}
 - expected_project_title: {expected_project_title}
 
 Select every matching file index. Do not stop after a few files.
 Exclude only files whose cover_text says another document type.
+{id_instruction}
 Return only compact JSON with numeric indexes. Never return file names.
 Good: {{"selected":[1,2,3,4]}}
 Bad: {{"selected":["file.xlsx"]}}
@@ -872,8 +906,8 @@ def find_contiguous_subpath(actual_path: tuple[str, ...], expected_path: tuple[s
     if not expected_path:
         return -1
 
-    actual_keys = [normalize_for_match(part) for part in actual_path]
-    expected_keys = [normalize_for_match(part) for part in expected_path]
+    actual_keys = [normalize_path_part_for_template(part) for part in actual_path]
+    expected_keys = [normalize_path_part_for_template(part) for part in expected_path]
     expected_length = len(expected_keys)
 
     for index in range(0, len(actual_keys) - expected_length + 1):
@@ -885,3 +919,8 @@ def find_contiguous_subpath(actual_path: tuple[str, ...], expected_path: tuple[s
 def normalize_for_check_key(value: str) -> str:
     """산출물명/별칭을 딕셔너리 key로 쓰기 위해 같은 정규화 규칙을 적용한다."""
     return normalize_for_match(value)
+
+
+def normalize_path_part_for_template(value: str) -> str:
+    text = re.sub(r"^\s*\d+[.)_-]?\s*", "", str(value))
+    return normalize_for_match(text)
