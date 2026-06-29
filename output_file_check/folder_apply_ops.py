@@ -12,20 +12,24 @@ from app_runtime import (
     RESULT_DIR,
     log_event,
 )
-from document_update.document_number import write_updated_document
+from document_update.document_number import write_updated_document, write_updated_project_title
 from document_update.hwp_convert import start_allow_all_watcher, stop_allow_all_watcher
 from document_update.metadata_update import update_metadata_in_document
 from document_update.patterns import OUTPUT_ID_PATTERN
+from document_update.project_title_match import project_title_matches_expected
 from document_update.runtime_conversion import prepare_target_file
 from output_file_check.file_noise import copytree_ignore_noise, remove_noise_files
+from output_file_check.content_identity import find_matching_project_title, read_file_identity
 from output_file_check.folder_mapping import (
     build_folder_mapping,
     normalize_relative_path_for_compare,
     split_excluded_paths_field,
 )
 from output_file_check.folder_policy import FolderPolicy
+from output_file_check.folder_scanner import scan_folder
 from output_file_check.folder_serialization import serialize_check_result
-from output_file_check.models import MatchCandidate, OutputMatch, PathTemplate, StandardOutput
+from output_file_check.matcher import score_file
+from output_file_check.models import MatchCandidate, OutputMatch, PathTemplate, ScannedFile, StandardOutput
 from output_file_check.normalization import filesystem_safe_stem, normalize_for_match, output_name_from_id
 from output_file_check.requirement_generation import (
     RequirementGenerationResult,
@@ -37,6 +41,7 @@ PRESERVED_TAIL_PATTERN = re.compile(
     r"((?:(?:[_-][vV]\d+(?:\.\d+)*)|(?:[_-]SFR-[A-Za-z0-9-]+))+)$",
     re.IGNORECASE,
 )
+UNMATCHED_FULL_APPLY_THRESHOLD = 0.94
 ATTACHMENT_TAIL_PATTERN = re.compile(
     r"^[\s_-]*(?:[\[\(（［｛]\s*(?:별첨|첨부)\s*\d*[^)\]\}）］｝]*[\)\]\}）］｝]|(?:별첨|첨부)\s*\d+)",
     re.IGNORECASE,
@@ -199,10 +204,16 @@ def apply_dumped_folder(
     revision_metadata = initial_revision_metadata_from_fields(fields)
 
     all_selected_candidates = select_all_unique_candidates(mapping.matches)
+    excluded_relative_paths = split_excluded_paths_field(fields.get("excluded_candidate_paths"))
     selected_candidates = filter_excluded_candidates(
         all_selected_candidates,
         dump_root,
-        split_excluded_paths_field(fields.get("excluded_candidate_paths")),
+        excluded_relative_paths,
+    )
+    selected_candidates = filter_apply_scope_candidates(
+        selected_candidates,
+        dump_root,
+        fields,
     )
     excluded_file_count = len(all_selected_candidates) - len(selected_candidates)
     allow_stop_event, allow_thread = start_allow_all_watcher()
@@ -217,6 +228,19 @@ def apply_dumped_folder(
             )
             for candidate in selected_candidates
         ]
+        apply_items.extend(
+            apply_unmatched_project_title_updates(
+                dump_root,
+                mapping.outputs,
+                mapping.files,
+                selected_candidates,
+                mapping.standard_project_title,
+                temp_dir,
+                excluded_relative_paths,
+                revision_metadata=revision_metadata,
+                ignore_top_level_files=is_management_apply_scope(fields),
+            )
+        )
     finally:
         stop_allow_all_watcher(allow_stop_event, allow_thread)
 
@@ -263,6 +287,12 @@ def apply_dumped_folder(
             "updated_file_count": sum(1 for item in apply_items if item["status"] == "updated"),
             "failed_file_count": sum(1 for item in apply_items if item["status"] == "error"),
             "apply_target_file_count": len(selected_candidates),
+            "project_title_only_updated_count": sum(
+                1 for item in apply_items
+                if item.get("status") == "updated"
+                and item.get("project_only")
+                and int(item.get("cover_project_replace_count") or 0) > 0
+            ),
             "skipped_file_count": excluded_file_count,
             "filename_unchanged_count": sum(1 for item in apply_items if is_filename_unchanged_item(item)),
             "initial_revision_date": revision_metadata["revision_date"],
@@ -467,6 +497,243 @@ def filter_excluded_candidates(
     return filtered
 
 
+def filter_apply_scope_candidates(
+    candidates: list[MatchCandidate],
+    dump_root: Path,
+    fields: dict[str, str],
+) -> list[MatchCandidate]:
+    if not is_management_apply_scope(fields):
+        return candidates
+    return [
+        candidate
+        for candidate in candidates
+        if not is_top_level_dump_file(candidate.file.path, dump_root)
+    ]
+
+
+def is_management_apply_scope(fields: dict[str, str]) -> bool:
+    return str(fields.get("artifact_category") or "").strip().casefold() == "management"
+
+
+def is_top_level_dump_file(path: Path, dump_root: Path) -> bool:
+    try:
+        return len(path.relative_to(dump_root).parts) == 1
+    except ValueError:
+        return False
+
+
+def apply_unmatched_project_title_updates(
+    dump_root: Path,
+    outputs: list[StandardOutput],
+    files: list[ScannedFile],
+    selected_candidates: list[MatchCandidate],
+    standard_project_title: str,
+    temp_dir: Path,
+    excluded_relative_paths: set[str],
+    *,
+    revision_metadata: dict[str, str],
+    ignore_top_level_files: bool = False,
+) -> list[dict[str, object]]:
+    selected_paths = selected_candidate_path_keys(selected_candidates)
+    items: list[dict[str, object]] = []
+    seen: set[str] = set()
+
+    for file in project_title_update_candidates(dump_root, files):
+        path = file.path
+        path_key = str(path.resolve(strict=False)).casefold()
+        if path_key in selected_paths or path_key in seen:
+            continue
+        seen.add(path_key)
+        if ignore_top_level_files and is_top_level_dump_file(path, dump_root):
+            continue
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            relative_path = str(path.relative_to(dump_root))
+        except ValueError:
+            relative_path = str(path)
+        if normalize_relative_path_for_compare(relative_path) in excluded_relative_paths:
+            continue
+
+        identity = file.identity
+        file = ScannedFile(path, identity)
+        output_candidate = best_unselected_output_candidate(file, outputs)
+        if output_candidate is not None:
+            items.append(
+                apply_batch_candidate(
+                    output_candidate,
+                    standard_project_title,
+                    temp_dir,
+                    revision_metadata=revision_metadata,
+                    rename_files=True,
+                )
+            )
+            continue
+
+        if identity is None:
+            if should_skip_expensive_unmatched_identity_read(path):
+                continue
+            identity = read_file_identity(path)
+            file = ScannedFile(path, identity)
+
+        old_project_title = project_title_for_update(identity, standard_project_title)
+        if not old_project_title or not values_differ(old_project_title, standard_project_title):
+            continue
+
+        items.append(
+            apply_project_title_only_file(
+                path,
+                old_project_title,
+                standard_project_title,
+                temp_dir,
+                revision_metadata,
+            )
+        )
+
+    return items
+
+
+def selected_candidate_path_keys(selected_candidates: list[MatchCandidate]) -> set[str]:
+    keys: set[str] = set()
+    for candidate in selected_candidates:
+        original_path = candidate.file.path
+        paths = [original_path, original_path.with_name(build_target_filename(candidate.output, original_path))]
+        if original_path.suffix.lower() == ".hwp":
+            converted_path = original_path.with_suffix(".hwpx")
+            paths.append(converted_path)
+            paths.append(converted_path.with_name(build_target_filename(candidate.output, converted_path)))
+        keys.update(str(path.resolve(strict=False)).casefold() for path in paths)
+    return keys
+
+
+def best_unselected_output_candidate(
+    file: ScannedFile,
+    outputs: list[StandardOutput],
+) -> MatchCandidate | None:
+    best: MatchCandidate | None = None
+    for output in outputs:
+        candidate = score_file(output, file, use_output_id=True)
+        if candidate is None:
+            continue
+        if best is None or candidate.score > best.score:
+            best = candidate
+    if best is None or best.score < UNMATCHED_FULL_APPLY_THRESHOLD:
+        return None
+    return best
+
+
+def project_title_update_candidates(dump_root: Path, files: list[ScannedFile]) -> list[ScannedFile]:
+    candidates: list[ScannedFile] = []
+    seen: set[str] = set()
+    for file in files:
+        key = str(file.path.resolve(strict=False)).casefold()
+        if key in seen:
+            continue
+        candidates.append(file)
+        seen.add(key)
+
+    for file in scan_folder(dump_root, read_contents=False, folder_policy=None):
+        key = str(file.path.resolve(strict=False)).casefold()
+        if key in seen or has_ignored_project_title_path(file.path, dump_root):
+            continue
+        candidates.append(file)
+        seen.add(key)
+    return candidates
+
+
+def should_skip_expensive_unmatched_identity_read(path: Path) -> bool:
+    return path.suffix.lower() in {".hwp", ".hwpx"}
+
+
+def has_ignored_project_title_path(path: Path, dump_root: Path) -> bool:
+    try:
+        parts = path.relative_to(dump_root).parts[:-1]
+    except ValueError:
+        parts = path.parts[:-1]
+    ignored = {normalize_for_match(value) for value in ("bak", "backup", "백업", "임시", "temp", "tmp")}
+    return any(normalize_for_match(part) in ignored for part in parts)
+
+
+def apply_project_title_only_file(
+    original_path: Path,
+    old_project_title: str,
+    standard_project_title: str,
+    temp_dir: Path,
+    revision_metadata: dict[str, str],
+) -> dict[str, object]:
+    try:
+        target_file, _converted_to_hwpx = prepare_target_file(original_path, temp_dir)
+        update_dir = temp_dir / "project-title-updated"
+        update_dir.mkdir(parents=True, exist_ok=True)
+        output_suffix = target_file.suffix or original_path.suffix
+        temp_output = unique_file_path(update_dir / f"{uuid4().hex}{output_suffix}")
+        replace_count, output_file = write_updated_project_title(
+            target_file,
+            old_project_title,
+            standard_project_title,
+            output_path=temp_output,
+        )
+        if replace_count <= 0:
+            return {
+                "status": "updated",
+                "project_only": True,
+                "output_id": "",
+                "output_name": "표준 외 문서",
+                "old_path": str(original_path),
+                "new_path": str(original_path),
+                "expected_filename": "",
+                "file_name_changed": False,
+                "cover_changed": False,
+                "cover_update_status": "unchanged",
+                "cover_project_replace_count": 0,
+                "cover_document_number_replace_count": 0,
+                "cover_update_error": "",
+                "cover_warning_reasons": ["표지에서 기존 사업명 텍스트를 교체하지 못했습니다."],
+            }
+
+        final_path = original_path if original_path.suffix.lower() == output_suffix.lower() else original_path.with_suffix(output_suffix)
+        if not same_path(output_file, final_path):
+            replace_file_with_fallback(output_file, final_path)
+        file_cleanup_error = cleanup_original_after_replacement(original_path, final_path)
+
+        revision_result = apply_initial_revision_metadata(final_path, temp_dir, revision_metadata)
+
+        return {
+            "status": "updated",
+            "project_only": True,
+            "output_id": "",
+            "output_name": "표준 외 문서",
+            "old_path": str(original_path),
+            "new_path": str(final_path),
+            "expected_filename": "",
+            "file_name_changed": original_path.name != final_path.name,
+            "cover_changed": True,
+            "cover_update_status": "updated",
+            "cover_project_replace_count": replace_count,
+            "cover_document_number_replace_count": 0,
+            "cover_update_error": "",
+            "cover_warning_reasons": [],
+            "file_cleanup_error": file_cleanup_error,
+            "initial_revision_status": revision_result["status"],
+            "initial_revision_date": revision_result["revision_date"],
+            "initial_revision_author": revision_result["author"],
+            "initial_revision_approval_author": revision_result["approval_author"],
+            "initial_revision_cover_update_count": revision_result["cover_update_count"],
+            "initial_revision_history_update_count": revision_result["revision_history_update_count"],
+            "initial_revision_error": revision_result["error"],
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "project_only": True,
+            "output_id": "",
+            "output_name": "표준 외 문서",
+            "old_path": str(original_path),
+            "backup_path": "",
+            "error": f"프로젝트명만 교체 실패: {exc}",
+        }
+
+
 def apply_batch_candidate(
     candidate: MatchCandidate,
     standard_project_title: str,
@@ -486,37 +753,58 @@ def apply_batch_candidate(
         update_dir.mkdir(parents=True, exist_ok=True)
         output_suffix = target_file.suffix or original_path.suffix
         temp_output = unique_file_path(update_dir / f"{uuid4().hex}{output_suffix}")
-        old_project_title = identity.project_title if identity and identity.project_title else None
         effective_output = candidate.output
+        old_project_title = project_title_for_update(
+            identity,
+            standard_project_title,
+            effective_output,
+        )
         output_id = clean_output_id(effective_output.output_id)
         validate_output_id(output_id)
 
-        (
-            old_document_number,
-            _document_backup_path,
-            project_title_replace_count,
-            document_number_replace_count,
-            output_file,
-        ) = write_updated_document(
-            target_file,
-            new_document_number=output_id,
-            old_project_title=old_project_title,
-            new_project_title=standard_project_title,
-            output_path=temp_output,
-        )
+        old_document_number = ""
+        project_title_replace_count = 0
+        document_number_replace_count = 0
+        cover_update_error = ""
+        output_file = target_file
+        try:
+            (
+                old_document_number,
+                _document_backup_path,
+                project_title_replace_count,
+                document_number_replace_count,
+                output_file,
+            ) = write_updated_document(
+                target_file,
+                new_document_number=output_id,
+                old_project_title=old_project_title,
+                new_project_title=standard_project_title,
+                output_path=temp_output,
+                allow_missing_document_number=True,
+            )
+        except Exception as exc:
+            # 표지 형식이 달라도 파일명 정리는 계속 진행하고, 결과 README에 확인 내용을 남긴다.
+            cover_update_error = str(exc)
+
         final_path = original_path if original_path.suffix.lower() == output_suffix.lower() else original_path.with_suffix(output_suffix)
         expected_filename = build_target_filename(effective_output, final_path)
         if rename_files:
             final_path = final_path.with_name(expected_filename)
-        if final_path.exists() and final_path.resolve() != original_path.resolve():
+        if final_path.exists() and not same_path(final_path, original_path):
             final_path = unique_file_path(final_path)
 
         final_path.parent.mkdir(parents=True, exist_ok=True)
-        output_file.replace(final_path)
-        if original_path.exists() and original_path.resolve() != final_path.resolve():
-            original_path.unlink()
+        if not same_path(output_file, final_path):
+            replace_file_with_fallback(output_file, final_path)
+        file_cleanup_error = cleanup_original_after_replacement(original_path, final_path)
 
-        revision_result = apply_initial_revision_metadata(final_path, temp_dir, revision_metadata)
+        revision_result = apply_initial_revision_metadata(
+            final_path,
+            temp_dir,
+            revision_metadata,
+            document_number=output_id,
+        )
+        project_title_verified = project_title_verified_in_file(final_path, standard_project_title)
 
         cover_status = build_cover_status(
             old_document_number=old_document_number,
@@ -525,6 +813,8 @@ def apply_batch_candidate(
             new_project_title=standard_project_title,
             project_title_replace_count=project_title_replace_count,
             document_number_replace_count=document_number_replace_count,
+            cover_update_error=cover_update_error,
+            project_title_verified=project_title_verified,
         )
 
         return {
@@ -536,6 +826,7 @@ def apply_batch_candidate(
             "expected_filename": expected_filename,
             "file_name_changed": original_path.name != final_path.name,
             "backup_path": str(backup_path) if backup_path else "",
+            "file_cleanup_error": file_cleanup_error,
             "initial_revision_status": revision_result["status"],
             "initial_revision_date": revision_result["revision_date"],
             "initial_revision_author": revision_result["author"],
@@ -543,6 +834,10 @@ def apply_batch_candidate(
             "initial_revision_cover_update_count": revision_result["cover_update_count"],
             "initial_revision_history_update_count": revision_result["revision_history_update_count"],
             "initial_revision_error": revision_result["error"],
+            "cover_project_replace_count": project_title_replace_count,
+            "cover_project_title_verified": project_title_verified,
+            "cover_document_number_replace_count": document_number_replace_count,
+            "cover_update_error": cover_update_error,
             **cover_status,
         }
     except Exception as exc:
@@ -554,6 +849,81 @@ def apply_batch_candidate(
             "backup_path": str(backup_path) if backup_path else "",
             "error": str(exc),
         }
+
+
+def same_path(left: Path, right: Path) -> bool:
+    return left.resolve(strict=False) == right.resolve(strict=False)
+
+
+def replace_file_with_fallback(source: Path, target: Path) -> None:
+    try:
+        source.replace(target)
+        return
+    except OSError:
+        shutil.copyfile(source, target)
+        try:
+            source.unlink()
+        except OSError:
+            pass
+
+
+def cleanup_original_after_replacement(original_path: Path, final_path: Path) -> str:
+    if same_path(original_path, final_path) or not original_path.exists():
+        return ""
+    try:
+        original_path.unlink()
+        return ""
+    except OSError as exc:
+        return str(exc)
+
+
+def project_title_for_update(
+    identity: FileIdentity | None,
+    standard_project_title: str,
+    output: StandardOutput | None = None,
+) -> str | None:
+    if identity is None:
+        return None
+
+    candidates: list[str] = []
+    if identity.project_title:
+        candidates.append(identity.project_title)
+    if identity.document_title:
+        candidates.append(identity.document_title)
+
+    matched = find_matching_project_title(
+        identity.preview_text or "",
+        standard_project_title,
+        tuple(candidates),
+    )
+    if matched and (output is None or normalized_project_title_candidate(matched, output)):
+        return matched
+
+    fallback = normalized_project_title_candidate(identity.project_title, output) if output else str(identity.project_title or "").strip()
+    if not fallback:
+        return None
+
+    matched = find_matching_project_title(
+        "\n".join(value for value in (identity.preview_text, fallback) if value),
+        standard_project_title,
+        (fallback,),
+    )
+    return matched or None
+
+
+def normalized_project_title_candidate(value: str, output: StandardOutput) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    text_key = normalize_for_match(text)
+    output_keys = [
+        normalize_for_match(output.output_name),
+        *(normalize_for_match(alias) for alias in output.aliases),
+    ]
+    if any(output_key and text_key == output_key for output_key in output_keys):
+        return None
+    return text
 
 
 def initial_revision_year(value: object = "") -> str:
@@ -581,6 +951,7 @@ def apply_initial_revision_metadata(
     file_path: Path,
     temp_dir: Path,
     revision_metadata: dict[str, str],
+    document_number: str = "",
 ) -> dict[str, object]:
     revision_date = revision_metadata["revision_date"]
     author = revision_metadata["author"]
@@ -592,6 +963,7 @@ def apply_initial_revision_metadata(
             revision_date,
             approval_author,
             temp_dir,
+            document_number=document_number,
         )
         return {
             "status": result.status,
@@ -622,6 +994,8 @@ def build_cover_status(
     new_project_title: str,
     project_title_replace_count: int,
     document_number_replace_count: int,
+    cover_update_error: str = "",
+    project_title_verified: bool = False,
 ) -> dict[str, object]:
     document_number_changed = bool(old_document_number and old_document_number != new_document_number)
     if document_number_replace_count:
@@ -629,18 +1003,61 @@ def build_cover_status(
 
     project_title_change_expected = values_differ(old_project_title, new_project_title)
     project_title_changed = project_title_replace_count > 0
+    project_title_ok = project_title_changed or project_title_verified
     cover_changed = document_number_changed or project_title_changed
+    document_number_missing = not old_document_number and document_number_replace_count == 0
 
     warnings: list[str] = []
-    if project_title_change_expected and not project_title_changed:
-        warnings.append("사업명 변경 대상 텍스트를 찾지 못했습니다.")
-    if not cover_changed:
-        warnings.append("표지 변경이 감지되지 않았습니다.")
+    if cover_update_error:
+        warnings.append(f"표지 수정 실패: {cover_update_error}")
+    else:
+        if document_number_missing:
+            warnings.append("표지에서 문서번호 위치를 찾지 못해 내부 문서번호는 확인 필요")
+        if project_title_change_expected and not project_title_ok:
+            warnings.append("사업명 변경 대상 텍스트를 찾지 못했습니다.")
+        elif new_project_title and not old_project_title and not project_title_ok:
+            warnings.append("표지에서 기존 사업명 후보를 확정하지 못했습니다.")
+        if not cover_changed and not project_title_verified:
+            warnings.append("표지 변경이 감지되지 않았습니다.")
+
+    if cover_update_error:
+        cover_update_status = "failed"
+    elif cover_changed and warnings:
+        cover_update_status = "partial"
+    elif cover_changed:
+        cover_update_status = "updated"
+    else:
+        cover_update_status = "unchanged"
 
     return {
         "cover_changed": cover_changed,
+        "cover_update_status": cover_update_status,
+        "cover_document_number_missing": document_number_missing,
         "cover_warning_reasons": warnings,
     }
+
+
+def project_title_verified_in_file(file_path: Path, expected_project_title: str) -> bool:
+    if not expected_project_title:
+        return False
+    try:
+        identity = read_file_identity(file_path)
+    except Exception:
+        return False
+    if identity.error:
+        return False
+    if project_title_matches_expected(identity.project_title, expected_project_title):
+        return True
+    if expected_project_title in identity.preview_text:
+        return True
+    if normalize_for_match(expected_project_title) in normalize_for_match(identity.preview_text):
+        return True
+    matched = find_matching_project_title(
+        identity.preview_text,
+        expected_project_title,
+        extra_candidates=(identity.project_title,),
+    )
+    return bool(matched)
 
 
 def values_differ(old_value: str | None, new_value: str | None) -> bool:
@@ -652,6 +1069,8 @@ def values_differ(old_value: str | None, new_value: str | None) -> bool:
 def is_filename_unchanged_item(item: dict[str, object]) -> bool:
     if item.get("status") != "updated":
         return False
+    if item.get("project_only"):
+        return False
     return not bool(item.get("file_name_changed"))
 
 
@@ -661,12 +1080,38 @@ def is_cover_unchanged_item(item: dict[str, object]) -> bool:
     return not bool(item.get("cover_changed"))
 
 
-def is_cover_attention_item(item: dict[str, object]) -> bool:
-    if item.get("status") == "error":
-        return True
+def is_author_attention_item(item: dict[str, object]) -> bool:
     if item.get("status") != "updated":
         return False
-    return is_cover_unchanged_item(item) or bool(item.get("cover_warning_reasons"))
+    status = str(item.get("initial_revision_status") or "")
+    if status in {"skipped", "error"}:
+        return True
+    if item.get("initial_revision_error"):
+        return True
+    cover_count = int(item.get("initial_revision_cover_update_count") or 0)
+    history_count = int(item.get("initial_revision_history_update_count") or 0)
+    return status == "updated" and cover_count == 0 and history_count == 0
+
+
+def is_header_id_attention_item(item: dict[str, object]) -> bool:
+    if item.get("status") != "updated" or item.get("project_only"):
+        return False
+    if item.get("cover_document_number_missing"):
+        return True
+    warnings = item.get("cover_warning_reasons") or []
+    return isinstance(warnings, list) and any("문서번호" in str(value) for value in warnings)
+
+
+def is_project_title_attention_item(item: dict[str, object]) -> bool:
+    if item.get("status") != "updated":
+        return False
+    warnings = item.get("cover_warning_reasons") or []
+    if isinstance(warnings, list) and any(
+        ("사업명" in str(value) or "프로젝트명" in str(value))
+        for value in warnings
+    ):
+        return True
+    return bool(item.get("project_only")) and int(item.get("cover_project_replace_count") or 0) == 0
 
 
 def write_apply_readme(
@@ -704,8 +1149,19 @@ def build_apply_readme(
 ) -> str:
     updated_items = [item for item in apply_items if item.get("status") == "updated"]
     failed_items = [item for item in apply_items if item.get("status") == "error"]
-    filename_unchanged_items = [item for item in apply_items if is_filename_unchanged_item(item)]
-    cover_attention_items = [item for item in apply_items if is_cover_attention_item(item)]
+    author_attention_items = [item for item in apply_items if is_author_attention_item(item)]
+    header_id_attention_items = [item for item in apply_items if is_header_id_attention_item(item)]
+    project_title_attention_items = [item for item in apply_items if is_project_title_attention_item(item)]
+    cover_project_items = [item for item in updated_items if int(item.get("cover_project_replace_count") or 0) > 0]
+    cover_document_number_items = [
+        item for item in updated_items if int(item.get("cover_document_number_replace_count") or 0) > 0
+    ]
+    cover_partial_items = [item for item in updated_items if item.get("cover_update_status") == "partial"]
+    cover_failed_items = [item for item in updated_items if item.get("cover_update_status") == "failed"]
+    project_only_items = [
+        item for item in updated_items
+        if item.get("project_only") and int(item.get("cover_project_replace_count") or 0) > 0
+    ]
 
     lines = [
         "# 반영 결과 검수 README",
@@ -722,23 +1178,40 @@ def build_apply_readme(
         f"| 반영 성공 | {len(updated_items)}건 |",
         f"| 반영 오류 | {len(failed_items)}건 |",
         f"| 제외/건너뜀 | {skipped_file_count}건 |",
-        f"| 1차 파일명 미변경 | {len(filename_unchanged_items)}건 |",
-        f"| 표지 확인 필요 파일 | {len(cover_attention_items)}건 |",
-        "",
-        "## 1차 파일명 미변경",
-        "",
+        f"| 표지 사업명 교체 | {len(cover_project_items)}건 |",
+        f"| 표준 외 문서 사업명 교체 | {len(project_only_items)}건 |",
+        f"| 표지 문서번호 교체 | {len(cover_document_number_items)}건 |",
+        f"| 표지 부분반영 | {len(cover_partial_items)}건 |",
+        f"| 표지 수정 실패 | {len(cover_failed_items)}건 |",
+        f"| 작성자/개정정보 확인 필요 | {len(author_attention_items)}건 |",
+        f"| 머릿말/표지 ID 확인 필요 | {len(header_id_attention_items)}건 |",
+        f"| 사업명 확인 필요 | {len(project_title_attention_items)}건 |",
     ]
 
-    append_filename_unchanged_section(lines, filename_unchanged_items, dump_root)
     lines.extend([
         "",
-        "## 표지 확인 필요 파일",
+        "## 작성자/개정정보 확인 필요",
         "",
-        "반영은 끝났지만 표지의 문서번호, 산출물명, 사업명 변경 여부를 한 번 더 확인해야 하는 파일입니다.",
-        "아래 표에서 파일 경로와 확인 내용을 보고 표지를 직접 확인하세요.",
+        "작성자, 개정일자, 개정이력 반영이 없거나 실패한 파일입니다.",
         "",
     ])
-    append_cover_attention_section(lines, cover_attention_items, dump_root)
+    append_attention_category_section(lines, author_attention_items, dump_root, revision_attention_label, revision_attention_detail)
+    lines.extend([
+        "",
+        "## 머릿말/표지 ID 확인 필요",
+        "",
+        "문서번호 또는 머릿말 ID 위치를 확정하지 못한 파일입니다.",
+        "",
+    ])
+    append_attention_category_section(lines, header_id_attention_items, dump_root, cover_attention_label, header_id_attention_detail)
+    lines.extend([
+        "",
+        "## 사업명 확인 필요",
+        "",
+        "표지에서 기준 사업명으로 교체할 기존 사업명 위치를 찾지 못한 파일입니다.",
+        "",
+    ])
+    append_attention_category_section(lines, project_title_attention_items, dump_root, cover_attention_label, project_title_attention_detail)
     lines.extend(["", "## 반영 오류", ""])
     append_error_section(lines, failed_items, dump_root)
     append_requirement_generation_section(lines, requirement_result, dump_root)
@@ -784,38 +1257,12 @@ def append_requirement_generation_section(
     )
 
 
-def append_filename_unchanged_section(
+def append_attention_category_section(
     lines: list[str],
     items: list[dict[str, object]],
     dump_root: Path,
-) -> None:
-    if not items:
-        lines.append("없음")
-        return
-
-    lines.extend([
-        "| 산출물ID | 산출물명 | 파일 | 예상 파일명 |",
-        "| --- | --- | --- | --- |",
-    ])
-    for item in items:
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    markdown_cell(item.get("output_id", "")),
-                    markdown_cell(item.get("output_name", "")),
-                    markdown_cell(item_report_path(item, dump_root)),
-                    markdown_cell(item.get("expected_filename", "")),
-                ]
-            )
-            + " |"
-        )
-
-
-def append_cover_attention_section(
-    lines: list[str],
-    items: list[dict[str, object]],
-    dump_root: Path,
+    label_func,
+    detail_func,
 ) -> None:
     if not items:
         lines.append("없음")
@@ -830,11 +1277,11 @@ def append_cover_attention_section(
             "| "
             + " | ".join(
                 [
-                    markdown_cell(cover_attention_label(item)),
+                    markdown_cell(label_func(item)),
                     markdown_cell(item.get("output_id", "")),
                     markdown_cell(item.get("output_name", "")),
                     markdown_cell(item_report_path(item, dump_root)),
-                    markdown_cell(cover_attention_detail(item)),
+                    markdown_cell(detail_func(item)),
                 ]
             )
             + " |"
@@ -872,18 +1319,70 @@ def append_error_section(
 def cover_attention_label(item: dict[str, object]) -> str:
     if item.get("status") == "error":
         return "오류"
+    cover_status = str(item.get("cover_update_status") or "")
+    if cover_status == "failed":
+        return "표지 수정 실패"
+    if cover_status == "partial":
+        return "표지 부분반영"
     if is_cover_unchanged_item(item):
         return "표지 미변경"
     return "부분 확인"
 
 
-def cover_attention_detail(item: dict[str, object]) -> str:
-    if item.get("status") == "error":
-        return str(item.get("error", ""))
+def revision_attention_label(item: dict[str, object]) -> str:
+    status = str(item.get("initial_revision_status") or "확인 필요")
+    if status == "updated":
+        return "반영 없음"
+    if status == "skipped":
+        return "건너뜀"
+    if status == "error":
+        return "오류"
+    return status
+
+
+def revision_attention_detail(item: dict[str, object]) -> str:
+    status = item.get("initial_revision_status")
+    error = str(item.get("initial_revision_error") or "")
+    if error:
+        return error
+    if status == "skipped":
+        return "문서 내부에서 수정할 표지/개정이력 위치를 찾지 못했습니다."
+
+    details: list[str] = []
+    cover_count = int(item.get("initial_revision_cover_update_count") or 0)
+    history_count = int(item.get("initial_revision_history_update_count") or 0)
+    if cover_count > 0:
+        details.append(f"표지/머릿말 {cover_count}곳")
+    if history_count > 0:
+        details.append(f"개정이력 {history_count}곳")
+    return " / ".join(details) if details else "확인 필요"
+
+
+def header_id_attention_detail(item: dict[str, object]) -> str:
+    details: list[str] = []
+    if item.get("cover_document_number_missing"):
+        details.append("문서번호 위치 미확정")
+    document_count = int(item.get("cover_document_number_replace_count") or 0)
+    details.append(f"문서번호 교체 {document_count}곳")
     warnings = item.get("cover_warning_reasons") or []
-    if isinstance(warnings, list) and warnings:
-        return " / ".join(str(value) for value in warnings)
-    return "확인 필요"
+    if isinstance(warnings, list):
+        details.extend(str(value) for value in warnings if "문서번호" in str(value))
+    return " / ".join(details) if details else "확인 필요"
+
+
+def project_title_attention_detail(item: dict[str, object]) -> str:
+    details: list[str] = []
+    project_count = int(item.get("cover_project_replace_count") or 0)
+    if project_count > 0:
+        details.append(f"사업명 교체 {project_count}곳")
+    warnings = item.get("cover_warning_reasons") or []
+    if isinstance(warnings, list):
+        details.extend(
+            str(value)
+            for value in warnings
+            if "사업명" in str(value) or "프로젝트명" in str(value)
+        )
+    return " / ".join(details) if details else "확인 필요"
 
 
 def item_report_path(item: dict[str, object], dump_root: Path) -> str:

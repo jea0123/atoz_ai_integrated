@@ -10,7 +10,13 @@ import zipfile
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape, unescape
 
+from .header_metadata import unlabeled_header_slot_is_clean
 from .patterns import OUTPUT_ID_PATTERN, TEXT_NODE_PATTERN
+from .project_title_match import (
+    PROJECT_TITLE_LABELS,
+    best_matching_project_title,
+    project_title_matches_expected,
+)
 
 
 PPT_OOXML_SUFFIXES = {
@@ -49,7 +55,7 @@ PARAGRAPH_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?p)\b[^>]*>.*?</(?P=tag)>", re
 TABLE_ROW_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?tr)\b[^>]*>.*?</(?P=tag)>", re.DOTALL)
 TABLE_CELL_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?tc)\b[^>]*>.*?</(?P=tag)>", re.DOTALL)
 VERSION_PATTERN = re.compile(r"^[vV]?\d+(?:\.\d+)*$")
-DATE_VALUE_PATTERN = re.compile(r"^\d{4}[-./]\d{1,2}[-./]\d{1,2}$")
+DATE_VALUE_PATTERN = re.compile(r"^\d{4}(?:[-./]\d{1,2}[-./]\d{1,2}|\s+\d{1,2}\s+\d{1,2})$")
 TITLE_KEYWORDS = (
     "계획서",
     "결과서",
@@ -254,6 +260,55 @@ def clean_cover_text(value: str) -> str:
     text = unescape(value)
     text = re.sub(r"\s+", " ", text)
     return text.strip(" -\t\r\n")
+
+
+def project_title_candidates_to_scan(
+    preview_text: str,
+    expected_project_title: str | None,
+    *candidates: str,
+) -> list[str]:
+    expected = clean_cover_text(expected_project_title or "")
+    if not expected:
+        return unique_text_values(*candidates)
+
+    result: list[str] = []
+    matched = find_matching_project_title(preview_text, expected, candidates)
+    if matched:
+        result.append(matched)
+
+    for candidate in candidates:
+        if project_title_matches_expected(candidate, expected):
+            result.append(clean_cover_text(candidate))
+    return unique_text_values(*result)
+
+
+def find_matching_project_title(
+    preview_text: str,
+    expected_project_title: str,
+    candidates: tuple[str, ...] | list[str] = (),
+) -> str:
+    pool: list[str] = [clean_cover_text(candidate) for candidate in candidates]
+    lines = [clean_cover_text(line) for line in preview_text.splitlines() if clean_cover_text(line)]
+    labeled_project_title = find_labeled_project_title(lines)
+    if labeled_project_title:
+        pool.append(labeled_project_title)
+
+    for line in lines[:80]:
+        project_title, _document_title = split_combined_project_document(line)
+        pool.append(project_title or line)
+
+    return best_matching_project_title(pool, expected_project_title)
+
+
+def find_labeled_project_title(lines: list[str]) -> str:
+    label_keys = {normalize_document_number_label(label) for label in PROJECT_TITLE_LABELS}
+    for index, line in enumerate(lines):
+        match = re.search(r"(?:사업명|프로젝트\s*명|프로젝트\s*제목)\s*[:：]\s*(.+)", line)
+        if match:
+            return clean_cover_text(match.group(1))
+        if normalize_document_number_label(line) in label_keys and index + 1 < len(lines):
+            return clean_cover_text(lines[index + 1])
+    return ""
 
 
 def normalize_document_number_label(value: str) -> str:
@@ -466,15 +521,32 @@ def unlabeled_header_version_cell_index(cells: list[re.Match[str]]) -> int | Non
         return None
 
     values = [xml_fragment_text(cell.group(0)) for cell in cells]
-    if not OUTPUT_ID_PATTERN.search(values[0]):
-        return None
-    if values[1] and not VERSION_PATTERN.fullmatch(values[1]):
-        return None
-    if not DATE_VALUE_PATTERN.fullmatch(values[2]):
-        return None
-    if normalize_document_number_label(values[3]) in {normalize_document_number_label(item) for item in DOCUMENT_NUMBER_LABEL_LIKE_VALUES}:
-        return None
-    return 1
+    for start in range(0, len(values) - 3):
+        code_value = clean_cover_text(values[start])
+        version_value = clean_cover_text(values[start + 1])
+        date_value = clean_cover_text(values[start + 2])
+        author_value = clean_cover_text(values[start + 3])
+        if (
+            unlabeled_header_ppt_slot_is_clean(code_value, "code")
+            and unlabeled_header_ppt_slot_is_clean(version_value, "version")
+            and unlabeled_header_ppt_slot_is_clean(date_value, "date")
+            and unlabeled_header_ppt_slot_is_clean(author_value, "author")
+            and bool(version_value or date_value or author_value)
+        ):
+            return start + 1
+    return None
+
+
+def unlabeled_header_ppt_slot_is_clean(value: str, slot: str) -> bool:
+    return unlabeled_header_slot_is_clean(
+        value,
+        slot,
+        clean_text=clean_cover_text,
+        normalize_label=normalize_document_number_label,
+        label_like_values=DOCUMENT_NUMBER_LABEL_LIKE_VALUES,
+        version_pattern=VERSION_PATTERN,
+        date_pattern=DATE_VALUE_PATTERN,
+    )
 
 
 def is_document_number_value_cell(value: str) -> bool:
@@ -496,6 +568,8 @@ def write_updated_ppt_document(
     old_project_title: str | None = None,
     new_project_title: str | None = None,
     output_path: Path | None = None,
+    *,
+    allow_missing_document_number: bool = False,
 ) -> tuple[str, Path, int, int, Path]:
     """PowerPoint OOXML 문서의 첫 표지값을 읽고 동일 텍스트 노드를 치환한다."""
     backup_path = backup_path_for(file_path)
@@ -515,7 +589,12 @@ def write_updated_ppt_document(
 
     cover = read_ppt_cover_identity(file_path)
     old_document_number = cover.document_number
-    project_titles_to_scan = unique_text_values(old_project_title or "", cover.project_title)
+    project_titles_to_scan = project_title_candidates_to_scan(
+        cover.preview_text,
+        new_project_title,
+        old_project_title or "",
+        cover.project_title,
+    )
 
     project_title_replace_count = 0
     document_number_replace_count = 0

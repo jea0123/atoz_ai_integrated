@@ -9,13 +9,16 @@ import zipfile
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape, unescape
 
+from .header_metadata import unlabeled_header_slot_is_clean
 from .patterns import OUTPUT_ID_PATTERN
+from .project_title_match import best_matching_project_title, is_project_title_label_text
 
 
 MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 XML_SPACE_ATTR = "{http://www.w3.org/XML/1998/namespace}space"
+CALC_CHAIN_PART = "xl/calcChain.xml"
 DOCUMENT_NUMBER_LABEL = "\ubb38\uc11c\ubc88\ud638"
 DOCUMENT_VERSION_VALUE = "v0.1"
 UNLABELED_HEADER_VERSION_VALUE = DOCUMENT_VERSION_VALUE
@@ -38,7 +41,7 @@ COVER_SHEET_HINT = "\ud45c\uc9c0"
 DRAWING_PARAGRAPH_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?p)\b[^>]*>.*?</(?P=tag)>", re.DOTALL)
 DRAWING_TEXT_PATTERN = re.compile(r"<(?P<tag>(?:\w+:)?t)\b[^>]*>(?P<text>.*?)</(?P=tag)>", re.DOTALL)
 VERSION_PATTERN = re.compile(r"^[vV]?\d+(?:\.\d+)*$")
-DATE_VALUE_PATTERN = re.compile(r"^\d{4}[-./]\d{1,2}[-./]\d{1,2}$")
+DATE_VALUE_PATTERN = re.compile(r"^\d{4}(?:[-./]\d{1,2}[-./]\d{1,2}|\s+\d{1,2}\s+\d{1,2})$")
 
 ET.register_namespace("", MAIN_NS)
 ET.register_namespace("r", REL_NS)
@@ -207,6 +210,10 @@ def is_document_version_label(value: str) -> bool:
     return label in {normalize_metadata_label(item) for item in DOCUMENT_VERSION_LABELS}
 
 
+def is_project_title_label(value: str) -> bool:
+    return is_project_title_label_text(value)
+
+
 def is_label_like_value(value: str) -> bool:
     label = normalize_metadata_label(clean_cover_value(value))
     return label in {normalize_metadata_label(item) for item in LABEL_LIKE_VALUES}
@@ -215,6 +222,8 @@ def is_label_like_value(value: str) -> bool:
 def meaningful_cover_value(value: str) -> str:
     cleaned = clean_cover_value(value)
     if not cleaned:
+        return ""
+    if is_project_title_label(cleaned):
         return ""
 
     noise_prefixes = (
@@ -251,7 +260,14 @@ def unique_cover_values(*values: str) -> list[str]:
     return result
 
 
-def infer_project_title_from_cover_cells(cells: list[CellInfo]) -> str:
+def infer_project_title_from_cover_cells(
+    cells: list[CellInfo],
+    expected_project_title: str | None = None,
+) -> str:
+    labeled_project_title = find_labeled_project_title_in_cells(cells)
+    if labeled_project_title:
+        return labeled_project_title
+
     document_rows = [
         cell.row
         for cell in cells
@@ -267,7 +283,45 @@ def infer_project_title_from_cover_cells(cells: list[CellInfo]) -> str:
         if value and value not in values:
             values.append(value)
 
-    return values[-2] if len(values) >= 2 else ""
+    if expected_project_title:
+        return best_matching_project_title(values, expected_project_title)
+    if document_rows and values:
+        return values[0]
+    return likely_unlabeled_project_title(values)
+
+
+def find_labeled_project_title_in_cells(cells: list[CellInfo]) -> str:
+    by_position = {(cell.row, cell.col): cell for cell in cells}
+    for cell in sorted(cells, key=lambda item: (item.row, item.col)):
+        if not is_project_title_label(cell.text):
+            continue
+        for col in range(cell.col + 1, cell.col + 6):
+            value = meaningful_cover_value(by_position.get((cell.row, col)).text if by_position.get((cell.row, col)) else "")
+            if value and not is_project_title_label(value):
+                return value
+
+    sorted_cells = sorted(cells, key=lambda item: (item.row, item.col))
+    for index, cell in enumerate(sorted_cells[:-1]):
+        value = clean_cover_value(cell.text)
+        match = re.search(r"^(?:사업명|프로젝트\s*명|프로젝트\s*제목)\s*[:：]\s*(.+)$", value)
+        if match:
+            candidate = meaningful_cover_value(match.group(1))
+            if candidate:
+                return candidate
+        if is_project_title_label(value):
+            for next_cell in sorted_cells[index + 1:index + 6]:
+                candidate = meaningful_cover_value(next_cell.text)
+                if candidate and not is_project_title_label(candidate):
+                    return candidate
+    return ""
+
+
+def likely_unlabeled_project_title(values: list[str], expected_project_title: str | None = None) -> str:
+    if not values:
+        return ""
+    if expected_project_title:
+        return best_matching_project_title(values, expected_project_title)
+    return values[-1] if len(values) >= 2 else ""
 
 
 def find_excel_cover_identity(file_path: Path) -> tuple[str, str]:
@@ -277,6 +331,7 @@ def find_excel_cover_identity(file_path: Path) -> tuple[str, str]:
         root = ET.fromstring(zf.read(sheet.path))
         cells = iter_cells(root, shared_strings)
 
+    labeled_project_title = find_labeled_project_title_in_cells(cells)
     values: list[str] = []
     document_rows = [
         cell.row
@@ -291,8 +346,15 @@ def find_excel_cover_identity(file_path: Path) -> tuple[str, str]:
         if value and value not in values:
             values.append(value)
 
+    if labeled_project_title:
+        document_title = next((value for value in values if value != labeled_project_title), "")
+        return labeled_project_title, document_title
+    if document_rows and len(values) >= 2:
+        return values[0], values[1]
     if len(values) >= 2:
-        return values[-2], values[-1]
+        project_title = likely_unlabeled_project_title(values)
+        document_title = next((value for value in values if value != project_title), "")
+        return project_title, document_title
     return "", ""
 
 
@@ -330,20 +392,20 @@ def element_prefix(tag: str) -> str:
 
 def cell_xml_pattern(cell_ref: str) -> re.Pattern[str]:
     return re.compile(
-        rf"<(?P<tag>(?:\w+:)?c)\b(?=[^>]*\br=\"{re.escape(cell_ref)}\")[^>]*(?:/>|>.*?</(?P=tag)>)",
+        rf"<(?P<tag>(?:\w+:)?c)\b(?=[^>]*\br=\"{re.escape(cell_ref)}\")[^>]*?(?:/>|>.*?</(?P=tag)>)",
         re.DOTALL,
     )
 
 
 def row_xml_pattern(row_index: int) -> re.Pattern[str]:
     return re.compile(
-        rf"<(?P<tag>(?:\w+:)?row)\b(?=[^>]*\br=\"{row_index}\")[^>]*(?:/>|>.*?</(?P=tag)>)",
+        rf"<(?P<tag>(?:\w+:)?row)\b(?=[^>]*\br=\"{row_index}\")[^>]*?(?:/>|>.*?</(?P=tag)>)",
         re.DOTALL,
     )
 
 
 def any_cell_xml_pattern() -> re.Pattern[str]:
-    return re.compile(r"<(?P<tag>(?:\w+:)?c)\b[^>]*(?:/>|>.*?</(?P=tag)>)", re.DOTALL)
+    return re.compile(r"<(?P<tag>(?:\w+:)?c)\b[^>]*?(?:/>|>.*?</(?P=tag)>)", re.DOTALL)
 
 
 def ref_from_cell_xml(cell_xml: str) -> str:
@@ -361,13 +423,21 @@ def inline_cell_xml(cell_ref: str, new_text: str, prefix: str = "") -> str:
     return f'<{prefix}c r="{cell_ref}" t="inlineStr">{inline_text_payload(prefix, new_text)}</{prefix}c>'
 
 
+def cell_xml_has_formula(cell_xml: str) -> bool:
+    return bool(re.search(r"<(?:\w+:)?f\b", cell_xml))
+
+
 def replace_cell_xml(cell_xml: str, new_text: str) -> str:
+    if cell_xml_has_formula(cell_xml):
+        return cell_xml
+
     start_match = re.match(r"<(?P<tag>(?:\w+:)?c)\b(?P<attrs>[^>]*)/?>?", cell_xml, re.DOTALL)
     if not start_match:
         raise RuntimeError("엑셀 셀 XML을 해석하지 못했습니다.")
 
     tag = start_match.group("tag")
-    attrs = re.sub(r'\s+t="[^"]*"', "", start_match.group("attrs"))
+    attrs = re.sub(r"/\s*$", "", start_match.group("attrs")).rstrip()
+    attrs = re.sub(r'\s+(?:t|cm|vm|ph)="[^"]*"', "", attrs)
     prefix = element_prefix(tag)
     return f"<{tag}{attrs} t=\"inlineStr\">{inline_text_payload(prefix, new_text)}</{tag}>"
 
@@ -424,11 +494,39 @@ def replace_or_insert_cell_xml(
     return sheet_xml[:row_match.start()] + updated_row + sheet_xml[row_match.end():]
 
 
+def rewrite_excel_part_for_modified_workbook(filename: str, data: bytes) -> bytes | None:
+    if filename == CALC_CHAIN_PART:
+        return None
+    if filename == "xl/_rels/workbook.xml.rels":
+        return strip_calc_chain_relationships(data.decode("utf-8", errors="ignore")).encode("utf-8")
+    if filename == "[Content_Types].xml":
+        return strip_calc_chain_content_type(data.decode("utf-8", errors="ignore")).encode("utf-8")
+    return data
+
+
+def strip_calc_chain_relationships(xml: str) -> str:
+    return re.sub(
+        r'<(?:\w+:)?Relationship\b(?=[^>]*(?:Type="[^"]*/calcChain"|Target="(?:/?xl/)?calcChain\.xml"))[^>]*/>\s*',
+        "",
+        xml,
+    )
+
+
+def strip_calc_chain_content_type(xml: str) -> str:
+    return re.sub(
+        r'<(?:\w+:)?Override\b(?=[^>]*PartName="/xl/calcChain\.xml")[^>]*/>\s*',
+        "",
+        xml,
+    )
+
+
 def build_updated_excel_cover_sheet(
     zf: zipfile.ZipFile,
     new_document_number: str,
     old_project_title: str | None,
     new_project_title: str | None,
+    *,
+    allow_missing_document_number: bool = False,
 ) -> tuple[str, bytes, str, int, int, list[str]]:
     shared_strings = read_shared_strings(zf)
     sheet = cover_sheet_ref(zf)
@@ -436,13 +534,12 @@ def build_updated_excel_cover_sheet(
     root = ET.fromstring(original_sheet_xml)
     cells = iter_cells(root, shared_strings)
 
-    project_count = 0
     old_document_number = ""
-    document_number_count = 0
-    updates: dict[str, tuple[int, int, str]] = {}
+    document_number_label_found = False
+    updates: dict[str, tuple[int, int, str, str]] = {}
     project_titles_to_scan = unique_cover_values(
         old_project_title or "",
-        infer_project_title_from_cover_cells(cells),
+        infer_project_title_from_cover_cells(cells, expected_project_title=new_project_title),
     )
 
     for info in cells:
@@ -453,20 +550,19 @@ def build_updated_excel_cover_sheet(
             and value in project_titles_to_scan
             and value != clean_cover_value(new_project_title)
         ):
-            updates[info.ref] = (info.row, info.col, new_project_title)
-            project_count += 1
+            updates[info.ref] = (info.row, info.col, new_project_title, "project")
 
     cell_by_ref = {info.ref: info for info in cells}
     for info in cells:
         if clean_cover_value(info.text) != DOCUMENT_NUMBER_LABEL:
             continue
 
+        document_number_label_found = True
         target_ref = f"{col_to_name(info.col + 1)}{info.row}"
         target_info = cell_by_ref.get(target_ref)
         old_document_number = clean_cover_value(target_info.text if target_info else "")
         if old_document_number != new_document_number:
-            updates[target_ref] = (info.row, info.col + 1, new_document_number)
-        document_number_count = 0 if old_document_number == new_document_number else 1
+            updates[target_ref] = (info.row, info.col + 1, new_document_number, "document")
         break
 
     cell_by_position = {(info.row, info.col): info for info in cells}
@@ -480,20 +576,29 @@ def build_updated_excel_cover_sheet(
         old_version = clean_cover_value(target_info.text if target_info else "")
         if is_label_like_value(old_version) or old_version == DOCUMENT_VERSION_VALUE:
             continue
-        updates[target_ref] = (info.row, target_col, DOCUMENT_VERSION_VALUE)
+        updates[target_ref] = (info.row, target_col, DOCUMENT_VERSION_VALUE, "version")
 
-    if not old_document_number and document_number_count == 0:
+    if not allow_missing_document_number and not document_number_label_found:
         raise RuntimeError("엑셀 표지에서 문서번호 오른쪽 칸을 찾지 못했습니다.")
 
     updated_xml_text = original_sheet_xml
-    for cell_ref, (row_index, col_index, value) in updates.items():
-        updated_xml_text = replace_or_insert_cell_xml(
+    project_count = 0
+    document_number_count = 0
+    for cell_ref, (row_index, col_index, value, kind) in updates.items():
+        next_xml_text = replace_or_insert_cell_xml(
             updated_xml_text,
             cell_ref,
             row_index,
             col_index,
             value,
         )
+        if next_xml_text == updated_xml_text:
+            continue
+        updated_xml_text = next_xml_text
+        if kind == "project":
+            project_count += 1
+        elif kind == "document":
+            document_number_count += 1
 
     return (
         sheet.path,
@@ -564,13 +669,16 @@ def replace_excel_sheet_header_values(
     document_number_count = 0
     version_count = 0
     for cell_ref, (row_index, col_index, value, kind) in updates.items():
-        updated_xml_text = replace_or_insert_cell_xml(
+        next_xml_text = replace_or_insert_cell_xml(
             updated_xml_text,
             cell_ref,
             row_index,
             col_index,
             value,
         )
+        if next_xml_text == updated_xml_text:
+            continue
+        updated_xml_text = next_xml_text
         if kind == "project":
             project_count += 1
         elif kind == "document":
@@ -590,35 +698,51 @@ def unlabeled_header_version_targets(cells: list[CellInfo]) -> list[tuple[str, i
     result: list[tuple[str, int, int, str]] = []
     for row_index in sorted(rows):
         row_cells = sorted(rows[row_index], key=lambda item: item.col)
-        row_values = [clean_cover_value(cell.text) for cell in row_cells]
-        output_cell = next((cell for cell in row_cells if OUTPUT_ID_PATTERN.search(clean_cover_value(cell.text))), None)
-        if output_cell is None:
+        if any(is_label_like_value(cell.text) for cell in row_cells):
             continue
+        by_col = {cell.col: cell for cell in row_cells}
 
-        date_cell = next(
-            (cell for cell in row_cells if DATE_VALUE_PATTERN.fullmatch(clean_cover_value(cell.text))),
-            None,
-        )
-        if date_cell is None:
-            continue
-
-        version_cell = next(
-            (
-                cell
-                for cell in row_cells
-                if cell.col < date_cell.col and VERSION_PATTERN.fullmatch(clean_cover_value(cell.text))
-            ),
-            None,
-        )
-        if version_cell is not None:
+        for version_cell in row_cells:
+            if not VERSION_PATTERN.fullmatch(clean_cover_value(version_cell.text)):
+                continue
+            if not unlabeled_header_excel_slot_is_clean(by_col.get(version_cell.col - 1), "code"):
+                continue
+            if not unlabeled_header_excel_slot_is_clean(by_col.get(version_cell.col + 1), "date"):
+                continue
+            if not unlabeled_header_excel_slot_is_clean(by_col.get(version_cell.col + 2), "author"):
+                continue
             result.append((version_cell.ref, version_cell.row, version_cell.col, version_cell.text))
-            continue
+            break
+        else:
+            date_cell = next(
+                (cell for cell in row_cells if DATE_VALUE_PATTERN.fullmatch(clean_cover_value(cell.text))),
+                None,
+            )
+            if date_cell is None:
+                continue
 
-        inferred_col = date_cell.col - 1
-        if inferred_col > output_cell.col:
-            result.append((f"{col_to_name(inferred_col)}{date_cell.row}", date_cell.row, inferred_col, ""))
+            inferred_col = date_cell.col - 1
+            if (
+                inferred_col > 0
+                and unlabeled_header_excel_slot_is_clean(by_col.get(inferred_col - 1), "code")
+                and unlabeled_header_excel_slot_is_clean(by_col.get(inferred_col), "version")
+                and unlabeled_header_excel_slot_is_clean(by_col.get(date_cell.col + 1), "author")
+            ):
+                result.append((f"{col_to_name(inferred_col)}{date_cell.row}", date_cell.row, inferred_col, ""))
 
     return result
+
+
+def unlabeled_header_excel_slot_is_clean(cell: CellInfo | None, slot: str) -> bool:
+    return unlabeled_header_slot_is_clean(
+        cell.text if cell else "",
+        slot,
+        clean_text=clean_cover_value,
+        normalize_label=normalize_metadata_label,
+        label_like_values=LABEL_LIKE_VALUES,
+        version_pattern=VERSION_PATTERN,
+        date_pattern=DATE_VALUE_PATTERN,
+    )
 
 
 def replace_excel_drawing_header_values(

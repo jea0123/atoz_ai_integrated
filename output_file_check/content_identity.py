@@ -5,6 +5,7 @@ from html import unescape
 from pathlib import Path
 import re
 
+from document_update.project_title_match import best_matching_project_title
 from document_update.hwpx_text import (
     extract_text_from_hwp_cover,
     extract_text_from_hwpx_cover,
@@ -144,6 +145,33 @@ def read_file_identity(file_path: Path) -> FileIdentity:
         document_number=find_document_number(text),
         preview_text=compact_space(text[:COVER_TEXT_CHARS]),
     )
+
+
+def find_matching_project_title(
+    document_text: str,
+    expected_project_title: str,
+    extra_candidates: tuple[str, ...] | list[str] = (),
+) -> str:
+    """표지 텍스트 후보 중 기준 프로젝트명과 같은 프로젝트로 보이는 값을 찾는다."""
+    expected = clean_project_title(expected_project_title)
+    if not expected:
+        return ""
+
+    candidates: list[str] = []
+    candidates.extend(extra_candidates)
+    lines = meaningful_lines(document_text[:COVER_TEXT_CHARS])
+    labeled_project_title = find_labeled_project_title(lines)
+    if labeled_project_title:
+        candidates.append(labeled_project_title)
+
+    for line in lines[:80]:
+        project_title, _document_title = split_project_and_document_title(cover_head_before_metadata(line))
+        if project_title:
+            candidates.append(project_title)
+            continue
+        candidates.append(clean_project_title(line))
+
+    return best_matching_project_title(candidates, expected)
 
 
 def read_ppt_file_identity(file_path: Path) -> FileIdentity:
@@ -473,7 +501,7 @@ def find_cover_identity(lines: list[str]) -> tuple[str, str]:
             if is_cover_value(value)
         ]
         if len(candidates) >= 2:
-            return clean_project_title(candidates[-2]), clean_document_title(candidates[-1])
+            return clean_project_title(candidates[0]), clean_document_title(candidates[1])
 
     candidates = [value for value in lines[:8] if is_cover_value(value)]
     if len(candidates) >= 2:

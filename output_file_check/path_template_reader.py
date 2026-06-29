@@ -137,6 +137,15 @@ def build_known_stage_templates(document_text: str) -> list[PathTemplate]:
             ]
         )
 
+    if "프로젝트종료" in compact or "03.프로젝트종료" in compact:
+        templates.extend(
+            [
+                make_template("완료보고서", "01.프로젝트 시작", "03.프로젝트 종료"),
+                make_template("사업완료보고서", "01.프로젝트 시작", "03.프로젝트 종료"),
+                make_template("프로젝트완료보고서", "01.프로젝트 시작", "03.프로젝트 종료"),
+            ]
+        )
+
     if "05.설계단계시험계획" in compact:
         templates.extend(
             [

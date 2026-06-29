@@ -1,7 +1,7 @@
 from pathlib import Path
 import unittest
 
-from output_file_check.folder_matching import match_files_by_folder_path
+from output_file_check.folder_matching import find_contiguous_subpath, match_files_by_folder_path
 from output_file_check.matcher import score_file
 from output_file_check.models import FileIdentity, ScannedFile, StandardOutput
 
@@ -21,6 +21,14 @@ class MatcherIgnoresOutputIdTest(unittest.TestCase):
 
         self.assertIsNotNone(candidate)
         self.assertEqual("파일명에 산출물명 포함", candidate.reason)
+
+    def test_filename_parenthetical_output_name_matches_plain_standard_name(self) -> None:
+        output = StandardOutput("MFDS-PMC-02", "요구사항추적표")
+        file = ScannedFile(Path("MFDS-PMC-02-요구사항추적표(검사기준포함)_v1.0.xlsx"))
+
+        candidate = score_file(output, file)
+
+        self.assertIsNotNone(candidate)
 
     def test_cover_output_id_does_not_match_wrong_output(self) -> None:
         output = StandardOutput("MFDS-PMC-06", "OtherDocument")
@@ -48,6 +56,12 @@ class MatcherIgnoresOutputIdTest(unittest.TestCase):
 
         self.assertEqual((), matched["OtherDocument"])
         self.assertEqual(file.path, matched["RiskRegister"][0].file.path)
+
+    def test_numbered_project_end_folder_matches_standard_template(self) -> None:
+        self.assertEqual(
+            0,
+            find_contiguous_subpath(("3.프로젝트 종료",), ("03.프로젝트 종료",)),
+        )
 
 
 if __name__ == "__main__":

@@ -685,7 +685,7 @@ def reset_program_source_root(dump_root: Path, source_root: Path) -> list[dict[s
                 "status": "error",
                 "folder_root": str(source_root),
                 "target_path": str(source_root),
-                "error": "결과 폴더 밖의 경로라 프로그램소스 폴더를 비우지 않았습니다.",
+                "error": "결과 폴더 밖의 경로라 프로그램소스 폴더를 준비하지 않았습니다.",
             }
         ]
 
@@ -695,28 +695,12 @@ def reset_program_source_root(dump_root: Path, source_root: Path) -> list[dict[s
                 "status": "error",
                 "folder_root": str(source_root),
                 "target_path": str(source_root),
-                "error": "프로그램소스 경로가 폴더가 아니라서 비우지 않았습니다.",
+                "error": "프로그램소스 경로가 폴더가 아니라서 준비하지 않았습니다.",
             }
         ]
 
     source_root.mkdir(parents=True, exist_ok=True)
-    reset_errors: list[dict[str, object]] = []
-    for child in source_root.iterdir():
-        try:
-            if child.is_dir() and not child.is_symlink():
-                shutil.rmtree(child)
-            else:
-                child.unlink()
-        except Exception as exc:
-            reset_errors.append(
-                {
-                    "status": "error",
-                    "folder_root": str(source_root),
-                    "target_path": str(child),
-                    "error": f"프로그램소스 기존 항목 삭제 실패: {exc}",
-                }
-            )
-    return reset_errors
+    return []
 
 
 def unique_requirement_ids(sources: list[RequirementSource]) -> tuple[str, ...]:

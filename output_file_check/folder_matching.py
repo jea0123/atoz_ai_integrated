@@ -8,7 +8,7 @@ from app_runtime import log_event, parse_json_object
 from document_update.ollama_client import generate
 from output_file_check.content_identity import extract_file_cover_text, find_document_number, read_file_identity
 from output_file_check.folder_policy import FolderPolicy, relative_parent_parts
-from output_file_check.matcher import score_file, strip_parenthetical_content
+from output_file_check.matcher import filename_core_matches_output, score_file, strip_parenthetical_content
 from output_file_check.models import FileIdentity, MatchCandidate, OutputMatch, PathTemplate, ScannedFile, StandardOutput
 from output_file_check.normalization import normalize_for_match, strip_attachment_tail
 
@@ -594,6 +594,15 @@ def ai_score_files_for_output(
     for index in selected_indexes:
         if index < 1 or index > len(files):
             continue
+        if not filename_core_matches_output(output, files[index - 1].path.stem):
+            log_event(
+                "ai_match.rejected_filename_core",
+                file=str(files[index - 1].path),
+                output_id=output.output_id,
+                output_name=output.output_name,
+                reason="filename_core_mismatch",
+            )
+            continue
         file = file_with_cover_identity(files[index - 1], output)
         candidate = MatchCandidate(
             output,
@@ -897,8 +906,8 @@ def find_contiguous_subpath(actual_path: tuple[str, ...], expected_path: tuple[s
     if not expected_path:
         return -1
 
-    actual_keys = [normalize_for_match(part) for part in actual_path]
-    expected_keys = [normalize_for_match(part) for part in expected_path]
+    actual_keys = [normalize_path_part_for_template(part) for part in actual_path]
+    expected_keys = [normalize_path_part_for_template(part) for part in expected_path]
     expected_length = len(expected_keys)
 
     for index in range(0, len(actual_keys) - expected_length + 1):
@@ -910,3 +919,8 @@ def find_contiguous_subpath(actual_path: tuple[str, ...], expected_path: tuple[s
 def normalize_for_check_key(value: str) -> str:
     """산출물명/별칭을 딕셔너리 key로 쓰기 위해 같은 정규화 규칙을 적용한다."""
     return normalize_for_match(value)
+
+
+def normalize_path_part_for_template(value: str) -> str:
+    text = re.sub(r"^\s*\d+[.)_-]?\s*", "", str(value))
+    return normalize_for_match(text)

@@ -1,6 +1,8 @@
 from pathlib import Path
 import unittest
 
+from output_file_check.path_template_reader import read_path_templates
+from output_file_check.models import StandardOutput
 from output_file_check.standard_reader import extract_output_section, read_standard_outputs
 
 
@@ -156,6 +158,18 @@ class StandardReaderManagementSectionTest(unittest.TestCase):
 
         self.assertEqual(["MFDS-ADT-A0401-01"], [output.output_id for output in outputs])
         self.assertEqual(["단위시험케이스"], [output.output_name for output in outputs])
+
+    def test_project_end_stage_adds_completion_report_template(self) -> None:
+        templates = read_path_templates(
+            Path("standard.pdf"),
+            [StandardOutput("MFDS-END-01", "완료보고서")],
+            "구분 폴더명/문서명\n01.프로젝트 시작\n03.프로젝트 종료\n완료보고서",
+        )
+
+        self.assertIn(
+            ("01.프로젝트 시작", "03.프로젝트 종료"),
+            [template.template_path for template in templates],
+        )
 
 
 if __name__ == "__main__":

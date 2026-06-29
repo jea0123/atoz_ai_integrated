@@ -18,7 +18,7 @@ if (header) {
     `  <nav class="app-nav-tabs" aria-label="${text("screenSelect")}" style="display:flex;align-items:center;gap:6px;">`,
     `    <a href="/management.html" style="${tabStyle(active === "management")}">${text("managementTab")}</a>`,
     `    <a href="/check.html" style="${tabStyle(active === "check")}">${text("developmentTab")}</a>`,
-    `    <a href="/metadata.html" style="${tabStyle(active === "metadata")}">${text("metadataTab")}</a>`,
+//    `    <a href="/metadata.html" style="${tabStyle(active === "metadata")}">${text("metadataTab")}</a>`,
     `     <a href="/qa.html" style="${tabStyle(active === "qa")}">QA ${text("generation")}</a>`,
     `  </nav>`,
     `  <div class="status-pill" id="${escapeHeaderHtml(statusId)}">${text("standby")}</div>`,
@@ -28,12 +28,12 @@ if (header) {
 
 function text(key) {
   const labels = {
-    screenSelect: "\uD654\uBA74 \uC120\uD0DD",
-    developmentTab: "\uAC1C\uBC1C\uC0B0\uCD9C\uBB3C",
-    managementTab: "\uAD00\uB9AC\uC0B0\uCD9C\uBB3C",
-    metadataTab: "\uBA54\uD0C0\uB370\uC774\uD130",
-    generation: "\uC0DD\uC131",
-    standby: "\uB300\uAE30",
+    screenSelect: "화면 선택",
+    developmentTab: "개발산출물",
+    managementTab: "관리산출물",
+    metadataTab: "메타데이터",
+    generation: "생성",
+    standby: "대기",
   };
   return labels[key] || "";
 }
