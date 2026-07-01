@@ -152,10 +152,104 @@ h2 {
   color: var(--green);
 }
 
+.status-pill.warn {
+  border-color: #e9bc5e;
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
 .status-pill.error {
   border-color: #ef9aa7;
   background: var(--red-soft);
   color: var(--red);
+}
+
+.template-download-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.template-download-list a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid #bcd1ef;
+  border-radius: 8px;
+  background: #f4f8ff;
+  color: #1746a2;
+  font-size: 12px;
+  font-weight: 900;
+  text-decoration: none;
+}
+
+.template-table td {
+  vertical-align: top;
+}
+
+.template-table {
+  min-width: 0;
+}
+
+.template-table th:nth-child(1) {
+  width: 30%;
+}
+
+.template-table th:nth-child(2) {
+  width: 30%;
+}
+
+.template-table th:nth-child(3) {
+  width: 24%;
+}
+
+.template-table th:nth-child(4) {
+  width: 16%;
+}
+
+.template-table td strong,
+.template-table td small {
+  display: block;
+}
+
+.template-table td small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  word-break: break-all;
+}
+
+.template-cover-type,
+.template-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 950;
+  text-transform: uppercase;
+}
+
+.template-cover-type {
+  border: 1px solid #c6d4ea;
+  background: #f7faff;
+  color: #50637e;
+}
+
+.template-status.ok {
+  border: 1px solid #92d2b4;
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.template-status.warn {
+  border: 1px solid #e9bc5e;
+  background: var(--amber-soft);
+  color: var(--amber);
 }
 
 .layout {
@@ -213,6 +307,26 @@ h2 {
   border: 1px solid #d7e1ee;
   border-radius: 12px;
   background: #f8fbff;
+}
+
+.template-brief {
+  display: grid;
+  gap: 6px;
+  margin: 0 16px;
+  padding: 12px;
+  border: 1px solid #d7e1ee;
+  border-radius: 12px;
+  background: #f8fbff;
+}
+
+.template-brief strong {
+  font-size: 14px;
+}
+
+.template-brief p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .mode-toggle legend {
@@ -1370,6 +1484,47 @@ body {
   background: #ffffff;
 }
 
+.template-meta-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 0 14px;
+  padding: 10px;
+  border: 1px solid #d7e1ee;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.template-meta-fields label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.template-meta-fields label:first-child {
+  grid-column: 1 / -1;
+}
+
+.template-meta-fields span {
+  color: #334155;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.template-meta-fields input {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  border: 1px solid #d4dce8;
+  border-radius: 8px;
+  background: #f8fbff;
+  color: var(--ink);
+  padding: 0 10px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 800;
+}
+
 .mode-summary {
   padding: 9px;
 }
@@ -1380,6 +1535,15 @@ body {
   margin: 0 14px;
   padding: 12px;
   background: #ffffff;
+}
+
+.drop-zone strong {
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.drop-zone small {
+  overflow-wrap: anywhere;
 }
 
 .drop-zone.folder {
@@ -1675,6 +1839,14 @@ body {
 }
 
 @media (max-width: 780px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .control-panel {
+    position: static;
+  }
+
   .candidate-row {
     grid-template-columns: 22px 22px minmax(0, 1fr);
   }
@@ -1785,4 +1957,43 @@ body {
 .source-badge.ai {
   background: #edeaf7;
   color: var(--violet);
+}
+
+.app-nav-tabs {
+  max-width: 100%;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.topbar-actions {
+  min-width: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* 템플릿 화면도 기존 작업 화면처럼 왼쪽 입력, 오른쪽 결과 구조를 따른다. */
+.layout.template-layout {
+  grid-template-columns: minmax(300px, 328px) minmax(0, 1fr) !important;
+  align-items: start;
+}
+
+.template-layout .control-panel {
+  position: sticky;
+  top: 10px;
+  width: auto;
+}
+
+.template-layout .result-panel {
+  min-width: 0;
+  width: auto;
+}
+
+@media (max-width: 1060px) {
+  .layout.template-layout {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .template-layout .control-panel {
+    position: static;
+  }
 }

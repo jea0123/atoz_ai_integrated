@@ -27,7 +27,6 @@ from .excel_ooxml import (
 from .header_metadata import (
     has_unlabeled_metadata_signal as shared_has_unlabeled_metadata_signal,
     unlabeled_author_value_ok,
-    unlabeled_document_code_value_ok,
     unlabeled_header_metadata_indexes as shared_unlabeled_header_metadata_indexes,
     unlabeled_header_slot_is_clean,
 )
@@ -424,16 +423,6 @@ def looks_like_unlabeled_document_code_slot(value: str) -> bool:
         normalize_label=normalize_label,
         label_like_values=LABEL_LIKE_VALUES,
         version_pattern=VERSION_PATTERN,
-        date_pattern=DATE_VALUE_PATTERN,
-    )
-
-
-def looks_like_unlabeled_document_code_value(value: str) -> bool:
-    return unlabeled_document_code_value_ok(
-        value,
-        clean_text=clean_text,
-        normalize_label=normalize_label,
-        label_like_values=LABEL_LIKE_VALUES,
         date_pattern=DATE_VALUE_PATTERN,
     )
 

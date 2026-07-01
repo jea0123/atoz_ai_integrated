@@ -110,26 +110,6 @@ def unlabeled_header_slot_is_clean(
     )
 
 
-def unlabeled_document_code_value_ok(
-    value: str,
-    *,
-    clean_text: TextCleaner,
-    normalize_label: LabelNormalizer,
-    label_like_values: Iterable[str],
-    date_pattern: re.Pattern[str],
-) -> bool:
-    text = clean_text(value)
-    return (
-        bool(text)
-        and not _is_label_like(
-            text,
-            normalize_label=normalize_label,
-            label_like_keys=normalized_label_values(label_like_values, normalize_label),
-        )
-        and not date_pattern.fullmatch(text)
-    )
-
-
 def unlabeled_author_value_ok(
     value: str,
     *,

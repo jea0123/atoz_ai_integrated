@@ -30,10 +30,11 @@ REQUIREMENT_LIST_MARKER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 TOLERANT_REQUIREMENT_ID_PATTERN = re.compile(
-    r"(?<![A-Z0-9])S\s*F\s*R\s*[-_\s]*"
-    r"(?P<body>[A-Z0-9]+(?:[-_\s]+[A-Z0-9]+)*[-_\s]+\d+)(?![A-Z0-9])",
+    r"(?<![A-Z0-9])S\s*F\s*R\s*[-_]\s*"
+    r"(?P<body>(?:[A-Z0-9]+\s*[-_]\s*)*\d+)(?![A-Z0-9])",
     re.IGNORECASE,
 )
+STRICT_REQUIREMENT_ID_PATTERN = re.compile(r"(?<![A-Z0-9])SFR-(?:[A-Z0-9]+-)*\d+(?![A-Z0-9])", re.IGNORECASE)
 REQUIREMENT_LIST_WINDOW_CHARS = 100_000
 
 
@@ -217,8 +218,9 @@ def save_proposal_requirement_uploads(
             )
             continue
 
-        requirement_ids = extract_requirement_ids_from_proposal_text(text)
-        if not requirement_ids:
+        requirement_match_details = extract_requirement_id_match_details_from_proposal_text(text)
+        requirement_matches = requirement_match_details["kept"]
+        if not requirement_matches:
             saved_paths.append(
                 write_requirement_marker(
                     marker_dir,
@@ -228,7 +230,8 @@ def save_proposal_requirement_uploads(
             )
             continue
 
-        for requirement_id in requirement_ids:
+        for match_info in requirement_matches:
+            requirement_id = str(match_info["requirement_id"])
             if requirement_id in seen_ids:
                 continue
             seen_ids.add(requirement_id)
@@ -236,7 +239,30 @@ def save_proposal_requirement_uploads(
                 write_requirement_marker(
                     marker_dir,
                     f"{requirement_id}.txt",
-                    f"source: {filename}\nrequirement_id: {requirement_id}",
+                    "\n".join(
+                        [
+                            f"source: {filename}",
+                            f"requirement_id: {requirement_id}",
+                            f"matched_text: {match_info.get('matched_text', '')}",
+                            f"context: {match_info.get('context', '')}",
+                        ]
+                    ),
+                )
+            )
+        for ignored_index, ignored_match in enumerate(requirement_match_details["ignored"], start=1):
+            saved_paths.append(
+                write_requirement_marker(
+                    marker_dir,
+                    f"ID제외_{index}_{ignored_index}.txt",
+                    "\n".join(
+                        [
+                            f"source: {filename}",
+                            f"ignored_requirement_id: {ignored_match.get('requirement_id', '')}",
+                            f"matched_text: {ignored_match.get('matched_text', '')}",
+                            f"context: {ignored_match.get('context', '')}",
+                            f"ignore_reason: {ignored_match.get('ignore_reason', '')}",
+                        ]
+                    ),
                 )
             )
 
@@ -258,12 +284,12 @@ def extract_proposal_text(path: Path) -> str:
     return extract_document_text(path)
 
 
-def extract_requirement_ids_from_proposal_text(text: str) -> tuple[str, ...]:
+def extract_requirement_id_match_details_from_proposal_text(text: str) -> dict[str, list[dict[str, str]]]:
     # 요구사항목록표 주변을 우선 보고, 표제가 잘 안 잡히면 문서 전체에서 SFR ID를 찾는다.
     normalized_text = normalize_requirement_text(text)
     section_text = requirement_list_section(normalized_text)
-    ids = extract_requirement_ids_from_text(section_text) if section_text else ()
-    return ids or extract_requirement_ids_from_text(normalized_text)
+    details = extract_requirement_id_match_details_from_text(section_text) if section_text else empty_requirement_match_details()
+    return details if details["kept"] else extract_requirement_id_match_details_from_text(normalized_text)
 
 
 def normalize_requirement_text(text: str) -> str:
@@ -286,27 +312,125 @@ def requirement_list_section(text: str) -> str:
 
 
 def extract_requirement_ids_from_text(text: str) -> tuple[str, ...]:
-    seen: set[str] = set()
-    found: list[tuple[int, str]] = []
-    result: list[str] = []
+    return tuple(item["requirement_id"] for item in extract_requirement_id_match_details_from_text(text)["kept"])
 
-    for match in re.finditer(r"(?<![A-Z0-9])SFR-(?:[A-Z0-9]+-)*\d+(?![A-Z0-9])", text, re.IGNORECASE):
-        found.append((match.start(), match.group(0).upper()))
+
+def extract_requirement_id_match_details_from_text(text: str) -> dict[str, list[dict[str, str]]]:
+    seen: set[str] = set()
+    found: list[tuple[int, int, str, str]] = []
+    candidates: list[dict[str, str]] = []
+
+    for match in STRICT_REQUIREMENT_ID_PATTERN.finditer(text):
+        found.append((match.start(), match.end(), match.group(0).upper(), match.group(0)))
 
     for match in TOLERANT_REQUIREMENT_ID_PATTERN.finditer(text):
-        body = re.sub(r"[^A-Za-z0-9]+", "-", match.group("body")).strip("-")
+        body = re.sub(r"\s*[-_]\s*", "-", match.group("body")).strip("-")
         requirement_id = f"SFR-{body}".upper()
         if not extract_requirement_ids(requirement_id):
             continue
-        found.append((match.start(), requirement_id))
+        found.append((match.start(), match.end(), requirement_id, match.group(0)))
 
-    for _position, requirement_id in sorted(found, key=lambda item: item[0]):
+    for start, end, requirement_id, matched_text in sorted(found, key=lambda item: item[0]):
         if requirement_id in seen:
             continue
-        result.append(requirement_id)
+        candidates.append(
+            {
+                "requirement_id": requirement_id,
+                "matched_text": compact_match_text(matched_text),
+                "context": match_context(text, start, end),
+            }
+        )
         seen.add(requirement_id)
 
-    return tuple(result)
+    return split_requirement_id_shape_conflicts(candidates)
+
+
+def empty_requirement_match_details() -> dict[str, list[dict[str, str]]]:
+    return {"kept": [], "ignored": []}
+
+
+def split_requirement_id_shape_conflicts(matches: list[dict[str, str]]) -> dict[str, list[dict[str, str]]]:
+    if len(matches) < 2:
+        return {"kept": matches, "ignored": []}
+
+    shape_counts: dict[tuple[str, ...], int] = {}
+    for item in matches:
+        shape = requirement_id_shape(str(item.get("requirement_id") or ""))
+        shape_counts[shape] = shape_counts.get(shape, 0) + 1
+    dominant_shape, dominant_count = max(shape_counts.items(), key=lambda item: item[1])
+    if dominant_count < 2 or list(shape_counts.values()).count(dominant_count) > 1:
+        return {"kept": matches, "ignored": []}
+
+    dominant_ids = [
+        str(item.get("requirement_id") or "")
+        for item in matches
+        if requirement_id_shape(str(item.get("requirement_id") or "")) == dominant_shape
+    ]
+    kept: list[dict[str, str]] = []
+    ignored: list[dict[str, str]] = []
+    for item in matches:
+        requirement_id = str(item.get("requirement_id") or "")
+        if requirement_id_shape(requirement_id) == dominant_shape:
+            kept.append(item)
+            continue
+        reason = shape_conflict_reason(requirement_id, dominant_ids)
+        if reason:
+            ignored.append({**item, "ignore_reason": reason})
+        else:
+            kept.append(item)
+    return {"kept": kept, "ignored": ignored}
+
+
+def requirement_id_shape(requirement_id: str) -> tuple[str, ...]:
+    parts = requirement_id.upper().split("-")
+    return tuple(requirement_id_segment_shape(part) for part in parts)
+
+
+def requirement_id_segment_shape(part: str) -> str:
+    if part.isdigit():
+        return "N"
+    if part.isalpha():
+        return "A"
+    return "X"
+
+
+def shape_conflict_reason(requirement_id: str, dominant_ids: list[str]) -> str:
+    for dominant_id in dominant_ids:
+        if prefix_related_requirement_ids(requirement_id, dominant_id):
+            return f"다수 ID 형태와 다르고 {dominant_id}와 접두 관계라 제외"
+        if same_last_number(requirement_id, dominant_id):
+            return f"다수 ID 형태와 다르고 {dominant_id}와 마지막 숫자가 같아 제외"
+    return ""
+
+
+def prefix_related_requirement_ids(left: str, right: str) -> bool:
+    left_key = left.upper()
+    right_key = right.upper()
+    return left_key.startswith(f"{right_key}-") or right_key.startswith(f"{left_key}-")
+
+
+def same_last_number(left: str, right: str) -> bool:
+    left_number = last_requirement_number(left)
+    right_number = last_requirement_number(right)
+    return left_number is not None and left_number == right_number
+
+
+def last_requirement_number(requirement_id: str) -> int | None:
+    parts = requirement_id.upper().split("-")
+    for part in reversed(parts):
+        if part.isdigit():
+            return int(part)
+    return None
+
+
+def compact_match_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value or "").strip()
+
+
+def match_context(text: str, start: int, end: int, window: int = 80) -> str:
+    left = max(0, start - window)
+    right = min(len(text), end + window)
+    return compact_match_text(text[left:right])
 
 
 def write_requirement_marker(marker_dir: Path, filename: str, text: str) -> Path:
