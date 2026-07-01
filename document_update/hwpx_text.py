@@ -516,7 +516,7 @@ def register_hwp_security_module(hwp: object) -> bool:
 
 def open_hwp_document(hwp: object, file_path: Path) -> None:
     """한글 버전별로 다른 Open 인자 형식을 순서대로 시도한다."""
-    path = str(file_path)
+    path = str(file_path.resolve(strict=False))
     if is_ole_hwp(file_path):
         attempts = (
             lambda: hwp.Open(path, "", ""),

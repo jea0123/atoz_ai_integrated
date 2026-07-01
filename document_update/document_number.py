@@ -19,10 +19,7 @@ from .excel_ooxml import (
     workbook_sheets,
 )
 from .header_metadata import (
-    unlabeled_author_value_ok,
-    unlabeled_document_code_value_ok,
     unlabeled_header_metadata_indexes as shared_unlabeled_header_metadata_indexes,
-    unlabeled_header_slot_is_clean,
 )
 from .hwpx_text import is_hwpx_zip, strip_hwpx_line_seg_arrays
 from .patterns import (
@@ -432,75 +429,6 @@ def replace_unlabeled_header_version_block(header_xml: str) -> tuple[str, int]:
 def unlabeled_header_metadata_indexes(values: list[str]) -> tuple[int, int, int, int] | None:
     return shared_unlabeled_header_metadata_indexes(
         values,
-        clean_text=clean_text_node_value,
-        normalize_label=normalize_document_number_label,
-        label_like_values=DOCUMENT_NUMBER_LABEL_LIKE_VALUES,
-        version_pattern=VERSION_PATTERN,
-        date_pattern=DATE_VALUE_PATTERN,
-    )
-
-
-def looks_like_unlabeled_document_number_code_slot(value: str) -> bool:
-    return unlabeled_header_slot_is_clean(
-        value,
-        "code",
-        clean_text=clean_text_node_value,
-        normalize_label=normalize_document_number_label,
-        label_like_values=DOCUMENT_NUMBER_LABEL_LIKE_VALUES,
-        version_pattern=VERSION_PATTERN,
-        date_pattern=DATE_VALUE_PATTERN,
-    )
-
-
-def looks_like_unlabeled_document_number_code_value(value: str) -> bool:
-    return unlabeled_document_code_value_ok(
-        value,
-        clean_text=clean_text_node_value,
-        normalize_label=normalize_document_number_label,
-        label_like_values=DOCUMENT_NUMBER_LABEL_LIKE_VALUES,
-        date_pattern=DATE_VALUE_PATTERN,
-    )
-
-
-def looks_like_unlabeled_document_number_version_slot(value: str) -> bool:
-    return unlabeled_header_slot_is_clean(
-        value,
-        "version",
-        clean_text=clean_text_node_value,
-        normalize_label=normalize_document_number_label,
-        label_like_values=DOCUMENT_NUMBER_LABEL_LIKE_VALUES,
-        version_pattern=VERSION_PATTERN,
-        date_pattern=DATE_VALUE_PATTERN,
-    )
-
-
-def looks_like_unlabeled_document_number_date_slot(value: str) -> bool:
-    return unlabeled_header_slot_is_clean(
-        value,
-        "date",
-        clean_text=clean_text_node_value,
-        normalize_label=normalize_document_number_label,
-        label_like_values=DOCUMENT_NUMBER_LABEL_LIKE_VALUES,
-        version_pattern=VERSION_PATTERN,
-        date_pattern=DATE_VALUE_PATTERN,
-    )
-
-
-def looks_like_unlabeled_document_number_author_slot(value: str) -> bool:
-    return unlabeled_header_slot_is_clean(
-        value,
-        "author",
-        clean_text=clean_text_node_value,
-        normalize_label=normalize_document_number_label,
-        label_like_values=DOCUMENT_NUMBER_LABEL_LIKE_VALUES,
-        version_pattern=VERSION_PATTERN,
-        date_pattern=DATE_VALUE_PATTERN,
-    )
-
-
-def looks_like_unlabeled_document_number_author_value(value: str) -> bool:
-    return unlabeled_author_value_ok(
-        value,
         clean_text=clean_text_node_value,
         normalize_label=normalize_document_number_label,
         label_like_values=DOCUMENT_NUMBER_LABEL_LIKE_VALUES,

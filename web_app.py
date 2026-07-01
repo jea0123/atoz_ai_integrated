@@ -30,6 +30,7 @@ from app_runtime import (
     runtime_mode_payload,
 )
 from output_file_check.folder_workflow import run_web_check, run_web_folder_apply
+from output_file_check.template_workflow import run_template_build
 from web_uploads import parse_multipart_items, safe_upload_filename
 from document_update.metadata_workflow import (
     apply_metadata_to_existing_dump,
@@ -542,6 +543,14 @@ class WebHandler(BaseHTTPRequestHandler):
             self.serve_file(WEB_DIR / "management.html")
             return
 
+        if request_path in {"/management-template", "/management-template.html"}:
+            self.serve_file(WEB_DIR / "management-template.html")
+            return
+
+        if request_path in {"/development-template", "/development-template.html"}:
+            self.serve_file(WEB_DIR / "development-template.html")
+            return
+
         if request_path in {"/qa", "/qa.html"}:
             self.serve_file(WEB_DIR / "qa.html")
             return
@@ -585,6 +594,10 @@ class WebHandler(BaseHTTPRequestHandler):
             self.handle_run_qa_folder_post()
             return
 
+        if request_path == "/api/template-build":
+            self.handle_template_build_post()
+            return
+
         if request_path == "/api/metadata-preview":
             self.handle_metadata_preview_post()
             return
@@ -624,6 +637,41 @@ class WebHandler(BaseHTTPRequestHandler):
             },
             status=499,
         )
+
+    def handle_template_build_post(self) -> None:
+        temp_dir: Path | None = None
+        request_id = ""
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            content_type = self.headers.get("Content-Type", "")
+            body = self.rfile.read(content_length)
+            log_event("template.build.post", content_length=content_length, content_type=content_type)
+            fields, file_items = parse_multipart_items(content_type, body)
+            request_id, check_cancel = self.begin_cancelable_request(fields)
+            temp_dir = TEMP_DIR / f"template-build-{request_id}"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            check_cancel()
+            payload = run_template_build(
+                fields,
+                file_items,
+                temp_dir=temp_dir,
+                result_dir=RESULT_DIR,
+            )
+            check_cancel()
+            if payload.get("applied"):
+                attach_file_downloads(payload)
+                attach_folder_zip_download(payload, prefix="template-output")
+            self.send_json(payload)
+        except CancelledRequest as exc:
+            log_event("template.build.cancelled", request_id=exc.request_id)
+            self.send_cancelled_json(exc.request_id)
+        except Exception as exc:
+            log_event("template.build.error", error=str(exc), traceback=traceback.format_exc())
+            self.send_json({"ok": False, "error": str(exc), "items": []}, status=400)
+        finally:
+            unregister_request(request_id)
+            if temp_dir is not None:
+                remove_runtime_path(temp_dir)
 
     def handle_metadata_preview_post(self) -> None:
         temp_dir: Path | None = None

@@ -14,6 +14,7 @@ from output_file_check.requirement_generation import (
     should_require_template_requirement_id,
     template_has_requirement_id_tail,
 )
+from web_uploads import extract_requirement_id_match_details_from_text, extract_requirement_ids_from_text
 
 
 class RequirementGenerationTemplateSelectionTest(unittest.TestCase):
@@ -47,6 +48,25 @@ class RequirementGenerationTemplateSelectionTest(unittest.TestCase):
         self.assertEqual((), extract_requirement_ids("REQ-001.txt"))
         self.assertEqual((), extract_requirement_ids("MFDS-PMC-06-RiskRegister_UIR-001_v1.0.xlsx"))
         self.assertEqual(("SFR-001",), extract_requirement_ids("MFDS-PMC-06-RiskRegister_SFR-001_v1.0.xlsx"))
+
+    def test_proposal_requirement_ids_do_not_join_whitespace_cells(self) -> None:
+        text = "요구사항목록표 SFR OOO 13 SFR-001 SFR-ESS-002 S F R - IIL - 003"
+
+        self.assertEqual(
+            ("SFR-001", "SFR-ESS-002", "SFR-IIL-003"),
+            extract_requirement_ids_from_text(text),
+        )
+        self.assertEqual(("SFR-OOO-13",), extract_requirement_ids_from_text("SFR-OOO-13"))
+
+    def test_proposal_requirement_ids_ignore_shape_conflict_candidates(self) -> None:
+        details = extract_requirement_id_match_details_from_text("SFR-001 SFR-002 SFR-013 SFR-OOO-13")
+
+        self.assertEqual(
+            ["SFR-001", "SFR-002", "SFR-013"],
+            [item["requirement_id"] for item in details["kept"]],
+        )
+        self.assertEqual(["SFR-OOO-13"], [item["requirement_id"] for item in details["ignored"]])
+        self.assertIn("SFR-013", details["ignored"][0]["ignore_reason"])
 
     def test_strict_applied_selection_skips_non_requirement_template(self) -> None:
         template = Path("MFDS-PMC-06-RiskRegister_v1.0.xlsx")

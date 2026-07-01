@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>개발산출물 템플릿 매칭</title>
+  <link rel="stylesheet" href="/static/check.css?v=20260629-template-meta">
+</head>
+<body>
+  <main class="app-shell">
+    <section class="workspace" aria-label="개발산출물 템플릿 매칭">
+      <header
+        class="topbar"
+        data-app-header
+        data-active="developmentTemplate"
+        data-eyebrow="Template Builder"
+        data-title="개발산출물 템플릿 매칭"
+        data-status-id="statusBadge"
+      ></header>
+
+      <section class="layout template-layout">
+        <form id="templateForm" class="control-panel" data-category="development">
+          <input type="hidden" name="artifact_category" value="development">
+
+          <div class="panel-head">
+            <h2>입력</h2>
+            <span>개발</span>
+          </div>
+
+          <section class="template-brief">
+            <strong>표준 ID + 입력 표지 + 템플릿 본문</strong>
+            <p>문서관리표준의 산출물 ID를 읽고, 입력 산출물과 templates\개발산출물 본문을 매칭합니다.</p>
+          </section>
+
+          <label class="drop-zone" for="standardFile">
+            <input id="standardFile" name="standard_file" type="file" accept=".pdf,.hwp,.hwpx">
+            <span class="file-mark">STD</span>
+            <strong>문서관리표준</strong>
+            <small id="standardName">산출물 ID를 읽습니다</small>
+          </label>
+
+          <label class="drop-zone folder" for="artifactFiles">
+            <input id="artifactFiles" name="artifact_files" type="file" webkitdirectory directory multiple>
+            <span class="file-mark">ART</span>
+            <strong>산출물 입력폴더</strong>
+            <small id="templateName">표지를 읽을 개발산출물을 선택하세요</small>
+          </label>
+
+          <label class="drop-zone" for="requirementFiles">
+            <input id="requirementFiles" name="requirement_files" type="file" multiple>
+            <span class="file-mark">REQ</span>
+            <strong>요구사항 파일명</strong>
+            <small id="requirementName">선택 시 파일명에서 SFR ID를 읽습니다</small>
+          </label>
+
+          <section class="template-meta-fields" aria-label="개정 정보">
+            <label>
+              <span>개정일자</span>
+              <input name="revision_date" type="text" inputmode="numeric" value="2026" placeholder="2026">
+            </label>
+            <label>
+              <span>작성자</span>
+              <input name="author" type="text" value="조현정" placeholder="작성자">
+            </label>
+            <label>
+              <span>승인자</span>
+              <input name="approver" type="text" value="현정조" placeholder="승인자">
+            </label>
+          </section>
+
+          <button class="primary-button" id="runButton" type="submit">
+            <span>↻</span>
+            템플릿 매칭
+          </button>
+
+          <button class="secondary-button" id="applyButton" type="button">
+            <span>↯</span>
+            덤프 후 반영
+          </button>
+        </form>
+
+        <section class="result-panel template-result-panel">
+          <div class="summary-grid" id="summaryGrid">
+            <div><span>표준 ID</span><strong id="templateCount">-</strong></div>
+            <div><span>입력 산출물</span><strong id="outputCount">-</strong></div>
+            <div><span>요구사항</span><strong id="requirementCount">-</strong></div>
+            <div><span>상태</span><strong id="buildState">대기</strong></div>
+          </div>
+
+          <div class="result-toolbar">
+            <div>
+              <h2>매칭 결과</h2>
+              <p id="resultMeta">문서관리표준과 산출물 입력폴더를 선택하세요.</p>
+            </div>
+          </div>
+
+          <section class="apply-report template-downloads" id="downloadPanel" hidden></section>
+
+          <div class="audit-table-shell">
+            <table class="audit-table template-table">
+              <thead>
+                <tr>
+                  <th>입력 산출물</th>
+                  <th>매칭 템플릿</th>
+                  <th>문서 정보</th>
+                  <th>상태</th>
+                </tr>
+              </thead>
+              <tbody id="templateRows"></tbody>
+            </table>
+          </div>
+
+          <p class="empty" id="emptyState">아직 생성 결과가 없습니다.</p>
+
+          <div class="loading-overlay" id="loadingOverlay" hidden>
+            <div class="loading-card">
+              <span class="loader"></span>
+              <strong>템플릿 매칭 준비 중</strong>
+              <p>입력 산출물 표지를 읽고 본문 템플릿과 연결하고 있습니다.</p>
+            </div>
+          </div>
+        </section>
+      </section>
+    </section>
+  </main>
+
+  <script src="/static/header.js?v=20260629-template-stack"></script>
+  <script src="/static/template.js?v=20260629-template-meta"></script>
+</body>
+</html>
