@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from openpyxl import load_workbook
 
-from app_runtime import TEMP_DIR, log_event, log_message, remove_runtime_path
+from app_runtime import RESULT_DIR, TEMP_DIR, log_event, log_message, remove_runtime_path
 from cancellation import CancelledRequest
 from document_update.hwpx_text import extract_document_text
 from qa_generation.generate_tc import extract_cover_author_from_document, generate_test_cases
@@ -21,11 +21,12 @@ from qa_generation.generate_ts import generate_integration_test_results, generat
 from web_uploads import safe_relative_upload_path
 
 
-IGNORED_FOLDER_NAMES = {"bak", "backup", "백업", "원본"}
-DESIGN_DOCUMENT_SUFFIXES = {".hwp", ".hwpx", ".pdf"}
+IGNORED_FOLDER_NAMES = {"bak", "backup", "백업"}
+DESIGN_DOCUMENT_SUFFIXES = {".pdf"}
 TC_TEMPLATE_SUFFIXES = {".hwpx"}
 TS_TEMPLATE_SUFFIXES = {".xlsx"}
 QA_SOURCE_SUFFIXES = DESIGN_DOCUMENT_SUFFIXES | TC_TEMPLATE_SUFFIXES | TS_TEMPLATE_SUFFIXES
+QA_UPLOAD_DUMP_DIRNAME = "qa-folder-dumps"
 REQ_ID_PATTERN = re.compile(r"SFR-[A-Z0-9]+(?:-[A-Z0-9]+)*", re.IGNORECASE)
 TC_KEYWORDS = (
     "단위시험케이스",
@@ -83,6 +84,132 @@ def run_with_suppressed_output(callback):
         return callback()
 
 
+def create_uploaded_qa_source_dump(
+        qa_source_items: list[tuple[str, bytes]] | None,
+        dump_parent: Path | None = None,
+) -> Path | None:
+    # 브라우저 폴더 업로드는 원본 경로를 알 수 없으므로 서버 결과 폴더에 복사본을 만든다.
+    entries: list[tuple[Path, bytes]] = []
+    for index, (filename, payload) in enumerate(qa_source_items or [], start=1):
+        if not payload:
+            continue
+        suffix = Path(filename).suffix.lower()
+        if suffix not in QA_SOURCE_SUFFIXES:
+            continue
+        relative_path = safe_relative_upload_path(filename, f"qa-source-{index}{suffix}")
+        entries.append((relative_path, payload))
+
+    if not entries:
+        return None
+
+    top_parts = {
+        relative_path.parts[0]
+        for relative_path, _payload in entries
+        if len(relative_path.parts) > 1
+    }
+    common_top = next(iter(top_parts)) if len(top_parts) == 1 else ""
+    folder_name = common_top or "qa-upload"
+    dump_parent = Path(dump_parent or (RESULT_DIR / QA_UPLOAD_DUMP_DIRNAME))
+    dump_parent.mkdir(parents=True, exist_ok=True)
+    dump_root = next_versioned_result_folder(dump_parent, folder_name)
+
+    for relative_path, payload in entries:
+        target_relative = Path(*relative_path.parts[1:]) if common_top and relative_path.parts[0] == common_top else relative_path
+        if not target_relative.parts:
+            target_relative = Path(relative_path.name)
+        target_path = dump_root / target_relative
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(payload)
+
+    return dump_root
+
+
+def next_versioned_result_folder(parent: Path, folder_name: str) -> Path:
+    safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", folder_name).strip(" ._") or "qa-upload"
+    pattern = re.compile(rf"^{re.escape(safe_name)}_v0\.(\d+)$", re.IGNORECASE)
+    highest_minor = 0
+    for child in parent.iterdir():
+        if not child.is_dir():
+            continue
+        match = pattern.fullmatch(child.name)
+        if match:
+            highest_minor = max(highest_minor, int(match.group(1)))
+
+    index = highest_minor + 1
+    candidate = parent / f"{safe_name}_v0.{index}"
+    while candidate.exists():
+        index += 1
+        candidate = parent / f"{safe_name}_v0.{index}"
+    return candidate
+
+
+def preview_folder_qa_matching(
+        dump_root: Path,
+        *,
+        ui_design_items: list[tuple[str, bytes]] | None = None,
+        ui_design_root: Path | None = None,
+        qa_source_items: list[tuple[str, bytes]] | None = None,
+        qa_source_root: Path | None = None,
+        tc_source_root: Path | None = None,
+        unit_result_root: Path | None = None,
+        ts_source_root: Path | None = None,
+        integration_result_root: Path | None = None,
+        request_id: str | None = None,
+) -> dict[str, object]:
+    request_id = request_id or uuid4().hex[:8]
+    dump_root = Path(dump_root).expanduser().resolve()
+    if not dump_root.exists() or not dump_root.is_dir():
+        raise ValueError(f"결과 폴더를 찾지 못했습니다: {dump_root}")
+
+    temp_dir = TEMP_DIR / f"qa-match-{request_id}"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        ui_design_paths = collect_design_documents(ui_design_root)
+        ui_design_paths.extend(save_uploaded_design_documents(temp_dir, ui_design_items or []))
+        qa_source_paths = collect_source_documents(qa_source_root)
+        qa_source_is_override = bool(qa_source_root and str(qa_source_root).strip())
+        uploaded_qa_source_paths = save_uploaded_source_documents(temp_dir, qa_source_items or [])
+        ui_design_paths.extend(
+            path for path in uploaded_qa_source_paths
+            if path.suffix.lower() in DESIGN_DOCUMENT_SUFFIXES
+        )
+        tc_source_paths = collect_documents(tc_source_root, TC_TEMPLATE_SUFFIXES, "단위시험 폴더")
+        unit_result_paths = collect_documents(unit_result_root, TC_TEMPLATE_SUFFIXES, "단위시험결과서 폴더")
+        ts_source_paths = collect_documents(ts_source_root, TS_TEMPLATE_SUFFIXES, "통합시험 폴더")
+        integration_result_paths = collect_documents(integration_result_root, TS_TEMPLATE_SUFFIXES, "통합시험결과서 폴더")
+        selection = select_qa_source_files(
+            dump_root,
+            ui_design_paths,
+            qa_source_paths=qa_source_paths,
+            qa_source_is_override=qa_source_is_override,
+            tc_source_paths=tc_source_paths,
+            unit_result_paths=unit_result_paths,
+            ts_source_paths=ts_source_paths,
+            integration_result_paths=integration_result_paths,
+        )
+        requirement_items = build_requirement_work_items(selection)
+        return {
+            "ok": bool(requirement_items),
+            "request_id": request_id,
+            "dump_root": str(dump_root),
+            "match_preview": True,
+            "tc_count": 0,
+            "ts_count": 0,
+            "requirement_count": len(requirement_items),
+            "processed_requirement_count": 0,
+            "failed_requirement_count": 0,
+            "role_counts": build_role_counts(selection),
+            "source_files": serialize_selection(selection),
+            "requirement_items": requirement_items,
+            "missing_requirements": build_missing_requirement_report(selection),
+            "placed_files": [],
+            "files": [],
+            "error": "" if requirement_items else "요구사항 ID 기준으로 함께 처리할 5종 세트를 찾지 못했습니다.",
+        }
+    finally:
+        remove_runtime_path(temp_dir)
+
+
 def run_folder_qa_pipeline(
         dump_root: Path,
         *,
@@ -120,7 +247,12 @@ def run_folder_qa_pipeline(
         ui_design_paths = collect_design_documents(ui_design_root)
         ui_design_paths.extend(save_uploaded_design_documents(temp_dir, ui_design_items or []))
         qa_source_paths = collect_source_documents(qa_source_root)
-        qa_source_paths.extend(save_uploaded_source_documents(temp_dir, qa_source_items or []))
+        qa_source_is_override = bool(qa_source_root and str(qa_source_root).strip())
+        uploaded_qa_source_paths = save_uploaded_source_documents(temp_dir, qa_source_items or [])
+        ui_design_paths.extend(
+            path for path in uploaded_qa_source_paths
+            if path.suffix.lower() in DESIGN_DOCUMENT_SUFFIXES
+        )
         tc_source_paths = collect_documents(tc_source_root, TC_TEMPLATE_SUFFIXES, "단위시험 폴더")
         unit_result_paths = collect_documents(unit_result_root, TC_TEMPLATE_SUFFIXES, "단위시험결과서 폴더")
         ts_source_paths = collect_documents(ts_source_root, TS_TEMPLATE_SUFFIXES, "통합시험 폴더")
@@ -129,6 +261,7 @@ def run_folder_qa_pipeline(
             dump_root,
             ui_design_paths,
             qa_source_paths=qa_source_paths,
+            qa_source_is_override=qa_source_is_override,
             tc_source_paths=tc_source_paths,
             unit_result_paths=unit_result_paths,
             ts_source_paths=ts_source_paths,
@@ -176,13 +309,17 @@ def run_folder_qa_pipeline(
                 unit_result_template = Path(str(item["unit_result_template_path"]))
                 ts_template = Path(str(item["ts_template_path"]))
                 integration_result_template = Path(str(item["integration_result_template_path"]))
+                tc_template_target = Path(str(item["tc_template_target_path"]))
+                unit_result_template_target = Path(str(item["unit_result_template_target_path"]))
+                ts_template_target = Path(str(item["ts_template_target_path"]))
+                integration_result_template_target = Path(str(item["integration_result_template_target_path"]))
                 qa_batch_log(
                     request_id,
                     f"[{requirement_id}] {index}/{len(requirement_items)} 처리 시작 | "
                     f"입력 5종: 설계서={file_name(ui_design)}, "
-                    f"TC={file_name(tc_template)}, "
+                    f"단위케이스={file_name(tc_template)}, "
                     f"단위결과서={file_name(unit_result_template)}, "
-                    f"TS={file_name(ts_template)}, "
+                    f"통합시나리오={file_name(ts_template)}, "
                     f"통합결과서={file_name(integration_result_template)}",
                 )
 
@@ -194,6 +331,7 @@ def run_folder_qa_pipeline(
                         output_dir=item_tc_output_dir,
                         template_path=tc_template,
                         cancel_check=cancel_check,
+                        progress_callback=lambda message: qa_batch_log(request_id, f"[{requirement_id}] {message}"),
                     )
                 )
                 if cancel_check:
@@ -280,10 +418,10 @@ def run_folder_qa_pipeline(
                 if cancel_check:
                     cancel_check()
                 placed_for_requirement = [
-                    place_generated_file(tc_hwpx, tc_template, "tc_hwpx", "단위시험케이스", requirement_id),
-                    place_generated_file(unit_result_hwpx, unit_result_template, "unit_result_hwpx", "단위시험결과서", requirement_id),
-                    place_generated_file(ts_xlsx, ts_template, "ts_xlsx", "통합시험시나리오", requirement_id),
-                    place_generated_file(integration_result_xlsx, integration_result_template, "integration_result_xlsx", "통합시험결과서", requirement_id),
+                    place_generated_file(tc_hwpx, tc_template_target, "tc_hwpx", "단위시험케이스", requirement_id),
+                    place_generated_file(unit_result_hwpx, unit_result_template_target, "unit_result_hwpx", "단위시험결과서", requirement_id),
+                    place_generated_file(ts_xlsx, ts_template_target, "ts_xlsx", "통합시험시나리오", requirement_id),
+                    place_generated_file(integration_result_xlsx, integration_result_template_target, "integration_result_xlsx", "통합시험결과서", requirement_id),
                 ]
                 qa_batch_log(
                     request_id,
@@ -355,6 +493,7 @@ def select_qa_source_files(
         ui_design_paths: list[Path],
         *,
         qa_source_paths: list[Path] | None = None,
+        qa_source_is_override: bool = False,
         tc_source_paths: list[Path] | None = None,
         unit_result_paths: list[Path] | None = None,
         ts_source_paths: list[Path] | None = None,
@@ -367,48 +506,14 @@ def select_qa_source_files(
     unit_result_paths = list(unit_result_paths or [])
     ts_source_paths = list(ts_source_paths or [])
     integration_result_paths = list(integration_result_paths or [])
-    qa_source_ui_files = filter_role_files(
-        dump_root,
-        qa_source_paths,
-        suffixes=DESIGN_DOCUMENT_SUFFIXES,
-        keywords=("사용자인터페이스설계서", "사용자 인터페이스 설계서", "화면설계서", "화면정의서", "ui설계서"),
-        exclude_keywords=("단위시험", "통합시험", "시나리오", "결과서"),
-    )
-    qa_source_tc_files = filter_role_files(
-        dump_root,
-        qa_source_paths,
-        suffixes=TC_TEMPLATE_SUFFIXES,
-        keywords=TC_KEYWORDS,
-        exclude_keywords=TC_EXCLUDE_KEYWORDS,
-    )
-    qa_source_unit_result_files = filter_role_files(
-        dump_root,
-        qa_source_paths,
-        suffixes=TC_TEMPLATE_SUFFIXES,
-        keywords=UNIT_RESULT_KEYWORDS,
-        exclude_keywords=UNIT_RESULT_EXCLUDE_KEYWORDS,
-    )
-    qa_source_ts_files = filter_role_files(
-        dump_root,
-        qa_source_paths,
-        suffixes=TS_TEMPLATE_SUFFIXES,
-        keywords=(
-            "통합시험시나리오",
-            "통합시험 시나리오",
-            "통합테스트",
-            "통합 테스트",
-            "integrationtestscenario",
-            "integration test scenario",
-        ),
-        exclude_keywords=("단위시험", "단위테스트", "케이스", "결과서", "인수인계"),
-    )
-    qa_source_integration_result_files = filter_role_files(
-        dump_root,
-        qa_source_paths,
-        suffixes=TS_TEMPLATE_SUFFIXES,
-        keywords=INTEGRATION_RESULT_KEYWORDS,
-        exclude_keywords=INTEGRATION_RESULT_EXCLUDE_KEYWORDS,
-    )
+    qa_source_override_paths = qa_source_paths if qa_source_is_override else []
+    base_artifact_paths = qa_source_override_paths if qa_source_is_override else files
+    ui_design_candidates = unique_paths(ui_design_paths if ui_design_paths else qa_source_paths)
+    tc_candidates = unique_paths(tc_source_paths)
+    unit_result_candidates = unique_paths(unit_result_paths)
+    ts_candidates = unique_paths(ts_source_paths)
+    integration_result_candidates = unique_paths(integration_result_paths)
+
     fallback_ui_files = [
         path for path in files
         if path.suffix.lower() in DESIGN_DOCUMENT_SUFFIXES
@@ -422,57 +527,118 @@ def select_qa_source_files(
         "ui_design": {
             "label": "사용자인터페이스설계서",
             "by_requirement": index_design_files_by_requirement(unique_paths(
-                ui_design_paths + qa_source_ui_files + ([] if ui_design_paths or qa_source_ui_files else fallback_ui_files)
+                ui_design_candidates if ui_design_candidates else fallback_ui_files
             )),
         },
         "tc_template": {
             "label": "단위시험케이스",
-            "by_requirement": index_artifact_files_by_requirement(
-                dump_root,
-                unique_paths(files + qa_source_tc_files + tc_source_paths),
-                suffixes=TC_TEMPLATE_SUFFIXES,
-                keywords=TC_KEYWORDS,
-                exclude_keywords=TC_EXCLUDE_KEYWORDS,
+            "by_requirement": merge_artifact_inputs_with_targets(
+                index_artifact_files_by_requirement(
+                    dump_root,
+                    tc_candidates,
+                    suffixes=TC_TEMPLATE_SUFFIXES,
+                    keywords=TC_KEYWORDS,
+                    exclude_keywords=TC_EXCLUDE_KEYWORDS,
+                ),
+                index_artifact_files_by_requirement(
+                    dump_root,
+                    base_artifact_paths,
+                    suffixes=TC_TEMPLATE_SUFFIXES,
+                    keywords=TC_KEYWORDS,
+                    exclude_keywords=TC_EXCLUDE_KEYWORDS,
+                ),
             ),
         },
         "unit_result_template": {
             "label": "단위시험결과서",
-            "by_requirement": index_artifact_files_by_requirement(
-                dump_root,
-                unique_paths(files + qa_source_unit_result_files + unit_result_paths),
-                suffixes=TC_TEMPLATE_SUFFIXES,
-                keywords=UNIT_RESULT_KEYWORDS,
-                exclude_keywords=UNIT_RESULT_EXCLUDE_KEYWORDS,
+            "by_requirement": merge_artifact_inputs_with_targets(
+                index_artifact_files_by_requirement(
+                    dump_root,
+                    unit_result_candidates,
+                    suffixes=TC_TEMPLATE_SUFFIXES,
+                    keywords=UNIT_RESULT_KEYWORDS,
+                    exclude_keywords=UNIT_RESULT_EXCLUDE_KEYWORDS,
+                ),
+                index_artifact_files_by_requirement(
+                    dump_root,
+                    base_artifact_paths,
+                    suffixes=TC_TEMPLATE_SUFFIXES,
+                    keywords=UNIT_RESULT_KEYWORDS,
+                    exclude_keywords=UNIT_RESULT_EXCLUDE_KEYWORDS,
+                ),
             ),
         },
         "ts_template": {
             "label": "통합시험시나리오",
-            "by_requirement": index_artifact_files_by_requirement(
-                dump_root,
-                unique_paths(files + qa_source_ts_files + ts_source_paths),
-                suffixes=TS_TEMPLATE_SUFFIXES,
-                keywords=(
-                    "통합시험시나리오",
-                    "통합시험 시나리오",
-                    "통합테스트",
-                    "통합 테스트",
-                    "integrationtestscenario",
-                    "integration test scenario",
+            "by_requirement": merge_artifact_inputs_with_targets(
+                index_artifact_files_by_requirement(
+                    dump_root,
+                    ts_candidates,
+                    suffixes=TS_TEMPLATE_SUFFIXES,
+                    keywords=(
+                        "통합시험시나리오",
+                        "통합시험 시나리오",
+                        "통합테스트",
+                        "통합 테스트",
+                        "integrationtestscenario",
+                        "integration test scenario",
+                    ),
+                    exclude_keywords=("단위시험", "단위테스트", "케이스", "결과서", "인수인계"),
                 ),
-                exclude_keywords=("단위시험", "단위테스트", "케이스", "결과서", "인수인계"),
+                index_artifact_files_by_requirement(
+                    dump_root,
+                    base_artifact_paths,
+                    suffixes=TS_TEMPLATE_SUFFIXES,
+                    keywords=(
+                        "통합시험시나리오",
+                        "통합시험 시나리오",
+                        "통합테스트",
+                        "통합 테스트",
+                        "integrationtestscenario",
+                        "integration test scenario",
+                    ),
+                    exclude_keywords=("단위시험", "단위테스트", "케이스", "결과서", "인수인계"),
+                ),
             ),
         },
         "integration_result_template": {
             "label": "통합시험결과서",
-            "by_requirement": index_artifact_files_by_requirement(
-                dump_root,
-                unique_paths(files + qa_source_integration_result_files + integration_result_paths),
-                suffixes=TS_TEMPLATE_SUFFIXES,
-                keywords=INTEGRATION_RESULT_KEYWORDS,
-                exclude_keywords=INTEGRATION_RESULT_EXCLUDE_KEYWORDS,
+            "by_requirement": merge_artifact_inputs_with_targets(
+                index_artifact_files_by_requirement(
+                    dump_root,
+                    integration_result_candidates,
+                    suffixes=TS_TEMPLATE_SUFFIXES,
+                    keywords=INTEGRATION_RESULT_KEYWORDS,
+                    exclude_keywords=INTEGRATION_RESULT_EXCLUDE_KEYWORDS,
+                ),
+                index_artifact_files_by_requirement(
+                    dump_root,
+                    base_artifact_paths,
+                    suffixes=TS_TEMPLATE_SUFFIXES,
+                    keywords=INTEGRATION_RESULT_KEYWORDS,
+                    exclude_keywords=INTEGRATION_RESULT_EXCLUDE_KEYWORDS,
+                ),
             ),
         },
     }
+
+
+def merge_artifact_inputs_with_targets(
+        input_by_requirement: dict[str, dict[str, object]],
+        target_by_requirement: dict[str, dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    # 문서별 위치 지정은 입력 후보로만 쓰고, 교체 배치는 대상 폴더의 기존 파일을 기준으로 한다.
+    result: dict[str, dict[str, object]] = {}
+    for requirement_id, target in target_by_requirement.items():
+        selected_input = input_by_requirement.get(requirement_id) or target
+        if not selected_input:
+            continue
+        merged = dict(selected_input)
+        merged["placement_path"] = target.get("path", "")
+        merged["placement_score"] = target.get("score", 0)
+        merged["placement_candidates"] = target.get("candidates", [])
+        result[requirement_id] = merged
+    return result
 
 
 def iter_candidate_files(root: Path):
@@ -538,7 +704,7 @@ def collect_documents(root: Path | None, suffixes: set[str], label: str) -> list
 
 
 def collect_design_documents(root: Path | None) -> list[Path]:
-    # 사용자가 지정한 화면설계서 폴더에서 HWP/HWPX/PDF를 모두 모은다.
+    # 사용자가 지정한 화면설계서 폴더에서 PDF 설계서를 모은다.
     return collect_documents(root, DESIGN_DOCUMENT_SUFFIXES, "화면설계서 폴더")
 
 
@@ -733,6 +899,10 @@ def build_requirement_work_items(selection: dict[str, dict[str, object]]) -> lis
             "unit_result_template_path": unit_result_by_req[requirement_id]["path"],
             "ts_template_path": ts_by_req[requirement_id]["path"],
             "integration_result_template_path": integration_result_by_req[requirement_id]["path"],
+            "tc_template_target_path": tc_by_req[requirement_id].get("placement_path") or tc_by_req[requirement_id]["path"],
+            "unit_result_template_target_path": unit_result_by_req[requirement_id].get("placement_path") or unit_result_by_req[requirement_id]["path"],
+            "ts_template_target_path": ts_by_req[requirement_id].get("placement_path") or ts_by_req[requirement_id]["path"],
+            "integration_result_template_target_path": integration_result_by_req[requirement_id].get("placement_path") or integration_result_by_req[requirement_id]["path"],
         }
         for requirement_id in requirement_ids
     ]
@@ -1004,6 +1174,7 @@ def serialize_selection(selection: dict[str, dict[str, object]]) -> list[dict[st
                 "label": labels.get(key, key),
                 "requirement_id": requirement_id,
                 "path": str(selected.get("path") or ""),
+                "placement_path": str(selected.get("placement_path") or selected.get("path") or ""),
                 "score": selected.get("score", 0),
                 "candidates": selected.get("candidates", []),
             })

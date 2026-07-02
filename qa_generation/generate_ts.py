@@ -7,10 +7,18 @@ import openpyxl
 from typing import Callable
 from openpyxl.styles import Alignment, Border, Side
 
+SCREEN_ID_PATTERN = re.compile(r"\bUI-[A-Z0-9]+(?:-[A-Z0-9]+)+\b", re.IGNORECASE)
+
 
 def _check_cancel(cancel_check: Callable[[], None] | None) -> None:
   if cancel_check:
     cancel_check()
+
+def derive_requirement_id_from_screen_id(screen_id):
+  match = re.match(r"^UI-([A-Z0-9]+)-(\d{3})(?:-|$)", str(screen_id or "").strip(), re.IGNORECASE)
+  if not match:
+    return ""
+  return f"SFR-{match.group(1).upper()}-{match.group(2)}"
 
 def extract_text_from_pdf(pdf_path):
   if not os.path.exists(pdf_path):
@@ -45,6 +53,12 @@ def extract_req_mapping_from_pdf(pdf_path):
     req_id = match.group(1).strip()
     screen_id = match.group(2).strip()
     mapping[screen_id] = req_id
+
+  for match in SCREEN_ID_PATTERN.finditer(normalized):
+    screen_id = match.group(0).strip()
+    derived_req_id = derive_requirement_id_from_screen_id(screen_id)
+    if derived_req_id:
+      mapping.setdefault(screen_id, derived_req_id)
 
   return mapping
 
@@ -118,6 +132,17 @@ def extract_unit_test_from_excel(xlsx_path):
       unit_test_data.append(row_data)
 
   return unit_test_data
+
+def fill_req_mapping_from_screen_ids(req_mapping, unit_test_data):
+  mapping = dict(req_mapping or {})
+  for data in unit_test_data or []:
+    screen_id = str(data.get("화면_ID", "")).strip()
+    if not screen_id or screen_id in mapping:
+      continue
+    derived_req_id = derive_requirement_id_from_screen_id(screen_id)
+    if derived_req_id:
+      mapping[screen_id] = derived_req_id
+  return mapping
 
 def build_scenario_id(screen_id):
   screen_id = str(screen_id or "").strip()
@@ -498,14 +523,17 @@ def generate_test_scenarios(
     cover_author = extract_cover_author_from_workbook(template_xlsx_path)
     _check_cancel(cancel_check)
     _check_cancel(cancel_check)
-    req_mapping = {}
-    if ui_pdf_path:
+    req_mapping = dict(req_mapping or {})
+    if not req_mapping and ui_pdf_path:
         ui_pdf_path = Path(ui_pdf_path)
         if ui_pdf_path.exists():
             req_mapping = extract_req_mapping_from_pdf(ui_pdf_path)
             _check_cancel(cancel_check)
 
-    unit_test_data = extract_unit_test_from_excel(tc_xlsx_path)
+    if unit_test_data is None:
+        unit_test_data = extract_unit_test_from_excel(tc_xlsx_path)
+    else:
+        unit_test_data = [dict(data) for data in unit_test_data]
     _check_cancel(cancel_check)
     if not unit_test_data:
         return {
@@ -514,6 +542,7 @@ def generate_test_scenarios(
             "files": [],
         }
 
+    req_mapping = fill_req_mapping_from_screen_ids(req_mapping, unit_test_data)
     missing_req_screen_ids = sorted({
         str(data.get("화면_ID", "")).strip()
         for data in unit_test_data
@@ -571,6 +600,8 @@ def generate_integration_test_results(
     ui_pdf_path: Path | None,
     output_dir: Path,
     form_path: Path,
+    req_mapping: dict[str, str] | None = None,
+    unit_test_data: list[dict] | None = None,
     cancel_check: Callable[[], None] | None = None,
 ) -> dict:
     _check_cancel(cancel_check)
@@ -591,6 +622,8 @@ def generate_integration_test_results(
 
     if unit_test_data is None:
         unit_test_data = extract_unit_test_from_excel(tc_xlsx_path)
+    else:
+        unit_test_data = [dict(data) for data in unit_test_data]
     _check_cancel(cancel_check)
     if not unit_test_data:
         return {
@@ -599,6 +632,7 @@ def generate_integration_test_results(
             "files": [],
         }
 
+    req_mapping = fill_req_mapping_from_screen_ids(req_mapping, unit_test_data)
     missing_req_screen_ids = sorted({
         str(data.get("화면_ID", "")).strip()
         for data in unit_test_data

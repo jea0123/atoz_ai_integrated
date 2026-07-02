@@ -10,7 +10,7 @@ import shutil
 import sys
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from uuid import uuid4
 
 from app_runtime import (
@@ -49,7 +49,7 @@ from qa_generation.generate_tc import (
     generate_test_cases,
 )
 from qa_generation.generate_ts import generate_test_scenarios
-from qa_generation.folder_pipeline import QaFolderMatchingError, run_folder_qa_pipeline
+from qa_generation.folder_pipeline import QaFolderMatchingError, create_uploaded_qa_source_dump, preview_folder_qa_matching, run_folder_qa_pipeline
 from qa_generation.generate_ts import extract_req_mapping_from_pdf, extract_unit_test_from_excel
 from cancellation import (
     CancelledRequest,
@@ -199,6 +199,14 @@ def unique_download_name(existing_names: set[str], name: str) -> str:
         index += 1
     existing_names.add(candidate.casefold())
     return candidate
+
+
+def generated_download_name_from_template(template_name: str, output_suffix: str) -> str:
+    template_path = Path(template_name or f"generated{output_suffix}")
+    suffix = output_suffix if output_suffix.startswith(".") else f".{output_suffix}"
+    if template_path.suffix.lower() == suffix.lower():
+        return template_path.name
+    return f"{template_path.stem}{suffix}"
 
 
 def extract_ts_set_key(text: str) -> str:
@@ -521,6 +529,29 @@ def runtime_ai_settings(fields: dict[str, str]) -> tuple[str, str]:
     return model_name, ollama_url
 
 
+def resolve_qa_folder_target(
+        dump_root_value: str,
+        qa_source_root_value: str,
+        uploaded_qa_source_items: list[tuple[str, bytes]],
+) -> tuple[str, str, list[tuple[str, bytes]]]:
+    # QA 일괄 생성 기준 폴더 우선순위: 다른 경로 > 업로드 복사본 > 매핑 결과 폴더.
+    dump_root_value = dump_root_value.strip()
+    qa_source_root_value = qa_source_root_value.strip()
+    uploaded_qa_source_items = list(uploaded_qa_source_items or [])
+
+    if qa_source_root_value:
+        return qa_source_root_value, qa_source_root_value, []
+
+    if uploaded_qa_source_items:
+        uploaded_qa_dump_root = create_uploaded_qa_source_dump(uploaded_qa_source_items)
+        if uploaded_qa_dump_root is not None:
+            resolved = str(uploaded_qa_dump_root)
+            return resolved, resolved, []
+        return "", "", uploaded_qa_source_items
+
+    return dump_root_value, "", []
+
+
 class WebHandler(BaseHTTPRequestHandler):
     server_version = "OutputMappingHTTP/1.0"
 
@@ -529,6 +560,10 @@ class WebHandler(BaseHTTPRequestHandler):
         request_path = urlparse(self.path).path
         if request_path == "/api/runtime-mode":
             self.send_json(runtime_mode_payload())
+            return
+
+        if request_path == "/api/path-status":
+            self.handle_path_status_get()
             return
 
         if request_path == "/":
@@ -570,6 +605,34 @@ class WebHandler(BaseHTTPRequestHandler):
 
         self.send_error(404)
 
+    def handle_path_status_get(self) -> None:
+        # 브라우저가 기억한 로컬 결과 폴더 경로가 아직 유효한지 확인한다.
+        parsed = urlparse(self.path)
+        values = parse_qs(parsed.query)
+        raw_path = (values.get("path") or [""])[0].strip()
+        if not raw_path:
+            self.send_json({"ok": False, "exists": False, "is_dir": False, "path": ""}, status=400)
+            return
+
+        try:
+            path = Path(raw_path).expanduser().resolve()
+            exists = path.exists()
+            is_dir = path.is_dir()
+            self.send_json({
+                "ok": exists and is_dir,
+                "exists": exists,
+                "is_dir": is_dir,
+                "path": str(path),
+            })
+        except Exception as exc:
+            self.send_json({
+                "ok": False,
+                "exists": False,
+                "is_dir": False,
+                "path": raw_path,
+                "error": str(exc),
+            }, status=400)
+
     def do_POST(self) -> None:
         # 폴더 검사, 폴더 덤프 반영 POST 요청을 분기한다.
         request_path = urlparse(self.path).path
@@ -592,6 +655,10 @@ class WebHandler(BaseHTTPRequestHandler):
 
         if request_path == "/api/run-qa-folder":
             self.handle_run_qa_folder_post()
+            return
+
+        if request_path == "/api/preview-qa-folder":
+            self.handle_preview_qa_folder_post()
             return
 
         if request_path == "/api/template-build":
@@ -806,7 +873,7 @@ class WebHandler(BaseHTTPRequestHandler):
             output_dir = temp_dir / "output"
             output_dir.mkdir()
 
-            template_hwpx_path, _template_hwpx_name = save_uploaded_file(
+            template_hwpx_path, template_hwpx_name = save_uploaded_file(
                 temp_dir,
                 file_items,
                 "template_hwpx",
@@ -815,7 +882,7 @@ class WebHandler(BaseHTTPRequestHandler):
             )
             ui_pdf_items = file_items.get("ui_pdf") or []
             if not ui_pdf_items:
-                raise ValueError("사용자인터페이스 설계서 문서를 선택하세요.")
+                raise ValueError("사용자인터페이스 설계서 PDF를 선택하세요.")
 
             log_event(
                 "qa.tc.start",
@@ -840,8 +907,8 @@ class WebHandler(BaseHTTPRequestHandler):
                         raise ValueError("빈 문서 파일입니다.")
 
                     source_suffix = Path(source_name).suffix.lower()
-                    if source_suffix not in {".hwp", ".hwpx", ".pdf"}:
-                        raise ValueError("HWP, HWPX, PDF 파일만 업로드할 수 있습니다.")
+                    if source_suffix != ".pdf":
+                        raise ValueError("사용자인터페이스설계서는 PDF 파일만 업로드할 수 있습니다.")
 
                     safe_pdf_name = safe_upload_filename(source_name, f"ui_pdf_{index}", source_suffix or ".pdf")
                     pdf_stem = Path(safe_pdf_name).stem
@@ -885,7 +952,7 @@ class WebHandler(BaseHTTPRequestHandler):
                         suffix = path.suffix or f".{file_item.get('kind') or 'file'}"
                         download_name = unique_download_name(
                             download_names,
-                            f"{pdf_stem}{suffix}",
+                            generated_download_name_from_template(template_hwpx_name, suffix),
                         )
                         target_path = output_dir / download_name
                         if path.exists() and path.resolve() != target_path.resolve():
@@ -981,21 +1048,28 @@ class WebHandler(BaseHTTPRequestHandler):
             else:
                 fields, file_items = parse_multipart_items(content_type, body)
             dump_root_value = fields.get("dump_root", "").strip()
-            if not dump_root_value:
-                raise ValueError("check 결과 폴더 경로를 입력하세요.")
+            qa_source_root_value = fields.get("qa_source_root", "").strip()
+            uploaded_qa_source_items = file_items.get("qa_source_files") or []
+            effective_dump_root, qa_source_root_value, uploaded_qa_source_items = resolve_qa_folder_target(
+                dump_root_value,
+                qa_source_root_value,
+                uploaded_qa_source_items,
+            )
+            if not effective_dump_root:
+                raise ValueError("check 결과 폴더 경로, 다른 산출물 폴더 경로, 또는 산출물 폴더 업로드를 입력하세요.")
             model_name, ollama_url = runtime_ai_settings(fields)
             request_id, check_cancel = self.begin_cancelable_request(fields)
 
             payload = run_folder_qa_pipeline(
-                Path(dump_root_value),
+                Path(effective_dump_root),
                 model_name=model_name,
                 ollama_url=ollama_url,
                 scenario_form_path=TS_TEMPLATE_PATH,
                 result_form_path=RESULT_TEMPLATE_PATH,
                 ui_design_items=file_items.get("ui_design_files") or [],
                 ui_design_root=Path(fields.get("ui_design_root", "")) if fields.get("ui_design_root") else None,
-                qa_source_items=file_items.get("qa_source_files") or [],
-                qa_source_root=Path(fields.get("qa_source_root", "")) if fields.get("qa_source_root") else None,
+                qa_source_items=uploaded_qa_source_items,
+                qa_source_root=Path(qa_source_root_value) if qa_source_root_value else None,
                 tc_source_root=Path(fields.get("tc_source_root", "")) if fields.get("tc_source_root") else None,
                 unit_result_root=Path(fields.get("unit_result_root", "")) if fields.get("unit_result_root") else None,
                 ts_source_root=Path(fields.get("ts_source_root", "")) if fields.get("ts_source_root") else None,
@@ -1016,6 +1090,44 @@ class WebHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": str(exc), "files": []}, status=400)
         finally:
             unregister_request(request_id)
+
+    def handle_preview_qa_folder_post(self) -> None:
+        # QA 생성 전 요구사항별 5종 문서 매칭 상태만 확인한다.
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            content_type = self.headers.get("Content-Type", "")
+            body = self.rfile.read(content_length)
+            if "application/json" in content_type.lower():
+                fields = parse_json_fields(content_type, body)
+                file_items: dict[str, list[tuple[str, bytes]]] = {}
+            else:
+                fields, file_items = parse_multipart_items(content_type, body)
+            dump_root_value = fields.get("dump_root", "").strip()
+            qa_source_root_value = fields.get("qa_source_root", "").strip()
+            uploaded_qa_source_items = file_items.get("qa_source_files") or []
+            effective_dump_root, qa_source_root_value, uploaded_qa_source_items = resolve_qa_folder_target(
+                dump_root_value,
+                qa_source_root_value,
+                uploaded_qa_source_items,
+            )
+            if not effective_dump_root:
+                raise ValueError("check 결과 폴더 경로, 다른 산출물 폴더 경로, 또는 산출물 폴더 업로드를 입력하세요.")
+
+            payload = preview_folder_qa_matching(
+                Path(effective_dump_root),
+                ui_design_items=file_items.get("ui_design_files") or [],
+                ui_design_root=Path(fields.get("ui_design_root", "")) if fields.get("ui_design_root") else None,
+                qa_source_items=uploaded_qa_source_items,
+                qa_source_root=Path(qa_source_root_value) if qa_source_root_value else None,
+                tc_source_root=Path(fields.get("tc_source_root", "")) if fields.get("tc_source_root") else None,
+                unit_result_root=Path(fields.get("unit_result_root", "")) if fields.get("unit_result_root") else None,
+                ts_source_root=Path(fields.get("ts_source_root", "")) if fields.get("ts_source_root") else None,
+                integration_result_root=Path(fields.get("integration_result_root", "")) if fields.get("integration_result_root") else None,
+            )
+            self.send_json(payload, status=200 if payload.get("ok") else 400)
+        except Exception as exc:
+            log_event("qa.folder.preview.error", error=str(exc), traceback=traceback.format_exc())
+            self.send_json({"ok": False, "error": str(exc), "files": []}, status=400)
 
     def handle_generate_ts_post(self) -> None:
         # 통합시험 시나리오 생성 요청을 처리한다.
@@ -1063,10 +1175,10 @@ class WebHandler(BaseHTTPRequestHandler):
                 file_items,
                 "ui_pdf",
                 "ui.pdf",
-                {".hwp", ".hwpx", ".pdf"},
+                {".pdf"},
             )
             tc_items = save_uploaded_items(temp_dir, file_items, "tc_xlsx", "test_cases.xlsx", {".xlsx"})
-            ui_items = save_uploaded_items(temp_dir, file_items, "ui_pdf", "ui.pdf", {".hwp", ".hwpx", ".pdf"})
+            ui_items = save_uploaded_items(temp_dir, file_items, "ui_pdf", "ui.pdf", {".pdf"})
 
             log_event(
                 "qa.ts.start",
@@ -1157,7 +1269,10 @@ class WebHandler(BaseHTTPRequestHandler):
                             continue
                         path = Path(str(file_item.get("path") or ""))
                         suffix = path.suffix or ".xlsx"
-                        download_name = unique_download_name(download_names, f"ts_{set_stem}{suffix}")
+                        download_name = unique_download_name(
+                            download_names,
+                            generated_download_name_from_template(template_xlsx_name, suffix),
+                        )
                         target_path = output_dir / download_name
                         if path.exists() and path.resolve() != target_path.resolve():
                             path.replace(target_path)
