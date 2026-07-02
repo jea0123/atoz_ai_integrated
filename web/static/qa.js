@@ -15,18 +15,19 @@ const emptyState = document.querySelector("#emptyState");
 const tcForm = document.querySelector("#tcForm");
 const tsForm = document.querySelector("#tsForm");
 const folderQaForm = document.querySelector("#folderQaForm");
+const folderPreviewButton = document.querySelector("#folderPreviewButton");
 const qaDumpRoot = document.querySelector("#qaDumpRoot");
+const qaSourceRoot = document.querySelector("#qaSourceRoot");
+const qaSourceFiles = document.querySelector("#qaSourceFiles");
 const tcSourceRoot = document.querySelector("#tcSourceRoot");
 const unitResultRoot = document.querySelector("#unitResultRoot");
 const tsSourceRoot = document.querySelector("#tsSourceRoot");
 const integrationResultRoot = document.querySelector("#integrationResultRoot");
 const uiDesignRoot = document.querySelector("#uiDesignRoot");
-const qaSourcePreview = document.querySelector("#qaSourcePreview");
 const taskTabs = [...document.querySelectorAll("[data-task-tab]")];
 const taskPanels = [...document.querySelectorAll("[data-task-panel]")];
 const fileInputs = [...document.querySelectorAll("input[type='file']")];
 const LAST_DUMP_ROOT_KEY = "atoz:lastDumpRoot";
-const QA_SOURCE_EXTENSIONS = new Set([".hwp", ".hwpx", ".pdf", ".xlsx"]);
 const QA_LOADING_STEPS = [
   "입력 파일을 확인하는 중",
   "설계서와 산출물을 분석하는 중",
@@ -182,69 +183,12 @@ function fileDisplayPath(file) {
   return file.webkitRelativePath || file.name;
 }
 
-function fileExtension(file) {
-  const name = file.name || "";
-  const dotIndex = name.lastIndexOf(".");
-  return dotIndex >= 0 ? name.slice(dotIndex).toLowerCase() : "";
-}
-
-function fileSizeLabel(bytes) {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 KB";
-  const kb = bytes / 1024;
-  if (kb < 1024) return `${Math.max(1, Math.round(kb))} KB`;
-  return `${(kb / 1024).toFixed(1)} MB`;
-}
-
-function renderFolderPreview(input, preview, allowedExtensions, emptyText) {
-  if (!preview) return;
-
-  const files = [...(input?.files || [])];
-  if (!files.length) {
-    preview.hidden = true;
-    preview.replaceChildren();
-    return;
-  }
-
-  const rootName = fileDisplayPath(files[0]).includes("/")
-    ? fileDisplayPath(files[0]).split("/")[0]
-    : "";
-  const targetFiles = files
-    .filter((file) => allowedExtensions.has(fileExtension(file)))
-    .sort((left, right) => fileDisplayPath(left).localeCompare(fileDisplayPath(right), "ko"));
-  const skippedCount = files.length - targetFiles.length;
-
-  preview.hidden = false;
-  preview.innerHTML = `
-    <div class="selected-folder-preview-head">
-      <strong>${escapeHtml(rootName || "선택된 폴더")}</strong>
-      <span>${targetFiles.length}개 대상${skippedCount ? ` · ${skippedCount}개 제외` : ""}</span>
-    </div>
-    ${targetFiles.length ? `
-      <div class="selected-folder-file-list">
-        ${targetFiles.map((file) => `
-          <article class="selected-folder-file">
-            <span>${escapeHtml(fileDisplayPath(file))}</span>
-            <small>${escapeHtml(fileSizeLabel(file.size))}</small>
-          </article>
-        `).join("")}
-      </div>
-    ` : `
-      <p class="selected-folder-empty">${escapeHtml(emptyText)}</p>
-    `}
-  `;
-}
-
-function renderQaSourcePreview(input) {
-  renderFolderPreview(input, qaSourcePreview, QA_SOURCE_EXTENSIONS, "HWP, HWPX, PDF, XLSX 파일이 없습니다.");
-}
-
 function updateFileLabel(input) {
   const label = document.querySelector(`[data-file-label="${input.id}"]`);
   if (!label) return;
 
   if (!input.files.length) {
     label.textContent = initialFileLabels.get(input.id) || "파일 선택";
-    if (input.id === "qaSourceFiles") renderQaSourcePreview(input);
     return;
   }
 
@@ -255,14 +199,12 @@ function updateFileLabel(input) {
 
   if (folderName) {
     label.textContent = `${folderName} · ${input.files.length}개`;
-    if (input.id === "qaSourceFiles") renderQaSourcePreview(input);
     return;
   }
 
   label.textContent = input.files.length > 1
     ? `${input.files[0].name} 외 ${input.files.length - 1}개`
     : input.files[0].name;
-  if (input.id === "qaSourceFiles") renderQaSourcePreview(input);
 }
 
 function buildFormData(form) {
@@ -480,7 +422,7 @@ function friendlyErrorInfo(message, taskName) {
         checks: [
           "check.html에서 문서 반영이 끝난 산출물 폴더 경로인지 확인하세요.",
           "다섯 문서가 함께 있다면 '추가 문서 폴더'를 선택하세요.",
-          "화면/사용자인터페이스설계서는 HWP, HWPX, PDF 중 하나를 직접 업로드하세요.",
+          "화면/사용자인터페이스설계서는 PDF 파일을 직접 업로드하세요.",
           "여러 건이면 '화면설계서 폴더'에 전체 폴더 경로를 입력하면 하위 파일을 일괄 탐색합니다.",
           "업로드한 설계서와 QA 대상 산출물 폴더의 단위시험케이스/단위시험결과서/통합시험시나리오/통합시험결과서 파일명이 같은 SFR 요구사항 ID를 포함하는지 확인하세요.",
           "QA 대상 산출물 폴더 안에 단위시험케이스 양식이 없으면 TC HWPX를 기존 위치에 배치할 수 없습니다.",
@@ -524,7 +466,7 @@ function friendlyErrorInfo(message, taskName) {
       return {
         summary: "'사용자인터페이스설계서' 파일을 확인하세요.",
         checks: [
-          "'사용자인터페이스설계서' 칸에는 HWP, HWPX, PDF 중 하나를 넣어야 합니다.",
+          "'사용자인터페이스설계서' 칸에는 PDF 파일을 넣어야 합니다.",
           "문서 안에 화면 ID, 화면명, 처리흐름 정보가 포함되어 있어야 단위시험 케이스를 만들 수 있습니다.",
           "파일이 비어 있거나 텍스트를 추출할 수 없는 문서라면 다른 파일로 다시 선택하세요.",
         ],
@@ -662,7 +604,31 @@ async function postJson(endpoint, payload) {
   return data;
 }
 
-function initializeDumpRoot() {
+async function fetchPathStatus(path) {
+  try {
+    const response = await fetch(`/api/path-status?path=${encodeURIComponent(path)}`);
+    const data = await response.json().catch(() => ({ ok: false }));
+    if (!response.ok) {
+      return { ok: false, ...data };
+    }
+    return data;
+  } catch (error) {
+    return { ok: false, error: String(error) };
+  }
+}
+
+function forgetDumpRoot(path) {
+  try {
+    const stored = localStorage.getItem(LAST_DUMP_ROOT_KEY) || "";
+    if (!path || stored === path) {
+      localStorage.removeItem(LAST_DUMP_ROOT_KEY);
+    }
+  } catch {
+    // localStorage를 쓸 수 없는 환경이면 입력값만 정리한다.
+  }
+}
+
+async function initializeDumpRoot() {
   if (!qaDumpRoot) return;
 
   const params = new URLSearchParams(window.location.search);
@@ -674,7 +640,19 @@ function initializeDumpRoot() {
     storedDumpRoot = "";
   }
 
-  qaDumpRoot.value = queryDumpRoot || storedDumpRoot;
+  const initialDumpRoot = queryDumpRoot || storedDumpRoot;
+  qaDumpRoot.value = initialDumpRoot;
+  if (!initialDumpRoot) return;
+
+  const status = await fetchPathStatus(initialDumpRoot);
+  if (status.ok) return;
+
+  qaDumpRoot.value = "";
+  forgetDumpRoot(initialDumpRoot);
+  showGenerationError(
+    new Error("이전에 저장된 산출물 매핑 결과 폴더를 찾을 수 없습니다. 다시 선택하거나 산출물 폴더를 업로드하세요."),
+    "folder",
+  );
 }
 
 function renderFolderQaResult(data) {
@@ -683,6 +661,7 @@ function renderFolderQaResult(data) {
   const requirementItems = Array.isArray(data.requirement_items) ? data.requirement_items : [];
   const missingRequirements = Array.isArray(data.missing_requirements) ? data.missing_requirements : [];
   const roleCounts = data.role_counts || {};
+  const isPreview = Boolean(data.match_preview);
   emptyState.hidden = Boolean(placedFiles.length || sourceFiles.length || requirementItems.length || missingRequirements.length);
   clearError();
 
@@ -834,9 +813,11 @@ function renderFolderQaResult(data) {
       const isError = item.status === "error";
       const sources = sourceByRequirement.get(requirementId) || [];
       const outputs = placedByRequirement.get(requirementId) || [];
-      const statusText = isError ? "실패" : outputs.length ? "배치 완료" : "대기";
+      const statusText = isError ? "실패" : outputs.length ? "배치 완료" : isPreview ? "매칭 완료" : "대기";
       const metricText = isError
         ? item.error || "처리 중 오류가 발생했습니다."
+        : isPreview
+        ? `입력 ${sources.length}개`
         : `TC ${item.tc_count ?? 0}행 · TS ${item.ts_count ?? 0}행`;
 
       return `
@@ -850,15 +831,17 @@ function renderFolderQaResult(data) {
           </div>
           <div class="folder-qa-columns">
             <section>
-              <h3>선택된 입력 파일</h3>
+              <h3>${isPreview ? "매칭된 파일" : "선택된 입력 파일"}</h3>
               <div class="folder-qa-file-list">${renderSourceRows(sources)}</div>
             </section>
+            ${isPreview ? "" : `
             <section>
               <h3>생성 후 배치된 파일</h3>
               <div class="folder-qa-file-list">${renderPlacedRows(outputs)}</div>
             </section>
+            `}
           </div>
-          ${renderPathDetails(sources, outputs)}
+          ${isPreview ? "" : renderPathDetails(sources, outputs)}
         </article>
       `;
     }).join("");
@@ -867,8 +850,8 @@ function renderFolderQaResult(data) {
   downloadPanel.hidden = false;
   downloadPanel.innerHTML = `
     <div class="download-panel-head">
-      <strong>${data.ok === false ? "QA 생성 현황" : "QA 배치 결과"}</strong>
-      <span>${data.processed_requirement_count ?? 0}/${data.requirement_count ?? 0}개 요구사항</span>
+      <strong>${isPreview ? "QA 매칭 확인" : data.ok === false ? "QA 생성 현황" : "QA 배치 결과"}</strong>
+      <span>${isPreview ? `${data.requirement_count ?? 0}개 요구사항` : `${data.processed_requirement_count ?? 0}/${data.requirement_count ?? 0}개 요구사항`}</span>
     </div>
     <div class="role-count-list">
       <article>
@@ -911,19 +894,86 @@ function renderFolderQaResult(data) {
   `;
 }
 
-async function runFolderQa(event) {
-  event.preventDefault();
+async function validateQaTargetSelection() {
   const dumpRoot = qaDumpRoot?.value?.trim() || "";
-  if (!dumpRoot) {
-    showGenerationError(new Error("QA 대상 산출물 폴더 경로를 입력하세요."), "folder");
-    return;
+  const sourceRoot = qaSourceRoot?.value?.trim() || "";
+  const hasSourceUpload = Boolean(qaSourceFiles?.files?.length);
+  if (!dumpRoot && !sourceRoot && !hasSourceUpload) {
+    showGenerationError(new Error("QA 대상 산출물 폴더 경로를 입력하거나 산출물 폴더를 업로드하세요."), "folder");
+    return null;
   }
 
-  try {
-    localStorage.setItem(LAST_DUMP_ROOT_KEY, dumpRoot);
-  } catch {
-    // 저장 실패는 실행을 막지 않는다.
+  const selectedFolder = sourceRoot
+    ? { path: sourceRoot, label: "다른 산출물 폴더", input: qaSourceRoot }
+    : hasSourceUpload
+    ? null
+    : { path: dumpRoot, label: "산출물 매핑 결과 폴더", input: qaDumpRoot };
+  if (selectedFolder?.path) {
+    const status = await fetchPathStatus(selectedFolder.path);
+    if (!status.ok) {
+      if (selectedFolder.input === qaDumpRoot) {
+        qaDumpRoot.value = "";
+        forgetDumpRoot(selectedFolder.path);
+      }
+      if (selectedFolder.input === qaSourceRoot) {
+        qaSourceRoot.value = "";
+      }
+      showGenerationError(new Error(`${selectedFolder.label}를 찾을 수 없습니다: ${selectedFolder.path}`), "folder");
+      return null;
+    }
   }
+
+  if (dumpRoot && !sourceRoot && !hasSourceUpload) {
+    try {
+      localStorage.setItem(LAST_DUMP_ROOT_KEY, dumpRoot);
+    } catch {
+      // 저장 실패는 실행을 막지 않는다.
+    }
+  }
+
+  return { dumpRoot, sourceRoot, hasSourceUpload };
+}
+
+async function previewFolderQa() {
+  const selection = await validateQaTargetSelection();
+  if (!selection) return;
+
+  setBadge("확인중", "busy");
+  setLoading(true, "QA 매칭 확인 중", "요구사항별 입력 문서 매칭을 확인하고 있습니다.", ["대상 폴더 확인", "5종 문서 매칭", "누락 항목 정리"]);
+  clearDownloads();
+  clearError();
+  resultTitle.textContent = "QA 매칭 확인";
+  resultMeta.textContent = "요청 처리 중입니다.";
+
+  const request = beginCancelableRequest();
+  try {
+    const data = await postForm("/api/preview-qa-folder", buildFormData(folderQaForm), request);
+    setBadge(data.ok ? "확인 완료" : "확인 필요", data.ok ? "done" : "error");
+    resultTitle.textContent = "QA 매칭 확인";
+    resultMeta.textContent = `매칭된 요구사항 ${data.requirement_count ?? 0}개 · 생성 전 파일만 확인했습니다.`;
+    renderFolderQaResult(data);
+  } catch (error) {
+    if (isAbortError(error)) {
+      markRequestCanceled();
+      return;
+    }
+    showGenerationError(error, "folder");
+    if (error.data?.source_files || error.data?.missing_requirements) {
+      resultTitle.textContent = "QA 매칭 확인";
+      resultMeta.textContent = "매칭된 파일과 누락 항목을 확인하세요.";
+      renderFolderQaResult(error.data);
+    }
+  } finally {
+    endCancelableRequest(request);
+    setLoading(false);
+  }
+}
+
+async function runFolderQa(event) {
+  event.preventDefault();
+  const selection = await validateQaTargetSelection();
+  if (!selection) return;
+  const { dumpRoot, sourceRoot } = selection;
 
   setBadge("처리중", "busy");
   setLoading(true, "QA 생성 중", "QA 산출물을 생성하고 있습니다.", QA_LOADING_STEPS);
@@ -937,7 +987,7 @@ async function runFolderQa(event) {
   try {
     const data = await postForm("/api/run-qa-folder", buildFormData(folderQaForm), request);
     setBadge("완료", "done");
-    resultMeta.textContent = `QA 대상 산출물 폴더: ${data.dump_root || dumpRoot}`;
+    resultMeta.textContent = `QA 대상 산출물 폴더: ${data.dump_root || dumpRoot || sourceRoot}`;
     renderFolderQaResult(data);
   } catch (error) {
     if (isAbortError(error)) {
@@ -958,7 +1008,7 @@ async function runTcGeneration(event) {
   event.preventDefault();
   if (!validateFiles(tcForm, [
     ["#tcTemplateHwpx", "기존 단위시험 케이스 HWPX를 선택하세요."],
-    ["#tcUiPdf", "사용자인터페이스 설계서 문서를 선택하세요."],
+    ["#tcUiPdf", "사용자인터페이스 설계서 PDF를 선택하세요."],
   ])) return;
 
   setBadge("처리중", "busy");
@@ -1000,7 +1050,7 @@ async function runTsGeneration(event) {
   if (!validateFiles(tsForm, [
     ["#tsTemplateXlsx", "기존 통합시험 시나리오 XLSX를 선택하세요."],
     ["#tsTcXlsx", "단위시험 케이스 XLSX를 선택하세요."],
-    ["#tsUiPdf", "사용자인터페이스설계서 문서를 선택하세요."],
+    ["#tsUiPdf", "사용자인터페이스설계서 PDF를 선택하세요."],
   ])) return;
 
   setBadge("처리중", "busy");
@@ -1041,6 +1091,7 @@ async function runTsGeneration(event) {
 
 taskTabs.forEach((tab) => tab.addEventListener("click", () => setActiveTask(tab.dataset.taskTab)));
 fileInputs.forEach((input) => input.addEventListener("change", () => updateFileLabel(input)));
+folderPreviewButton?.addEventListener("click", previewFolderQa);
 folderQaForm?.addEventListener("submit", runFolderQa);
 tcForm.addEventListener("submit", runTcGeneration);
 tsForm.addEventListener("submit", runTsGeneration);

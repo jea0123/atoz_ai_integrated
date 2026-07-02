@@ -3,18 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>테스트 케이스/시나리오 생성</title>
-  <link rel="stylesheet" href="/static/qa.css?v=20260526-cancel">
+  <title>QA 산출물 생성 및 배치</title>
+  <link rel="stylesheet" href="/static/qa.css?v=20260702-qa-match-preview">
 </head>
 <body class="qa-page">
   <main class="app-shell">
-    <section class="workspace" aria-label="테스트 케이스/시나리오 생성">
+    <section class="workspace" aria-label="QA 산출물 생성 및 배치">
       <header
         class="topbar"
         data-app-header
         data-active="qa"
-        data-eyebrow="QA"
-        data-title="테스트 케이스/시나리오 생성"
+        data-eyebrow="QA Outputs"
+        data-title="QA 산출물 생성 및 배치"
         data-status-id="statusBadge"
       ></header>
 
@@ -28,64 +28,89 @@
             <form id="folderQaForm" class="folder-qa-form">
               <section class="folder-source-group" aria-labelledby="folderSourceTitle">
                 <div class="folder-source-head">
-                  <strong id="folderSourceTitle">기준 폴더</strong>
-                  <span>산출물 매핑 결과 폴더를 기본으로 사용합니다.</span>
+                  <strong id="folderSourceTitle">
+                    QA 대상 폴더
+                    <span class="method-help" tabindex="0" aria-label="사용자인터페이스설계서, 단위시험케이스, 단위시험결과서, 통합시험시나리오, 통합시험결과서를 자동으로 찾습니다.">?</span>
+                  </strong>
+                </div>
+                <p class="folder-input-note">
+                  선택한 폴더에서 QA 생성에 필요한 문서를 자동으로 찾습니다.
+                </p>
+                <div class="folder-method-heading">
+                  <strong>
+                    대상 폴더 선택 방식
+                    <span class="method-help" tabindex="0" aria-label="아래 방법 중 하나를 선택해 QA를 적용할 폴더를 지정하세요. 다른 폴더 경로나 폴더 업로드를 사용하면 자동 지정된 결과 폴더보다 우선 적용됩니다.">?</span>
+                  </strong>
                 </div>
                 <label class="field auto-source" for="qaDumpRoot">
                   <span class="field-title">
-                    산출물 매핑 결과 폴더
+                    <span class="method-index">1</span>
+                    <span class="method-label">자동 지정된 결과 폴더</span>
+                    <span class="method-help" tabindex="0" aria-label="관리/개발 산출물 또는 템플릿에서 생성한 결과 폴더를 사용합니다.">?</span>
                   </span>
-                  <input id="qaDumpRoot" name="dump_root" type="text" autocomplete="off" placeholder="산출물 매핑 결과 폴더가 자동으로 지정됩니다">
+                  <small class="field-help">자동 생성된 결과 폴더를 사용합니다.</small>
+                  <input id="qaDumpRoot" name="dump_root" type="text" autocomplete="off" placeholder="자동 지정된 결과 폴더">
                 </label>
                 <div class="alternate-source-group" aria-labelledby="alternateSourceTitle">
-                  <div class="folder-section-title" id="alternateSourceTitle">다른 폴더를 사용할 경우</div>
+                  <label class="field" for="qaSourceRoot">
+                    <span class="field-title" id="alternateSourceTitle">
+                      <span class="method-index">2</span>
+                      <span class="method-label">다른 폴더 경로</span>
+                      <span class="method-help" tabindex="0" aria-label="직접 입력한 폴더에서 파일을 교체 배치합니다. 이 값이 있으면 자동 지정된 결과 폴더는 사용하지 않습니다.">?</span>
+                    </span>
+                    <small class="field-help">입력한 폴더에서 교체 배치합니다.</small>
+                    <input id="qaSourceRoot" name="qa_source_root" type="text" autocomplete="off" placeholder="QA를 적용할 산출물 폴더 경로">
+                  </label>
+                  <div class="field folder-upload-title">
+                    <span class="field-title">
+                      <span class="method-index">3</span>
+                      <span class="method-label">산출물 폴더 업로드</span>
+                      <span class="method-help" tabindex="0" aria-label="업로드한 폴더를 qa-folder-dumps 안에 복사한 뒤 그 복사본에서 QA를 생성하고 파일을 교체 배치합니다. 원본 폴더는 수정하지 않습니다.">?</span>
+                    </span>
+                    <small class="field-help">업로드한 폴더의 복사본을 사용합니다.</small>
+                  </div>
                   <label class="drop-zone optional-source" for="qaSourceFiles">
-                    <input id="qaSourceFiles" name="qa_source_files" type="file" accept=".hwp,.hwpx,.pdf,.xlsx" webkitdirectory directory multiple>
+                    <input id="qaSourceFiles" name="qa_source_files" type="file" accept=".hwpx,.pdf,.xlsx" webkitdirectory directory multiple>
                     <span class="file-mark">DIR</span>
                     <strong>
-                      산출물 폴더
+                      폴더 선택
                     </strong>
-                    <small data-file-label="qaSourceFiles">직접 업로드할 때 선택</small>
+                    <small data-file-label="qaSourceFiles">선택된 폴더가 없습니다.</small>
                   </label>
                 </div>
-                <p class="folder-input-note">
-                  <strong>대상 문서</strong>
-                  <span class="target-document-list">
-                    <span>사용자인터페이스설계서</span>
-                    <span>단위시험케이스</span>
-                    <span>단위시험결과서</span>
-                    <span>통합시험시나리오</span>
-                    <span>통합시험결과서</span>
-                  </span>
-                </p>
+                <div class="advanced-folder-section">
+                  <details class="advanced-folder-inputs">
+                    <summary>문서별 위치 따로 지정</summary>
+                    <div class="advanced-folder-inputs-body">
+                      <p>기본 대상 폴더에서 찾지 못하는 입력 문서만 지정하세요. 생성 결과는 위에서 선택한 QA 대상 폴더에 배치됩니다.</p>
+                      <label class="field" for="uiDesignRoot">
+                        <span>사용자인터페이스설계서</span>
+                        <input id="uiDesignRoot" name="ui_design_root" type="text" autocomplete="off" placeholder="사용자인터페이스설계서 폴더 경로">
+                      </label>
+                      <label class="field" for="tcSourceRoot">
+                        <span>단위시험케이스</span>
+                        <input id="tcSourceRoot" name="tc_source_root" type="text" autocomplete="off" placeholder="단위시험케이스 폴더 경로">
+                      </label>
+                      <label class="field" for="unitResultRoot">
+                        <span>단위시험결과서</span>
+                        <input id="unitResultRoot" name="unit_result_root" type="text" autocomplete="off" placeholder="단위시험결과서 폴더 경로">
+                      </label>
+                      <label class="field" for="tsSourceRoot">
+                        <span>통합시험시나리오</span>
+                        <input id="tsSourceRoot" name="ts_source_root" type="text" autocomplete="off" placeholder="통합시험시나리오 폴더 경로">
+                      </label>
+                      <label class="field" for="integrationResultRoot">
+                        <span>통합시험결과서</span>
+                        <input id="integrationResultRoot" name="integration_result_root" type="text" autocomplete="off" placeholder="통합시험결과서 폴더 경로">
+                      </label>
+                    </div>
+                  </details>
+                </div>
               </section>
-              <section class="selected-folder-preview" id="qaSourcePreview" aria-live="polite" hidden></section>
-              <details class="advanced-folder-inputs">
-                <summary>문서별 위치 따로 지정</summary>
-                <div class="advanced-folder-inputs-body">
-                  <p>문서가 서로 다른 위치에 있을 때만 사용하세요.</p>
-                  <label class="field" for="uiDesignRoot">
-                    <span>화면설계서 폴더 경로</span>
-                    <input id="uiDesignRoot" name="ui_design_root" type="text" autocomplete="off" placeholder="화면설계서 폴더 경로">
-                  </label>
-                  <label class="field" for="tcSourceRoot">
-                    <span>단위시험케이스 폴더 경로</span>
-                    <input id="tcSourceRoot" name="tc_source_root" type="text" autocomplete="off" placeholder="단위시험케이스 폴더 경로">
-                  </label>
-                  <label class="field" for="unitResultRoot">
-                    <span>단위시험결과서 폴더 경로</span>
-                    <input id="unitResultRoot" name="unit_result_root" type="text" autocomplete="off" placeholder="단위시험결과서 폴더 경로">
-                  </label>
-                  <label class="field" for="tsSourceRoot">
-                    <span>통합시험시나리오 폴더 경로</span>
-                    <input id="tsSourceRoot" name="ts_source_root" type="text" autocomplete="off" placeholder="통합시험시나리오 폴더 경로">
-                  </label>
-                  <label class="field" for="integrationResultRoot">
-                    <span>통합시험결과서 폴더 경로</span>
-                    <input id="integrationResultRoot" name="integration_result_root" type="text" autocomplete="off" placeholder="통합시험결과서 폴더 경로">
-                  </label>
-                </div>
-              </details>
+              <button class="primary-button folder-preview-button" id="folderPreviewButton" type="button">
+                <span>✓</span>
+                매칭 확인
+              </button>
               <button class="secondary-button folder-submit-button" id="folderQaButton" type="submit">
                 <span>↯</span>
                 생성 및 배치
@@ -114,7 +139,7 @@
                 </label>
 
                 <label class="drop-zone" for="tcUiPdf">
-                  <input id="tcUiPdf" name="ui_pdf" type="file" accept=".hwp,.hwpx,.pdf" multiple>
+                  <input id="tcUiPdf" name="ui_pdf" type="file" accept=".pdf" multiple>
                   <span class="file-mark">DOC</span>
                   <strong>사용자인터페이스설계서</strong>
                   <small data-file-label="tcUiPdf">파일 선택</small>
@@ -138,7 +163,7 @@
                 </label>
 
                 <label class="drop-zone" for="tsUiPdf">
-                  <input id="tsUiPdf" name="ui_pdf" type="file" accept=".hwp,.hwpx,.pdf" multiple>
+                  <input id="tsUiPdf" name="ui_pdf" type="file" accept=".pdf" multiple>
                   <span class="file-mark">DOC</span>
                   <strong>사용자인터페이스설계서</strong>
                   <small data-file-label="tsUiPdf">파일 선택</small>
@@ -175,7 +200,7 @@
     </section>
   </main>
 
-  <script src="/static/header.js?v=20260518-integrated"></script>
-  <script src="/static/qa.js?v=20260527-simple-loading"></script>
+  <script src="/static/header.js?v=20260702-qa-generation-tab"></script>
+  <script src="/static/qa.js?v=20260702-qa-match-preview"></script>
 </body>
 </html>

@@ -1,5 +1,3 @@
-import fitz
-import requests
 import json
 import os
 import re
@@ -12,6 +10,30 @@ from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 from pathlib import Path
 import time
 from document_update.hwpx_text import extract_document_text
+
+try:
+  import requests
+except ImportError:
+  class _RequestsUnavailableExceptions:
+    class Timeout(Exception):
+      pass
+
+    class RequestException(Exception):
+      pass
+
+  class _RequestsUnavailable:
+    exceptions = _RequestsUnavailableExceptions
+
+    @staticmethod
+    def post(*_args, **_kwargs):
+      raise _RequestsUnavailableExceptions.RequestException("requests 패키지가 설치되어 있지 않습니다.")
+
+  requests = _RequestsUnavailable()
+
+try:
+  import fitz
+except ImportError:
+  fitz = None
 
 try:
   from pyhwpx import Hwp
@@ -38,6 +60,10 @@ REQUIRED_TC_KEYS = [
 CIRCLED_NUMBERS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 
 
+class TestCaseGenerationError(RuntimeError):
+  pass
+
+
 def extract_cover_author_from_document(document_path):
   try:
     text = extract_document_text(Path(document_path))
@@ -55,20 +81,29 @@ def extract_cover_author_from_document(document_path):
   return ""
 
 def extract_text_from_pdf(pdf_path):
-  if not os.path.exists(pdf_path):
-    raise FileNotFoundError(f"PDF 파일을 찾을 수 없습니다: {pdf_path}")
-  
-  print(f"\n*** 사용자인터페이스설계서에서 텍스트 추출 중: {pdf_path}")
-  text_content = ""
-  with fitz.open(pdf_path) as doc:
-    for page_num in range(len(doc)): 
-      page = doc.load_page(page_num)
-      page_text = page.get_text()
-      text_content += page_text
+  document_path = Path(pdf_path)
+  if not document_path.exists():
+    raise FileNotFoundError(f"PDF 파일을 찾을 수 없습니다: {document_path}")
 
-  extracted_text = text_content.strip()
+  print(f"\n*** 사용자인터페이스설계서에서 텍스트 추출 중: {document_path}")
+  suffix = document_path.suffix.lower()
+  if suffix != ".pdf":
+    raise ValueError("사용자인터페이스설계서는 PDF 파일만 지원합니다.")
 
-  return extracted_text
+  if fitz is not None:
+    try:
+      text_content = ""
+      with fitz.open(document_path) as doc:
+        for page_num in range(len(doc)):
+          page = doc.load_page(page_num)
+          page_text = page.get_text()
+          text_content += page_text
+      if text_content.strip():
+        return text_content.strip()
+    except Exception:
+      pass
+
+  return extract_document_text(document_path).strip()
 
 def extract_screen_blocks(extracted_text):
   screen_pattern = re.compile(r"\bUI-[A-Z0-9]+(?:-[A-Z0-9]+)+\b")
@@ -394,7 +429,19 @@ def _check_cancel(cancel_check: Callable[[], None] | None) -> None:
     cancel_check()
 
 
-def build_test_cases_from_text(extracted_text, model_name, ollama_url, screen_blocks=None, cancel_check: Callable[[], None] | None = None):
+def _report_progress(progress_callback: Callable[[str], None] | None, message: str) -> None:
+  if progress_callback:
+    progress_callback(message)
+
+
+def build_test_cases_from_text(
+    extracted_text,
+    model_name,
+    ollama_url,
+    screen_blocks=None,
+    cancel_check: Callable[[], None] | None = None,
+    progress_callback: Callable[[str], None] | None = None,
+):
   print(f"\nAI 추론 중... ({model_name})")
 
   system_prompt = """
@@ -534,6 +581,7 @@ def build_test_cases_from_text(extracted_text, model_name, ollama_url, screen_bl
     for step in flow_steps:
       print(f"  - 처리흐름 {step['순서']}: {step['내용']}")
 
+  _report_progress(progress_callback, f"단위시험케이스 AI 생성 시작 | 화면 블록 {len(screen_blocks)}개")
   all_test_cases = []
 
   for idx, block in enumerate(screen_blocks, 1):
@@ -591,6 +639,10 @@ def build_test_cases_from_text(extracted_text, model_name, ollama_url, screen_bl
       print(f"\n[AI 호출] {idx}/{len(screen_blocks)} {screen_id} 처리 중...")
       print(f"[AI 호출 설정] {screen_id}: expected_steps={expected_steps} text_len={len(block['text'])} num_predict={num_predict} timeout={request_timeout}s")
       _check_cancel(cancel_check)
+      _report_progress(
+        progress_callback,
+        f"단위시험케이스 AI 호출 중 | {idx}/{len(screen_blocks)} 화면={screen_id or '-'} timeout={request_timeout}s",
+      )
       response_text = call_ollama(ollama_url, model_name, system_prompt, user_prompt, num_predict=num_predict, timeout=request_timeout)
       _check_cancel(cancel_check)
       parsed_json = parse_llm_json(response_text)
@@ -605,16 +657,24 @@ def build_test_cases_from_text(extracted_text, model_name, ollama_url, screen_bl
 
       print(f"[완료] {screen_id}: 생성 {len(normalized_cases)}개")
 
+      _report_progress(
+        progress_callback,
+        f"단위시험케이스 AI 응답 완료 | {idx}/{len(screen_blocks)} 화면={screen_id or '-'} 생성 {len(normalized_cases)}건",
+      )
       all_test_cases.extend(normalized_cases)
     
     except requests.exceptions.Timeout:
-      print(f"AI 응답 시간 초과({screen_id})")
-      print("첫 API 응답 시간 초과로 전체 테스트 케이스 생성을 중단합니다.")
-      return None
+      message = f"단위시험케이스 AI 응답 시간 초과 | 화면={screen_id or '-'} | timeout={request_timeout}s"
+      print(message)
+      print("AI 응답 시간 초과로 전체 테스트 케이스 생성을 중단합니다.")
+      _report_progress(progress_callback, message)
+      raise TestCaseGenerationError(message)
     except requests.exceptions.RequestException as e:
-      print(f"API 호출 실패({screen_id}): {e}")
-      print("첫 API 호출 실패로 전체 테스트 케이스 생성을 중단합니다.")
-      return None
+      message = f"단위시험케이스 AI 호출 실패 | 화면={screen_id or '-'} | {e}"
+      print(message)
+      print("AI 호출 실패로 전체 테스트 케이스 생성을 중단합니다.")
+      _report_progress(progress_callback, message)
+      raise TestCaseGenerationError(message)
     except (json.JSONDecodeError, ValueError) as e:
       bad_response = response_text if "response_text" in locals() else ""
       print(f"[응답 검증 실패] {screen_id}: {e}")
@@ -632,6 +692,10 @@ def build_test_cases_from_text(extracted_text, model_name, ollama_url, screen_bl
       try:
         print(f"[AI 재호출] {screen_id} 응답 형식 보정 중...")
         _check_cancel(cancel_check)
+        _report_progress(
+          progress_callback,
+          f"단위시험케이스 AI 응답 보정 호출 중 | 화면={screen_id or '-'} timeout={request_timeout}s",
+        )
         retry_text = call_ollama(ollama_url, model_name, system_prompt, retry_prompt, num_predict=num_predict, timeout=request_timeout)
         _check_cancel(cancel_check)
         retry_json = parse_llm_json(retry_text)
@@ -643,11 +707,17 @@ def build_test_cases_from_text(extracted_text, model_name, ollama_url, screen_bl
 
         normalized_cases = sort_and_dedupe_cases(normalized_cases)
         print(f"[재호출 완료] {screen_id}: 생성 {len(normalized_cases)}개")
+        _report_progress(
+          progress_callback,
+          f"단위시험케이스 AI 응답 보정 완료 | 화면={screen_id or '-'} 생성 {len(normalized_cases)}건",
+        )
         all_test_cases.extend(normalized_cases)
       except Exception as retry_error:
+        message = f"단위시험케이스 AI 응답 보정 실패 | 화면={screen_id or '-'} | {retry_error}"
         print(f"[재호출 실패] {screen_id}: {retry_error}")
         print("응답 보정 실패로 전체 테스트 케이스 생성을 중단합니다.")
-        return None
+        _report_progress(progress_callback, message)
+        raise TestCaseGenerationError(message)
 
   print(f"\n전체 생성 테스트 케이스 행 수: {len(all_test_cases)}")
   return all_test_cases
@@ -1078,6 +1148,7 @@ def generate_test_cases(
     extracted_text: str | None = None,
     screen_blocks: list[dict] | None = None,
     cancel_check: Callable[[], None] | None = None,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> dict:
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
@@ -1086,25 +1157,47 @@ def generate_test_cases(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     _check_cancel(cancel_check)
+    _report_progress(progress_callback, "단위시험케이스 템플릿 정보 확인 중")
     cover_author = extract_cover_author_from_document(template_path)
     _check_cancel(cancel_check)
+    if extracted_text is None:
+        _report_progress(progress_callback, f"설계서 텍스트 추출 중 | {pdf_path.name}")
     extract_text = extracted_text if extracted_text is not None else extract_text_from_pdf(pdf_path)
+    _report_progress(progress_callback, f"설계서 텍스트 추출 완료 | {len(extract_text)}자")
     _check_cancel(cancel_check)
-    tc_data = build_test_cases_from_text(extract_text, model_name, ollama_url, screen_blocks=screen_blocks, cancel_check=cancel_check)
+    try:
+        tc_data = build_test_cases_from_text(
+            extract_text,
+            model_name,
+            ollama_url,
+            screen_blocks=screen_blocks,
+            cancel_check=cancel_check,
+            progress_callback=progress_callback,
+        )
+    except TestCaseGenerationError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "files": [],
+        }
     _check_cancel(cancel_check)
 
     if not tc_data:
+        message = "단위시험케이스 생성 0건 | 설계서의 화면ID 또는 처리흐름을 찾지 못했거나 AI 응답에 유효한 test_cases가 없습니다."
+        _report_progress(progress_callback, message)
         return {
             "ok": False,
-            "error": "단위시험 케이스 생성 결과가 없습니다.",
+            "error": message,
             "files": [],
         }
 
+    _report_progress(progress_callback, f"단위시험케이스 XLSX 저장 중 | {len(tc_data)}건")
     excel_path = save_test_cases_to_excel(tc_data, output_dir, performer=cover_author)
     _check_cancel(cancel_check)
 
     files = []
     if excel_path:
+        _report_progress(progress_callback, f"단위시험케이스 XLSX 저장 완료 | {excel_path.name}")
         files.append({
             "kind": "xlsx",
             "path": str(excel_path),
@@ -1114,6 +1207,7 @@ def generate_test_cases(
     if HWP_AVAILABLE and template_path.exists():
         _check_cancel(cancel_check)
         hwpx_path = output_dir / f"generated_TC_{int(time.time())}.hwpx"
+        _report_progress(progress_callback, f"단위시험케이스 HWPX 저장 중 | {template_path.name}")
         saved_hwpx = save_test_cases_to_hwpx(
             tc_data,
             temp_path=str(template_path),
@@ -1122,6 +1216,7 @@ def generate_test_cases(
         )
         if saved_hwpx:
             saved_hwpx = Path(saved_hwpx)
+            _report_progress(progress_callback, f"단위시험케이스 HWPX 저장 완료 | {saved_hwpx.name}")
             files.append({
                 "kind": "hwpx",
                 "path": str(saved_hwpx),
