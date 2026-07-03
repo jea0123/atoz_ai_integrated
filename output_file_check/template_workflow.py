@@ -20,9 +20,15 @@ from output_file_check.content_identity import read_file_identity, read_standard
 from output_file_check.file_noise import is_noise_filename
 from output_file_check.models import StandardOutput
 from output_file_check.normalization import filesystem_safe_stem, normalize_for_match
-from output_file_check.requirement_generation import extract_requirement_ids
+from output_file_check.requirement_generation import (
+    RequirementSource,
+    create_requirement_source_folders,
+    extract_requirement_ids,
+)
 from output_file_check.standard_reader import extract_standard_text, read_standard_outputs
 from web_uploads import (
+    ARTIFACT_UPLOAD_SUPPORTED_SUFFIXES,
+    IGNORED_UPLOAD_FOLDER_KEYS,
     save_proposal_requirement_uploads,
     save_requirement_uploads,
     safe_relative_upload_path,
@@ -40,18 +46,7 @@ DEFAULT_DOCUMENT_VERSION = "v0.1"
 STANDARD_SUFFIXES = {".pdf", ".hwp", ".hwpx"}
 TOKEN_PATTERN = re.compile(r"\{\{\s*([A-Z0-9_]+)\s*\}\}")
 REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
-SUPPORTED_TEMPLATE_SUFFIXES = {
-    ".hwp",
-    ".hwpx",
-    ".docx",
-    ".docm",
-    ".pptx",
-    ".pptm",
-    ".xlsx",
-    ".xlsm",
-    ".xltx",
-    ".xltm",
-}
+SUPPORTED_TEMPLATE_SUFFIXES = ARTIFACT_UPLOAD_SUPPORTED_SUFFIXES
 COVER_SUFFIXES_BY_TYPE = {
     "ppt": {".pptx", ".pptm"},
     "excel": {".xlsx", ".xlsm", ".xltx", ".xltm"},
@@ -112,7 +107,8 @@ def run_template_build(
     standard_project_title = read_standard_project_title(standard_path, standard_text)
     source_dir = save_artifact_source(temp_dir, file_items, category)
     body_templates = load_body_templates(TEMPLATE_CATEGORY_DIRS[category])
-    requirement_sources = save_requirement_sources_for_category(temp_dir, file_items, category)
+    requirement_paths = save_requirement_sources_for_category(temp_dir, file_items, category)
+    requirement_sources = build_requirement_sources(requirement_paths)
     requirement_ids = collect_requirement_ids(requirement_sources)
     token_values = build_cover_token_values(fields, requirement_ids, standard_project_title)
 
@@ -123,6 +119,11 @@ def run_template_build(
     copied_items = (
         copy_template_outputs(inputs, output_root, work_root=temp_dir / "template-output-work")
         if apply_mode
+        else []
+    )
+    requirement_folder_items = (
+        create_requirement_source_folders(output_root / "outputs", requirement_sources)
+        if apply_mode and category == "development"
         else []
     )
     report_path = None
@@ -136,7 +137,7 @@ def run_template_build(
             body_template_dir=TEMPLATE_CATEGORY_DIRS[category],
             body_template_count=len(body_templates),
             requirement_ids=requirement_ids,
-            requirement_sources=requirement_sources,
+            requirement_sources=requirement_paths,
             token_values=token_values,
             items=inputs,
         )
@@ -170,6 +171,13 @@ def run_template_build(
         "matched_count": sum(1 for item in inputs if item.status == "matched"),
         "requirement_count": len(requirement_ids),
         "requirement_ids": requirement_ids,
+        "requirement_generated_folder_count": sum(
+            1 for item in requirement_folder_items if item.get("status") != "error"
+        ),
+        "requirement_generation_created_folder_count": sum(
+            1 for item in requirement_folder_items if item.get("status") == "created"
+        ),
+        "requirement_generation_folder_items": requirement_folder_items,
         "token_values": token_values,
         "items": [serialize_template_item(item, output_root, applied=apply_mode) for item in inputs],
         "files": files,
@@ -269,11 +277,20 @@ def load_body_templates(template_dir: Path) -> list[BodyTemplate]:
     return templates
 
 
-def collect_requirement_ids(paths: list[Path]) -> list[str]:
+def build_requirement_sources(paths: list[Path]) -> list[RequirementSource]:
+    sources: list[RequirementSource] = []
+    for path in paths:
+        requirement_ids = extract_requirement_ids(path.name)
+        if requirement_ids:
+            sources.append(RequirementSource(path=path, requirement_ids=requirement_ids))
+    return sources
+
+
+def collect_requirement_ids(sources: list[RequirementSource]) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
-    for path in paths:
-        for requirement_id in extract_requirement_ids(path.name):
+    for source in sources:
+        for requirement_id in source.requirement_ids:
             key = requirement_id.upper()
             if key in seen:
                 continue
@@ -355,6 +372,9 @@ def scan_artifact_inputs(
         except ValueError:
             relative_path = path.name
 
+        if should_ignore_artifact_relative_path(relative_path):
+            continue
+
         identity = read_file_identity(path)
         input_has_cover = input_file_has_cover(path, identity)
         standard_output, standard_match_type = find_standard_output(path, relative_path, identity, standard_outputs)
@@ -422,6 +442,11 @@ def scan_artifact_inputs(
     return items
 
 
+def should_ignore_artifact_relative_path(relative_path: str) -> bool:
+    parts = Path(relative_path).parts[:-1]
+    return any(normalize_for_match(part) in IGNORED_UPLOAD_FOLDER_KEYS for part in parts)
+
+
 def input_file_has_cover(path: Path, identity: object) -> bool:
     suffix = path.suffix.lower()
     if suffix in COVER_SUFFIXES_BY_TYPE["excel"]:
@@ -458,12 +483,21 @@ def find_standard_output(
         ("cover_document_title", lambda output: document_title_matches_output(document_title_key, output)),
         ("filename_output_name", lambda output: output_name_matches_key(file_key, output)),
         ("path_output_name", lambda output: output_name_matches_key(relative_key, output)),
+        ("filename_output_id", lambda output: output_id_matches_key(file_key, output)),
+        ("path_output_id", lambda output: output_id_matches_key(relative_key, output)),
     )
     for match_type, predicate in matchers:
         for output in outputs:
             if predicate(output):
                 return output, match_type
     return None, ""
+
+
+def output_id_matches_key(value_key: str, output: StandardOutput) -> bool:
+    if not value_key:
+        return False
+    output_id_key = normalize_for_match(output.output_id)
+    return bool(output_id_key and (value_key == output_id_key or output_id_key in value_key))
 
 
 def document_title_matches_output(document_title_key: str, output: StandardOutput) -> bool:

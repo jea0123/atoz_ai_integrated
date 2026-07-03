@@ -87,6 +87,10 @@ function syncMatchModeDisplay() {
   });
 }
 
+function selectedFolderFiles() {
+  return UploadFilters.selectedFiles(folderFiles?.files, UploadFilters.CHECK_EXTENSIONS);
+}
+
 async function loadRuntimeMode() {
   try {
     const response = await fetch("/api/runtime-mode", { cache: "no-store" });
@@ -142,8 +146,8 @@ function buildFormData({ includeRequirementFiles = true } = {}) {
   const body = new FormData();
   body.append("standard_file", standardFile.files[0], standardFile.files[0].name);
 
-  for (const file of folderFiles.files) {
-    body.append("folder_files", file, file.webkitRelativePath || file.name);
+  for (const file of selectedFolderFiles()) {
+    body.append("folder_files", file, UploadFilters.relativePath(file));
   }
   if (includeRequirementFiles && requirementFiles) {
     for (const file of requirementFiles.files) {
@@ -526,6 +530,11 @@ function validateRequiredFiles({ applyMode = false } = {}) {
   if (requireFolder && !folderFiles.files.length) {
     setBadge("확인", "error");
     resultMeta.textContent = "검사할 폴더를 선택하세요.";
+    return false;
+  }
+  if (requireFolder && !selectedFolderFiles().length) {
+    setBadge("확인", "error");
+    resultMeta.textContent = "지원하는 산출물 문서가 없습니다. bak/backup/old와 비문서 파일은 제외됩니다.";
     return false;
   }
   if (applyMode && !validateInitialRevisionInputs()) {

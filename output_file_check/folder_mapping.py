@@ -24,6 +24,7 @@ from output_file_check.folder_policy import FolderPolicy
 from output_file_check.folder_scanner import scan_folder
 from output_file_check.matcher import DEFAULT_MATCH_THRESHOLD
 from output_file_check.models import OutputMatch, PathTemplate, ScannedFile, StandardOutput
+from output_file_check.normalization import normalize_for_match
 from output_file_check.path_template_reader import read_path_templates
 from output_file_check.standard_reader import extract_standard_text, normalize_artifact_category, read_standard_outputs
 
@@ -90,7 +91,10 @@ def build_folder_mapping(
     artifact_category = normalize_artifact_category(fields.get("artifact_category"))
     standard_outputs = read_standard_outputs(standard_file, standard_text, category=artifact_category)
     path_templates = read_path_templates(standard_file, standard_outputs, standard_text)
-    outputs = build_outputs_from_path_templates(standard_outputs, path_templates)
+    outputs = merge_reference_outputs(
+        build_outputs_from_path_templates(standard_outputs, path_templates),
+        standard_outputs,
+    )
     if artifact_category == "management" and not outputs:
         outputs = standard_outputs
     log_standard_extraction(
@@ -135,6 +139,21 @@ def build_folder_mapping(
         matches=matches,
         match_mode=match_mode,
     )
+
+
+def merge_reference_outputs(
+    template_outputs: list[StandardOutput],
+    standard_outputs: list[StandardOutput],
+) -> list[StandardOutput]:
+    merged: list[StandardOutput] = []
+    seen: set[str] = set()
+    for output in [*template_outputs, *standard_outputs]:
+        key = normalize_for_match(output.output_name)
+        if not key or key in seen:
+            continue
+        merged.append(output)
+        seen.add(key)
+    return merged
 
 
 def log_standard_extraction(

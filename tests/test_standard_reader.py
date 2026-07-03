@@ -1,6 +1,7 @@
 from pathlib import Path
 import unittest
 
+from output_file_check.folder_mapping import merge_reference_outputs
 from output_file_check.path_template_reader import read_path_templates
 from output_file_check.models import StandardOutput
 from output_file_check.standard_reader import extract_output_section, read_standard_outputs
@@ -169,6 +170,29 @@ class StandardReaderManagementSectionTest(unittest.TestCase):
         self.assertIn(
             ("01.프로젝트 시작", "03.프로젝트 종료"),
             [template.template_path for template in templates],
+        )
+
+    def test_implementation_stage_adds_unit_test_result_template(self) -> None:
+        templates = read_path_templates(
+            Path("standard.pdf"),
+            [StandardOutput("MFDS-ADT-D0201-01", "단위시험결과서")],
+            "04.구현\n단위시험결과서 MFDS-ADT-D0201-01-단위시험결과서",
+        )
+
+        self.assertIn(
+            ("04.구현", "02.단위시험", "01.단위시험"),
+            [template.template_path for template in templates],
+        )
+
+    def test_reference_outputs_keep_standard_outputs_without_path_template(self) -> None:
+        template_output = StandardOutput("MFDS-ADT-A0401-01", "단위시험케이스")
+        standard_output = StandardOutput("MFDS-ADT-D0201-01", "단위시험결과서")
+
+        outputs = merge_reference_outputs([template_output], [template_output, standard_output])
+
+        self.assertEqual(
+            ["단위시험케이스", "단위시험결과서"],
+            [output.output_name for output in outputs],
         )
 
 

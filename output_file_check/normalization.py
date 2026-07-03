@@ -18,6 +18,23 @@ ATTACHMENT_BRACKET_TAIL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 ATTACHMENT_WORD_TAIL_PATTERN = re.compile(r"[\s_-]*(?:별첨|첨부)\s*\d+.*$", re.IGNORECASE)
+FILENAME_SUFFIXES = {
+    ".hwp",
+    ".hwpx",
+    ".doc",
+    ".docx",
+    ".docm",
+    ".ppt",
+    ".pptx",
+    ".pptm",
+    ".xls",
+    ".xlsx",
+    ".xlsm",
+    ".pdf",
+    ".txt",
+    ".csv",
+    ".zip",
+}
 
 
 def compact_space(value: str) -> str:
@@ -33,7 +50,7 @@ def clean_text(value: str) -> str:
 
 def normalize_for_match(value: str) -> str:
     text = unicodedata.normalize("NFKC", value)
-    text = Path(text).stem if "." in text else text
+    text = Path(text).stem if should_strip_filename_suffix(text) else text
     text = VERSION_TOKEN_PATTERN.sub("", text)
     text = REQUEST_ID_PATTERN.sub("", text)
     text = text.replace("테스트", "시험")
@@ -42,9 +59,17 @@ def normalize_for_match(value: str) -> str:
     return text.casefold()
 
 
+def should_strip_filename_suffix(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text or "\n" in text or "\r" in text:
+        return False
+    suffix = Path(text).suffix.lower()
+    return suffix in FILENAME_SUFFIXES
+
+
 def strip_attachment_tail(value: str) -> str:
     text = str(value)
-    stem = Path(text).stem if "." in text else text
+    stem = Path(text).stem if should_strip_filename_suffix(text) else text
     for pattern in (ATTACHMENT_BRACKET_TAIL_PATTERN, ATTACHMENT_WORD_TAIL_PATTERN):
         trimmed = pattern.sub("", stem).strip(" -_\t\r\n")
         if trimmed != stem:

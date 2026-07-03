@@ -163,6 +163,16 @@ def build_known_stage_templates(document_text: str) -> list[PathTemplate]:
             ]
         )
 
+    if "04.구현" in compact:
+        templates.extend(
+            [
+                make_template("프로그램목록", "04.구현", "01.어플리케이션개발", "01.프로그램개발", "01.프로그램목록"),
+                make_template("SQL튜닝요청서", "04.구현", "03.SQL개발"),
+                make_template("SQL튜닝결과서", "04.구현", "03.SQL개발"),
+                make_template("단위시험결과서", "04.구현", "02.단위시험", "01.단위시험"),
+            ]
+        )
+
     return templates
 
 

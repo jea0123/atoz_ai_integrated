@@ -62,6 +62,10 @@ function folderSummary(files, fallback) {
   return `${rootName} · ${files.length}개`;
 }
 
+function selectedArtifactFiles() {
+  return UploadFilters.selectedFiles(artifactFiles?.files, UploadFilters.ARTIFACT_EXTENSIONS);
+}
+
 function syncFileLabels() {
   if (standardName) {
     standardName.textContent = fileSummary(standardFile?.files, "문서관리표준을 선택하세요");
@@ -84,6 +88,11 @@ function syncFileLabels() {
 
 function buildFormData(mode) {
   const body = new FormData(templateForm);
+  body.delete("artifact_files");
+  body.delete("template_files");
+  for (const file of selectedArtifactFiles()) {
+    body.append("artifact_files", file, UploadFilters.relativePath(file));
+  }
   body.append("request_id", crypto.randomUUID?.() || String(Date.now()));
   body.append("template_mode", mode);
   if (mode === "apply") {
@@ -152,6 +161,9 @@ function validateInputs() {
   }
   if (!artifactFiles?.files?.length) {
     throw new ValidationError("산출물 입력폴더를 선택하세요.");
+  }
+  if (!selectedArtifactFiles().length) {
+    throw new ValidationError("지원하는 산출물 문서가 없습니다. bak/backup/old와 비문서 파일은 제외됩니다.");
   }
 }
 

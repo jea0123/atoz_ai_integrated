@@ -21,7 +21,7 @@ from .excel_ooxml import (
 from .header_metadata import (
     unlabeled_header_metadata_indexes as shared_unlabeled_header_metadata_indexes,
 )
-from .hwpx_text import is_hwpx_zip, strip_hwpx_line_seg_arrays
+from .hwpx_text import editable_hwpx_part_scope, is_hwpx_zip, split_hwpx_cover_edit_scope, strip_hwpx_line_seg_arrays
 from .patterns import (
     CELL_PATTERN,
     OUTPUT_ID_PATTERN,
@@ -574,6 +574,7 @@ def write_updated_project_title(
         shutil.copy2(file_path, backup_path)
 
     replace_count = 0
+    is_hwpx = is_hwpx_zip(file_path)
     try:
         with zipfile.ZipFile(file_path, "r") as zin:
             with zipfile.ZipFile(write_path, "w", zipfile.ZIP_DEFLATED) as zout:
@@ -581,12 +582,18 @@ def write_updated_project_title(
                     data = zin.read(item.filename)
                     if item.filename.lower().endswith(".xml"):
                         xml = data.decode("utf-8", errors="ignore")
-                        xml, count = replace_matching_text_nodes(xml, old_project_title, new_project_title)
+                        editable_xml, preserved_xml = (
+                            editable_hwpx_part_scope(item.filename, xml) if is_hwpx else (xml, "")
+                        )
+                        if not editable_xml:
+                            zout.writestr(item, data)
+                            continue
+                        editable_xml, count = replace_matching_text_nodes(editable_xml, old_project_title, new_project_title)
                         if count:
                             replace_count += count
-                            if is_hwpx_zip(file_path):
-                                xml, _line_seg_count = strip_hwpx_line_seg_arrays(xml)
-                            data = xml.encode("utf-8")
+                            if is_hwpx:
+                                editable_xml, _line_seg_count = strip_hwpx_line_seg_arrays(editable_xml)
+                            data = (editable_xml + preserved_xml).encode("utf-8")
                     zout.writestr(item, data)
 
         updated_path = write_path
@@ -619,9 +626,10 @@ def write_updated_hwpx_document(
 
     with zipfile.ZipFile(file_path, "r") as source_zip:
         section_xml = source_zip.read("Contents/section0.xml").decode("utf-8", errors="ignore")
-        old_document_number = find_document_number_cell_value(section_xml)
+        cover_xml, _body_xml = split_hwpx_cover_edit_scope(section_xml)
+        old_document_number = find_document_number_cell_value(cover_xml)
         inferred_project_title = infer_cover_project_title_from_xml(
-            section_xml,
+            cover_xml,
             expected_project_title=new_project_title,
         )
 
@@ -650,11 +658,15 @@ def write_updated_hwpx_document(
 
                     if item.filename.lower().endswith(".xml"):
                         xml = data.decode("utf-8", errors="ignore")
+                        editable_xml, preserved_xml = editable_hwpx_part_scope(item.filename, xml)
+                        if not editable_xml:
+                            zout.writestr(item, data)
+                            continue
                         changed = False
 
                         for project_title_to_scan in project_titles_to_scan:
-                            xml, count = replace_matching_text_nodes(
-                                xml,
+                            editable_xml, count = replace_matching_text_nodes(
+                                editable_xml,
                                 project_title_to_scan,
                                 new_project_title,
                             )
@@ -663,11 +675,11 @@ def write_updated_hwpx_document(
                                 changed = True
 
                         (
-                            xml,
+                            editable_xml,
                             labeled_old_document_numbers,
                             labeled_replace_count,
                             labeled_found_count,
-                        ) = replace_document_number_labeled_cells(xml, new_document_number)
+                        ) = replace_document_number_labeled_cells(editable_xml, new_document_number)
                         if labeled_found_count:
                             document_number_position_found = True
                         if labeled_replace_count:
@@ -675,17 +687,17 @@ def write_updated_hwpx_document(
                             matching_document_number_replace_count += labeled_replace_count
                             changed = True
 
-                        xml, count = replace_document_version_labeled_cells(xml)
+                        editable_xml, count = replace_document_version_labeled_cells(editable_xml)
                         if count:
                             changed = True
 
-                        xml, count = replace_unlabeled_header_version_cells(xml)
+                        editable_xml, count = replace_unlabeled_header_version_cells(editable_xml)
                         if count:
                             changed = True
 
                         for document_number_to_scan in document_numbers_to_scan:
-                            xml, count = replace_matching_text_nodes(
-                                xml,
+                            editable_xml, count = replace_matching_text_nodes(
+                                editable_xml,
                                 document_number_to_scan,
                                 new_document_number,
                             )
@@ -694,8 +706,8 @@ def write_updated_hwpx_document(
                                 changed = True
 
                         if changed:
-                            xml, _line_seg_count = strip_hwpx_line_seg_arrays(xml)
-                            data = xml.encode("utf-8")
+                            editable_xml, _line_seg_count = strip_hwpx_line_seg_arrays(editable_xml)
+                            data = (editable_xml + preserved_xml).encode("utf-8")
 
                     zout.writestr(item, data)
 

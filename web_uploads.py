@@ -13,17 +13,10 @@ from output_file_check.requirement_generation import extract_requirement_ids
 
 
 PROPOSAL_FILE_FIELDS = ("proposal_files", "proposal_file", "rfp_files", "rfp_file")
-PROPOSAL_SUPPORTED_SUFFIXES = {
-    ".pdf",
-    ".hwp",
-    ".hwpx",
-    ".docx",
-    ".docm",
-    ".xlsx",
-    ".xlsm",
-    ".xltx",
-    ".xltm",
-}
+ARTIFACT_UPLOAD_SUPPORTED_SUFFIXES = {".hwp", ".hwpx", ".docx", ".docm", ".pptx", ".pptm", ".xlsx", ".xlsm", ".xltx", ".xltm"}
+PROPOSAL_SUPPORTED_SUFFIXES = ARTIFACT_UPLOAD_SUPPORTED_SUFFIXES | {".pdf"}
+CHECK_FOLDER_SUPPORTED_SUFFIXES = ARTIFACT_UPLOAD_SUPPORTED_SUFFIXES | {".xls", ".doc", ".ppt", ".potx", ".potm", ".ppsx", ".ppsm"}
+IGNORED_UPLOAD_FOLDER_KEYS = {"bak", "backup", "old"}
 PROPOSAL_OOXML_TEXT_SUFFIXES = {".docx", ".docm"}
 REQUIREMENT_LIST_MARKER_PATTERN = re.compile(
     r"요구\s*사항\s*(?:목록\s*표?|리스트|명세|정의)|기능\s*요구\s*사항",
@@ -91,6 +84,16 @@ def safe_relative_upload_path(filename: str, fallback_name: str) -> Path:
     return Path(*parts)
 
 
+def normalize_upload_folder_part(value: str) -> str:
+    text = unicodedata.normalize("NFKC", value or "")
+    text = re.sub(r"\s+", "", text)
+    return text.casefold()
+
+
+def has_ignored_upload_folder(path: Path) -> bool:
+    return any(normalize_upload_folder_part(part) in IGNORED_UPLOAD_FOLDER_KEYS for part in path.parts[:-1])
+
+
 def save_check_uploads(
     temp_dir: Path,
     file_items: dict[str, list[tuple[str, bytes]]],
@@ -125,8 +128,12 @@ def save_check_uploads(
         if is_noise_filename(filename):
             continue
         suffix = Path(filename).suffix.lower()
+        if suffix not in CHECK_FOLDER_SUPPORTED_SUFFIXES:
+            continue
 
         relative_path = safe_relative_upload_path(filename, f"file-{index}{suffix}")
+        if has_ignored_upload_folder(relative_path):
+            continue
         target_path = folder_dir / relative_path
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(payload)

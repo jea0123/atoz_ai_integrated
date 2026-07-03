@@ -212,6 +212,8 @@ def parse_target_names(raw_value: str | None, *, target_scope: str | None = None
 
 
 def should_create_requirement_source_folders(fields: dict[str, str]) -> bool:
+    if str(fields.get("artifact_category") or "").strip().casefold() == "management":
+        return False
     raw = (
         fields.get("requirement_generation_create_source_folders")
         or fields.get("create_requirement_source_folders")

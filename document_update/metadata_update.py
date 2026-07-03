@@ -31,6 +31,7 @@ from .header_metadata import (
     unlabeled_header_slot_is_clean,
 )
 from .hwpx_text import (
+    editable_hwpx_part_scope,
     extract_document_text,
     is_hwpx_zip,
     strip_hwpx_line_seg_arrays,
@@ -1547,29 +1548,33 @@ def write_updated_hwpx_metadata(
                     data = zin.read(item.filename)
                     if item.filename.lower().endswith(".xml"):
                         xml = data.decode("utf-8", errors="ignore")
+                        editable_xml, preserved_xml = editable_hwpx_part_scope(item.filename, xml)
+                        if not editable_xml:
+                            zout.writestr(item, data)
+                            continue
                         changed_count = 0
-                        xml, count = update_label_right_rows_in_xml(xml, DATE_LABELS, revision_date)
+                        editable_xml, count = update_label_right_rows_in_xml(editable_xml, DATE_LABELS, revision_date)
                         cover_count += count
                         changed_count += count
-                        xml, count = update_label_right_rows_in_xml(xml, AUTHOR_LABELS, author)
+                        editable_xml, count = update_label_right_rows_in_xml(editable_xml, AUTHOR_LABELS, author)
                         cover_count += count
                         changed_count += count
-                        xml, count = update_label_right_rows_in_xml(xml, VERSION_LABELS, DOCUMENT_VERSION_VALUE)
+                        editable_xml, count = update_label_right_rows_in_xml(editable_xml, VERSION_LABELS, DOCUMENT_VERSION_VALUE)
                         cover_count += count
                         changed_count += count
                         if document_number:
-                            xml, count = update_label_right_rows_in_xml(xml, DOCUMENT_NUMBER_LABELS, document_number)
+                            editable_xml, count = update_label_right_rows_in_xml(editable_xml, DOCUMENT_NUMBER_LABELS, document_number)
                             cover_count += count
                             changed_count += count
-                        xml, count = update_unlabeled_metadata_rows_xml(xml, revision_date, author, document_number)
+                        editable_xml, count = update_unlabeled_metadata_rows_xml(editable_xml, revision_date, author, document_number)
                         cover_count += count
                         changed_count += count
-                        xml, count = update_revision_history_xml(xml, revision_date, author, approval_author)
+                        editable_xml, count = update_revision_history_xml(editable_xml, revision_date, author, approval_author)
                         revision_count += count
                         changed_count += count
                         if changed_count:
-                            xml, _line_seg_count = strip_hwpx_line_seg_arrays(xml)
-                            data = xml.encode("utf-8")
+                            editable_xml, _line_seg_count = strip_hwpx_line_seg_arrays(editable_xml)
+                            data = (editable_xml + preserved_xml).encode("utf-8")
                         elif item.filename.lower() == "settings.xml":
                             xml, view_count = reset_hwpx_open_position(xml)
                             if view_count:

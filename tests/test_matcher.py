@@ -4,6 +4,7 @@ import unittest
 from output_file_check.folder_matching import find_contiguous_subpath, match_files_by_folder_path
 from output_file_check.matcher import score_file
 from output_file_check.models import FileIdentity, ScannedFile, StandardOutput
+from output_file_check.normalization import normalize_for_match
 
 
 class MatcherIgnoresOutputIdTest(unittest.TestCase):
@@ -61,6 +62,17 @@ class MatcherIgnoresOutputIdTest(unittest.TestCase):
         self.assertEqual(
             0,
             find_contiguous_subpath(("3.프로젝트 종료",), ("03.프로젝트 종료",)),
+        )
+
+    def test_normalize_long_cover_text_does_not_strip_after_date_dot(self) -> None:
+        text = "문서버전 v1.0 개정일자 2024.10.17 단위시험결과서"
+
+        self.assertIn("단위시험결과서", normalize_for_match(text))
+
+    def test_normalize_file_name_still_strips_document_suffix(self) -> None:
+        self.assertEqual(
+            "mfdsadtd020101단위시험결과서",
+            normalize_for_match("MFDS-ADT-D0201-01-단위시험결과서_SFR-IIL-002_v0.1.hwpx"),
         )
 
 

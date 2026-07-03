@@ -11,6 +11,7 @@ from output_file_check.requirement_generation import (
     generate_requirement_documents,
     reset_program_source_root,
     select_applied_template_paths,
+    should_create_requirement_source_folders,
     should_require_template_requirement_id,
     template_has_requirement_id_tail,
 )
@@ -43,6 +44,19 @@ class RequirementGenerationTemplateSelectionTest(unittest.TestCase):
         ):
             with self.subTest(filename=filename):
                 self.assertFalse(template_has_requirement_id_tail(self.output, Path(filename)))
+
+    def test_management_scope_does_not_create_program_source_folders(self) -> None:
+        self.assertFalse(
+            should_create_requirement_source_folders(
+                {
+                    "artifact_category": "management",
+                    "requirement_generation_create_source_folders": "true",
+                }
+            )
+        )
+
+    def test_development_scope_creates_program_source_folders_by_default(self) -> None:
+        self.assertTrue(should_create_requirement_source_folders({"artifact_category": "development"}))
 
     def test_extract_requirement_ids_ignores_non_sfr_ids(self) -> None:
         self.assertEqual((), extract_requirement_ids("REQ-001.txt"))

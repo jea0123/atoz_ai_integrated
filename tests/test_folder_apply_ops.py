@@ -48,6 +48,47 @@ class FolderApplyOpsTest(unittest.TestCase):
 
         self.assertEqual("14-요구사항정의서_SFR-ESS-001_v0.1.hwpx", filename)
 
+    def test_apply_candidate_skips_hwp_without_cover_signal(self) -> None:
+        source = Path.cwd() / "부적합관리대장.hwpx"
+        output = StandardOutput(
+            output_id="MFDS-QA-01",
+            output_name="부적합관리대장",
+        )
+        candidate = MatchCandidate(
+            output=output,
+            file=ScannedFile(
+                source,
+                FileIdentity(
+                    project_title="1. 부적합 현황",
+                    document_title="부적합관리대장",
+                    preview_text="1. 부적합 현황\n2. 부적합 사항",
+                ),
+            ),
+            score=1.0,
+            reason="test",
+        )
+
+        with (
+            patch("output_file_check.folder_apply_ops.prepare_target_file") as prepare_mock,
+            patch("output_file_check.folder_apply_ops.write_updated_document") as update_mock,
+        ):
+            result = apply_batch_candidate(
+                candidate,
+                "신규 프로젝트",
+                Path.cwd() / "temp",
+                revision_metadata={
+                    "revision_date": "2026-00-00",
+                    "author": "",
+                    "approval_author": "",
+                },
+                rename_files=True,
+            )
+
+        self.assertEqual("skipped", result["status"])
+        self.assertEqual(str(source), result["new_path"])
+        prepare_mock.assert_not_called()
+        update_mock.assert_not_called()
+
     def test_management_apply_scope_ignores_top_level_files(self) -> None:
         root = Path.cwd() / "dump"
         output = StandardOutput(output_id="20", output_name="risk")
@@ -317,7 +358,7 @@ class FolderApplyOpsTest(unittest.TestCase):
         finally:
             shutil.rmtree(dump_root, ignore_errors=True)
 
-    def test_unmatched_hwp_without_identity_does_not_trigger_content_read(self) -> None:
+    def test_unmatched_hwp_without_identity_reads_content_like_other_types(self) -> None:
         dump_root = Path.cwd() / ".test-artifacts" / uuid4().hex
         source = dump_root / "templates" / "manual-form.hwp"
         source.parent.mkdir(parents=True, exist_ok=True)
@@ -328,7 +369,10 @@ class FolderApplyOpsTest(unittest.TestCase):
                     "output_file_check.folder_apply_ops.scan_folder",
                     return_value=[ScannedFile(source, None)],
                 ),
-                patch("output_file_check.folder_apply_ops.read_file_identity") as read_identity_mock,
+                patch(
+                    "output_file_check.folder_apply_ops.read_file_identity",
+                    return_value=FileIdentity(project_title="2026년도 수입식품통합정보시스템 고도화"),
+                ) as read_identity_mock,
                 patch("output_file_check.folder_apply_ops.apply_batch_candidate") as apply_mock,
                 patch("output_file_check.folder_apply_ops.write_updated_project_title") as project_only_mock,
             ):
@@ -345,10 +389,10 @@ class FolderApplyOpsTest(unittest.TestCase):
                         "author": "author",
                         "approval_author": "approval",
                     },
-                )
+            )
 
             self.assertEqual([], items)
-            read_identity_mock.assert_not_called()
+            read_identity_mock.assert_called_once_with(source)
             apply_mock.assert_not_called()
             project_only_mock.assert_not_called()
         finally:

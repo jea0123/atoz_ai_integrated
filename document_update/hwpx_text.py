@@ -13,6 +13,7 @@ import tempfile
 import winreg
 import zipfile
 import zlib
+from xml.sax.saxutils import unescape
 
 from app_runtime import log_event
 from .patterns import TEXT_NODE_PATTERN
@@ -47,6 +48,13 @@ LINESEG_ARRAY_PATTERN = re.compile(
     r"<(?P<tag2>(?:\w+:)?linesegarray)\b[^>]*>.*?</(?P=tag2)>",
     re.DOTALL | re.IGNORECASE,
 )
+COVER_METADATA_PATTERN = re.compile(
+    r"문서\s*번호|문서\s*버전|개정\s*일자|작성\s*자|승인\s*자|사업\s*명|프로젝트\s*명|문서\s*명|문서\s*제목",
+    re.IGNORECASE,
+)
+BODY_HEADING_PATTERN = re.compile(
+    r"^\s*(?:\d+\.\s*[가-힣A-Za-z]|제\s*\d+\s*장|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]\.?\s*[가-힣A-Za-z])"
+)
 def windows_long_path(path: Path) -> str:
     if os.name != "nt":
         return str(path)
@@ -70,6 +78,42 @@ def is_hwpx_zip(file_path: Path) -> bool:
 def strip_hwpx_line_seg_arrays(xml: str) -> tuple[str, int]:
     """Remove stale HWPX layout cache after direct text edits."""
     return LINESEG_ARRAY_PATTERN.subn("", xml)
+
+
+def split_hwpx_cover_edit_scope(xml: str) -> tuple[str, str]:
+    """Return the editable cover/header prefix and the body tail to preserve.
+
+    HWPX does not expose stable page numbers in the XML, so artifact updates must
+    stay conservative: edit the cover-like prefix only and leave body tables after
+    the first numbered section heading untouched.
+    """
+    body_start = find_hwpx_body_start(xml)
+    if body_start is None:
+        return xml, ""
+    return xml[:body_start], xml[body_start:]
+
+
+def editable_hwpx_part_scope(part_name: str, xml: str) -> tuple[str, str]:
+    lower_name = part_name.lower()
+    if lower_name == "contents/section0.xml":
+        return split_hwpx_cover_edit_scope(xml)
+    if "header" in lower_name or "footer" in lower_name:
+        return xml, ""
+    return "", xml
+
+
+def find_hwpx_body_start(xml: str) -> int | None:
+    for match in TEXT_NODE_PATTERN.finditer(xml):
+        text = re.sub(r"\s+", " ", unescape(match.group("body"))).strip()
+        if not text:
+            continue
+        if BODY_HEADING_PATTERN.match(text):
+            return match.start()
+    return None
+
+
+def has_cover_metadata_marker(value: str) -> bool:
+    return bool(COVER_METADATA_PATTERN.search(value or ""))
 
 
 def is_zip_container(file_path: Path) -> bool:

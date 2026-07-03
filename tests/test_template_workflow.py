@@ -10,6 +10,7 @@ from openpyxl import Workbook, load_workbook
 
 from output_file_check.models import FileIdentity, StandardOutput
 import output_file_check.template_workflow as workflow
+from output_file_check.requirement_generation import PROGRAM_SOURCE_TEMPLATE_PATH
 
 
 def write_workbook(path: Path, cover_value: str, body_value: str = "") -> None:
@@ -193,6 +194,55 @@ class TemplateWorkflowModeTest(unittest.TestCase):
         self.assertEqual("matched", payload["items"][0]["status"])
         self.assertEqual("filename_output_name", payload["items"][0]["standard_output"]["match_type"])
 
+    def test_hwp_scan_reads_identity_for_cover_and_id_matching(self) -> None:
+        cases = [
+            (
+                "Unrelated.hwpx",
+                FileIdentity(project_title="Project", document_title="InterviewPlan"),
+                "cover_document_title",
+            ),
+            ("DOC-001-legacy.hwpx", FileIdentity(project_title="Project"), "filename_output_id"),
+        ]
+        for filename, identity, expected_match_type in cases:
+            with self.subTest(filename=filename):
+                source_dir = self.root / f"source-{filename}"
+                source_dir.mkdir()
+                path = source_dir / filename
+                path.write_bytes(b"not a real hwpx")
+
+                with patch.object(workflow, "read_file_identity", return_value=identity) as read_identity:
+                    items = workflow.scan_artifact_inputs(
+                        source_dir,
+                        [StandardOutput("DOC-001", "InterviewPlan")],
+                        [],
+                        {},
+                    )
+
+                read_identity.assert_called_once_with(path)
+                self.assertEqual(1, len(items))
+                self.assertEqual("DOC-001", items[0].standard_output.output_id)
+                self.assertEqual(expected_match_type, items[0].standard_match_type)
+
+    def test_backup_artifact_folder_is_skipped_before_identity_read(self) -> None:
+        source_dir = self.root / "source-backup"
+        backup_dir = source_dir / "bak"
+        backup_dir.mkdir(parents=True)
+        (backup_dir / "DOC-001-InterviewPlan.hwpx").write_bytes(b"not a real hwpx")
+
+        with patch.object(
+            workflow,
+            "read_file_identity",
+            side_effect=AssertionError("backup HWPX should not be opened"),
+        ):
+            items = workflow.scan_artifact_inputs(
+                source_dir,
+                [StandardOutput("DOC-001", "InterviewPlan")],
+                [],
+                {},
+            )
+
+        self.assertEqual([], items)
+
     def test_apply_mode_creates_output_files(self) -> None:
         payload = self.run_workflow(apply_mode=True)
 
@@ -249,6 +299,33 @@ class TemplateWorkflowModeTest(unittest.TestCase):
                 self.assertIn(item["requirement_id"], workbook.worksheets[0]["A1"].value)
             finally:
                 workbook.close()
+
+    def test_development_apply_creates_program_source_requirement_folders(self) -> None:
+        payload = self.run_workflow(
+            apply_mode=True,
+            requirement_filenames=["REQ_SFR-001.txt", "REQ_SFR-002.txt"],
+        )
+
+        source_root = Path(payload["dump_root"]) / "outputs" / Path(*PROGRAM_SOURCE_TEMPLATE_PATH)
+        self.assertEqual(2, payload["requirement_generated_folder_count"])
+        self.assertEqual(2, payload["requirement_generation_created_folder_count"])
+        self.assertTrue((source_root / "SFR-001").is_dir())
+        self.assertTrue((source_root / "SFR-002").is_dir())
+
+    def test_management_apply_does_not_create_program_source_requirement_folders(self) -> None:
+        with patch.object(
+            workflow,
+            "create_requirement_source_folders",
+            side_effect=AssertionError("management template must not create program source folders"),
+        ):
+            payload = self.run_workflow(
+                apply_mode=True,
+                category="management",
+                include_requirement_files=False,
+            )
+
+        self.assertEqual(0, payload["requirement_generated_folder_count"])
+        self.assertEqual([], payload["requirement_generation_folder_items"])
 
     def test_unmatched_input_with_cover_is_copied_and_existing_cover_is_updated(self) -> None:
         payload = self.run_workflow(

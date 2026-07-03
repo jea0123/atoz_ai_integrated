@@ -244,6 +244,54 @@ class DocumentNumberUpdateTest(unittest.TestCase):
             self.assertIn("품질관리계획서", updated_xml)
             self.assertIn("[별첨1]품질목표정의서", updated_xml)
 
+    def test_hwpx_update_preserves_body_tables_after_numbered_heading(self) -> None:
+        with workspace_temp_dir() as tmp:
+            source = tmp / "source.hwpx"
+            output = tmp / "output.hwpx"
+            old_project = "2025년도 수입식품통합정보시스템 고도화"
+            new_project = "2026년도 수입식품통합정보시스템 고도화"
+            write_hwpx(
+                source,
+                f"""
+                <root>
+                  <hp:tr>
+                    <hp:tc><hp:p><hp:run><hp:t>사업명</hp:t></hp:run></hp:p></hp:tc>
+                    <hp:tc><hp:p><hp:run><hp:t>{old_project}</hp:t></hp:run></hp:p></hp:tc>
+                  </hp:tr>
+                  <hp:tr>
+                    <hp:tc><hp:p><hp:run><hp:t>문서번호</hp:t></hp:run></hp:p></hp:tc>
+                    <hp:tc><hp:p><hp:run><hp:t>MFDS-OLD-01</hp:t></hp:run></hp:p></hp:tc>
+                  </hp:tr>
+                  <hp:p><hp:run><hp:t>1. 부적합 현황</hp:t></hp:run></hp:p>
+                  <hp:tr>
+                    <hp:tc><hp:p><hp:run><hp:t>부적합관리번호</hp:t></hp:run></hp:p></hp:tc>
+                    <hp:tc><hp:p><hp:run><hp:t>MFDS-OLD-01</hp:t></hp:run></hp:p></hp:tc>
+                    <hp:tc><hp:p><hp:run><hp:t>{old_project}</hp:t></hp:run></hp:p></hp:tc>
+                  </hp:tr>
+                </root>
+                """,
+            )
+
+            _old_document_number, _backup, project_count, document_count, output_path = write_updated_document(
+                source,
+                new_document_number="MFDS-QA-01",
+                old_project_title=old_project,
+                new_project_title=new_project,
+                output_path=output,
+            )
+
+            with zipfile.ZipFile(output_path, "r") as zf:
+                updated_xml = zf.read("Contents/section0.xml").decode("utf-8")
+
+            self.assertEqual(1, project_count)
+            self.assertEqual(1, document_count)
+            self.assertIn(new_project, updated_xml)
+            self.assertIn("MFDS-QA-01", updated_xml)
+            self.assertIn("<hp:t>1. 부적합 현황</hp:t>", updated_xml)
+            self.assertIn("<hp:t>부적합관리번호</hp:t>", updated_xml)
+            self.assertIn(f"<hp:t>{old_project}</hp:t>", updated_xml)
+            self.assertIn("<hp:t>MFDS-OLD-01</hp:t>", updated_xml)
+
     def test_xlsx_unlabeled_cover_updates_project_line_not_document_title(self) -> None:
         with workspace_temp_dir() as tmp:
             source = tmp / "source.xlsx"

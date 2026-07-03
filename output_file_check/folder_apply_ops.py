@@ -14,6 +14,7 @@ from app_runtime import (
 )
 from document_update.document_number import write_updated_document, write_updated_project_title
 from document_update.hwp_convert import start_allow_all_watcher, stop_allow_all_watcher
+from document_update.hwpx_text import has_cover_metadata_marker
 from document_update.metadata_update import update_metadata_in_document
 from document_update.patterns import OUTPUT_ID_PATTERN
 from document_update.project_title_match import project_title_matches_expected
@@ -55,6 +56,7 @@ VERSION_TAIL_PATTERN = re.compile(r"([_-])[vV]\d+(?:\.\d+)*")
 DEFAULT_FILENAME_VERSION_TAIL = "_v0.1"
 HANDOVER_RESULT_KEY = normalize_for_match("인수인계시험결과서")
 HANDOVER_CONFIRMATION_KEY = normalize_for_match("별첨1인수인계확인서")
+NO_COVER_SKIP_MESSAGE = "표지 신호를 찾지 못해 산출물 파일을 수정하지 않았습니다."
 
 
 def clean_output_id(raw_text: str) -> str:
@@ -293,7 +295,7 @@ def apply_dumped_folder(
                 and item.get("project_only")
                 and int(item.get("cover_project_replace_count") or 0) > 0
             ),
-            "skipped_file_count": excluded_file_count,
+            "skipped_file_count": excluded_file_count + sum(1 for item in apply_items if item.get("status") == "skipped"),
             "filename_unchanged_count": sum(1 for item in apply_items if is_filename_unchanged_item(item)),
             "initial_revision_date": revision_metadata["revision_date"],
             "initial_revision_author": revision_metadata["author"],
@@ -571,10 +573,10 @@ def apply_unmatched_project_title_updates(
             continue
 
         if identity is None:
-            if should_skip_expensive_unmatched_identity_read(path):
-                continue
             identity = read_file_identity(path)
             file = ScannedFile(path, identity)
+        if not has_updatable_cover(path, identity):
+            continue
 
         old_project_title = project_title_for_update(identity, standard_project_title)
         if not old_project_title or not values_differ(old_project_title, standard_project_title):
@@ -639,10 +641,6 @@ def project_title_update_candidates(dump_root: Path, files: list[ScannedFile]) -
         candidates.append(file)
         seen.add(key)
     return candidates
-
-
-def should_skip_expensive_unmatched_identity_read(path: Path) -> bool:
-    return path.suffix.lower() in {".hwp", ".hwpx"}
 
 
 def has_ignored_project_title_path(path: Path, dump_root: Path) -> bool:
@@ -744,10 +742,14 @@ def apply_batch_candidate(
 ) -> dict[str, object]:
     # 후보 파일 하나에 산출물 ID/제목/프로젝트명을 반영하고 필요하면 파일명도 바꾼다.
     original_path = candidate.file.path
-    identity = candidate.file.identity
+    identity = candidate.file.identity or read_file_identity(original_path)
+    candidate = MatchCandidate(candidate.output, ScannedFile(original_path, identity), candidate.score, candidate.reason, candidate.ai_confidence)
     backup_path = None
 
     try:
+        if not has_updatable_cover(original_path, identity):
+            return skipped_no_cover_item(candidate)
+
         target_file, _converted_to_hwpx = prepare_target_file(original_path, temp_dir)
         update_dir = temp_dir / "batch-updated"
         update_dir.mkdir(parents=True, exist_ok=True)
@@ -849,6 +851,43 @@ def apply_batch_candidate(
             "backup_path": str(backup_path) if backup_path else "",
             "error": str(exc),
         }
+
+
+def has_updatable_cover(path: Path, identity: FileIdentity | None) -> bool:
+    if identity is None or identity.error:
+        return False
+
+    suffix = path.suffix.lower()
+    preview_text = str(identity.preview_text or "")
+    if suffix in {".hwp", ".hwpx"}:
+        if not preview_text.strip():
+            return bool(identity.project_title or identity.document_number)
+        return bool(identity.document_number or has_cover_metadata_marker(preview_text))
+
+    return bool(identity.project_title or identity.document_title or identity.document_number or preview_text.strip())
+
+
+def skipped_no_cover_item(candidate: MatchCandidate) -> dict[str, object]:
+    path = candidate.file.path
+    return {
+        "status": "skipped",
+        "output_id": candidate.output.output_id,
+        "output_name": candidate.output.output_name,
+        "old_path": str(path),
+        "new_path": str(path),
+        "expected_filename": build_target_filename(candidate.output, path),
+        "backup_path": "",
+        "cover_changed": False,
+        "cover_update_status": "skipped",
+        "cover_project_replace_count": 0,
+        "cover_document_number_replace_count": 0,
+        "cover_update_error": "",
+        "cover_warning_reasons": [NO_COVER_SKIP_MESSAGE],
+        "initial_revision_status": "skipped",
+        "initial_revision_cover_update_count": 0,
+        "initial_revision_history_update_count": 0,
+        "initial_revision_error": NO_COVER_SKIP_MESSAGE,
+    }
 
 
 def same_path(left: Path, right: Path) -> bool:
