@@ -365,6 +365,131 @@ function renderSourceResults(sourceResults, options = {}) {
   `);
 }
 
+function renderIndividualGenerationResult(data, options = {}) {
+  const files = (data.download_files || data.files || []).filter((file) => file && file.download_url);
+  const sourceResults = Array.isArray(data.source_results) ? data.source_results : [];
+  const title = options.title || "생성 결과";
+  const itemLabel = options.itemLabel || "문서";
+  const countLabel = options.countLabel || "생성";
+  const fileLabel = options.fileLabel || "파일";
+  const totalItems = data.source_count ?? data.set_count ?? (sourceResults.filter((item) => !item.is_summary).length || 1);
+  const failedCount = data.failed_count ?? sourceResults.filter((item) => !item.ok && !item.is_summary).length;
+  const generatedCount = data.count ?? sourceResults.reduce((sum, item) => sum + Number(item.count || 0), 0);
+
+  function sourceTitle(item, index) {
+    if (item.source_tc || item.source_ui) return item.source_pdf || `${item.source_tc || "-"} + ${item.source_ui || "-"}`;
+    return item.source_pdf || `${itemLabel} ${index + 1}`;
+  }
+
+  function filesForSource(item) {
+    if (!sourceResults.length) return files;
+    const matched = files.filter((file) => {
+      if (item.source_pdf && file.source_pdf === item.source_pdf) return true;
+      if (item.source_tc && file.source_tc === item.source_tc) return true;
+      if (item.source_ui && file.source_ui === item.source_ui) return true;
+      return false;
+    });
+    if (matched.length) return matched;
+    return sourceResults.length === 1 ? files : [];
+  }
+
+  function renderDownloadButtons(downloadFiles) {
+    if (!downloadFiles.length) {
+      return `<p class="folder-qa-empty">생성된 다운로드 파일이 없습니다.</p>`;
+    }
+    return `
+      <div class="download-list individual-result-files">
+        ${downloadFiles.map((file) => `
+          <a class="download-button" href="${escapeHtml(file.download_url)}" download="${escapeHtml(file.download_name || file.name || "")}">
+            <span>${escapeHtml((file.kind || "file").toUpperCase())}</span>
+            <strong>${escapeHtml(file.download_name || file.name || "download")}</strong>
+          </a>
+        `).join("")}
+      </div>
+    `;
+  }
+
+  const resultItems = sourceResults.length ? sourceResults : [{
+    source_pdf: title,
+    ok: Boolean(data.ok),
+    count: generatedCount,
+    file_count: files.length,
+    error: data.error || "",
+    analysis: {},
+  }];
+
+  emptyState.hidden = true;
+  clearError();
+  downloadPanel.hidden = false;
+  downloadPanel.className = "download-panel";
+  downloadPanel.innerHTML = `
+    <div class="download-panel-head">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(itemLabel)} ${escapeHtml(totalItems)}개 · ${escapeHtml(fileLabel)} ${escapeHtml(files.length)}개${failedCount ? ` · 확인 필요 ${escapeHtml(failedCount)}개` : ""}</span>
+    </div>
+    <div class="source-result-overview">
+      <span>처리 ${escapeHtml(itemLabel)} <strong>${escapeHtml(totalItems)}</strong></span>
+      <span>${escapeHtml(countLabel)} <strong>${escapeHtml(generatedCount)}</strong></span>
+      <span>${escapeHtml(fileLabel)} <strong>${escapeHtml(files.length)}</strong></span>
+      <span>확인 필요 <strong>${escapeHtml(failedCount)}</strong></span>
+    </div>
+    <div class="folder-qa-result-list">
+      ${resultItems.map((item, index) => {
+        const analysis = item.analysis || {};
+        const isOk = Boolean(item.ok);
+        const isSummary = Boolean(item.is_summary);
+        const cardStatus = isSummary ? "status-queued" : isOk ? "status-done" : "status-error";
+        const statusText = isSummary ? "요약" : isOk ? "완료" : "확인 필요";
+        const downloadFiles = filesForSource(item);
+        const risks = analysis.risks || [];
+        const recommendations = analysis.recommendations || [];
+        const screens = analysis.screens || [];
+        const screenIds = screens
+          .map((screen) => typeof screen === "string" ? screen : screen?.screen_id)
+          .filter(Boolean)
+          .slice(0, 12);
+        return `
+          <article class="folder-qa-requirement ${isOk || isSummary ? "" : "has-errors"} ${cardStatus}">
+            <div class="folder-qa-requirement-head">
+              <div>
+                <strong>${escapeHtml(sourceTitle(item, index))}</strong>
+                <small>${escapeHtml(analysis.summary || (isOk ? "생성이 완료되었습니다." : item.error || "확인이 필요합니다."))}</small>
+              </div>
+              <div class="folder-qa-requirement-actions">
+                <span>${escapeHtml(statusText)}</span>
+              </div>
+            </div>
+            <div class="source-result-metrics">
+              <span>${escapeHtml(countLabel)} <strong>${escapeHtml(item.count ?? 0)}</strong></span>
+              <span>${escapeHtml(fileLabel)} <strong>${escapeHtml(downloadFiles.length || item.file_count || 0)}</strong></span>
+              ${screenIds.length ? `<span>화면 <strong>${escapeHtml(screenIds.length)}</strong></span>` : ""}
+            </div>
+            ${screenIds.length ? `
+              <div class="source-screen-list" aria-label="화면ID 목록">
+                ${screenIds.map((screenId) => `<span>${escapeHtml(screenId)}</span>`).join("")}
+              </div>
+            ` : ""}
+            ${item.error && !isOk ? `<p class="folder-qa-empty">${escapeHtml(formatUserErrorMessage(item.error))}</p>` : ""}
+            ${risks.length ? `
+              <div class="source-result-notes">
+                <b>확인할 내용</b>
+                <ul>${risks.map((risk) => `<li>${escapeHtml(risk)}</li>`).join("")}</ul>
+              </div>
+            ` : ""}
+            ${recommendations.length ? `
+              <div class="source-result-notes">
+                <b>${isSummary ? "매칭된 세트" : "권장 조치"}</b>
+                <ul>${recommendations.map((recommendation) => `<li>${escapeHtml(recommendation)}</li>`).join("")}</ul>
+              </div>
+            ` : ""}
+            ${isSummary ? "" : renderDownloadButtons(downloadFiles)}
+          </article>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
 function validateFiles(form, rules) {
   for (const [selector, message] of rules) {
     const input = form.querySelector(selector);
@@ -379,6 +504,43 @@ function validateFiles(form, rules) {
 function selectedFileName(inputId) {
   const input = document.querySelector(`#${inputId}`);
   return input?.files?.[0]?.name || "";
+}
+
+function selectedFileNames(inputId) {
+  const input = document.querySelector(`#${inputId}`);
+  return Array.from(input?.files || []).map((file) => fileDisplayPath(file));
+}
+
+function renderIndividualGenerationProgress(options = {}) {
+  const title = options.title || "생성 진행 중";
+  const itemLabel = options.itemLabel || "문서";
+  const items = options.items?.length ? options.items : [{ name: itemLabel }];
+
+  emptyState.hidden = true;
+  clearError();
+  downloadPanel.hidden = false;
+  downloadPanel.className = "download-panel";
+  downloadPanel.innerHTML = `
+    <div class="download-panel-head">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(itemLabel)} ${escapeHtml(items.length)}개 · 처리 중</span>
+    </div>
+    <div class="folder-qa-result-list">
+      ${items.map((item, index) => `
+        <article class="folder-qa-requirement status-running">
+          <div class="folder-qa-requirement-head">
+            <div>
+              <strong>${escapeHtml(item.name || `${itemLabel} ${index + 1}`)}</strong>
+              <small>${escapeHtml(item.detail || "생성 요청을 처리하고 있습니다.")}</small>
+            </div>
+            <div class="folder-qa-requirement-actions">
+              <span>진행 중</span>
+            </div>
+          </div>
+        </article>
+      `).join("")}
+    </div>
+  `;
 }
 
 function friendlyErrorInfo(message, taskName) {
@@ -1239,6 +1401,14 @@ async function runTcGeneration(event) {
   clearError();
   resultTitle.textContent = "단위시험 케이스 생성";
   resultMeta.textContent = "요청 처리 중입니다.";
+  renderIndividualGenerationProgress({
+    title: "단위시험 케이스 생성 진행",
+    itemLabel: "설계서",
+    items: selectedFileNames("tcUiPdf").map((name) => ({
+      name,
+      detail: "단위시험 케이스를 생성하고 있습니다.",
+    })),
+  });
 
   const request = beginCancelableRequest();
 
@@ -1248,12 +1418,11 @@ async function runTcGeneration(event) {
     const sourceCount = data.source_count ?? data.source_results?.length ?? 1;
     const failedCount = data.failed_count ?? 0;
     resultMeta.textContent = `처리 설계서 ${sourceCount}개 · 생성 행 수 ${data.count ?? 0}개 · 다운로드 ${data.download_files?.length || 0}개${failedCount ? ` · 실패 ${failedCount}개` : ""}`;
-    renderDownloads(data.download_files || data.files, "단위시험 케이스 파일");
-    renderSourceResults(data.source_results || [], {
-      title: "단위시험 케이스 사전 분석",
+    renderIndividualGenerationResult(data, {
+      title: "단위시험 케이스 생성 결과",
       itemLabel: "설계서",
       countLabel: "생성 행",
-      fileLabel: "생성 파일",
+      fileLabel: "다운로드",
     });
   } catch (error) {
     if (isAbortError(error)) {
@@ -1281,6 +1450,19 @@ async function runTsGeneration(event) {
   clearError();
   resultTitle.textContent = "통합시험 시나리오 생성";
   resultMeta.textContent = "요청 처리 중입니다.";
+  const tcNames = selectedFileNames("tsTcXlsx").map((name) => ({
+    name,
+    detail: "통합시험 시나리오 생성을 준비하고 있습니다.",
+  }));
+  const uiNames = selectedFileNames("tsUiPdf").map((name) => ({
+    name,
+    detail: "화면설계서 매칭을 확인하고 있습니다.",
+  }));
+  renderIndividualGenerationProgress({
+    title: "통합시험 시나리오 생성 진행",
+    itemLabel: "파일",
+    items: [...tcNames, ...uiNames],
+  });
 
   const request = beginCancelableRequest();
 
@@ -1290,14 +1472,11 @@ async function runTsGeneration(event) {
     const setCount = data.set_count ?? data.source_results?.length ?? 1;
     const failedCount = data.failed_count ?? 0;
     resultMeta.textContent = `처리 세트 ${setCount}개 · 다운로드 ${data.download_files?.length || 0}개${failedCount ? ` · 확인 필요 ${failedCount}개` : ""}`;
-    renderDownloads(data.download_files || data.files, "통합시험 시나리오 파일", { plainPanel: true });
-    renderSourceResults(data.source_results || [], {
-      title: "통합시험 시나리오 세트 분석",
+    renderIndividualGenerationResult(data, {
+      title: "통합시험 시나리오 생성 결과",
       itemLabel: "세트",
-      fileLabel: "생성 파일",
-      primaryTotalLabel: "화면",
-      showPrimaryTotal: false,
-      showCountMetric: false,
+      countLabel: "생성 행",
+      fileLabel: "다운로드",
     });
   } catch (error) {
     if (isAbortError(error)) {

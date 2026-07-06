@@ -307,7 +307,31 @@ def parse_llm_json(response_text):
       return json.loads(response_text[start:end + 1])
     raise
 
-def normalize_test_cases(parsed_json, screen_id, unit_test_id):
+
+def extract_field_value(block_text, field_name):
+  pattern = re.compile(
+    rf"{re.escape(field_name)}\s*[:：]?\s*(.+?)(?=\s+(?:요구사항ID|화면ID|화면명|화면설명|메뉴경로|개발구분|개인정보등급)\b|$)",
+    re.DOTALL,
+  )
+  match = pattern.search(block_text)
+  if not match:
+    return ""
+  value = re.sub(r"\s+", " ", match.group(1)).strip()
+  return value
+
+
+def is_bad_generated_title(value, screen_id, unit_test_id):
+  text = str(value or "").strip()
+  if not text:
+    return True
+  if text in {str(screen_id or "").strip(), str(unit_test_id or "").strip()}:
+    return True
+  screen_parts = [part for part in str(screen_id or "").split("-") if part]
+  unit_parts = [part for part in str(unit_test_id or "").split("-") if part]
+  return text in set(screen_parts + unit_parts)
+
+
+def normalize_test_cases(parsed_json, screen_id, unit_test_id, fallback_screen_name=""):
   if not isinstance(parsed_json, dict):
     raise ValueError("응답이 JSON 객체가 아닙니다.")
 
@@ -334,6 +358,11 @@ def normalize_test_cases(parsed_json, screen_id, unit_test_id):
     fixed["화면_ID"] = screen_id or fixed.get("화면_ID", "")
     fixed["단위시험_ID"] = unit_test_id or fixed.get("단위시험_ID", "")
     fixed["테스트_데이터"] = ""
+    if fallback_screen_name:
+      if is_bad_generated_title(fixed.get("화면명"), screen_id, unit_test_id):
+        fixed["화면명"] = fallback_screen_name
+      if is_bad_generated_title(fixed.get("단위시험_명"), screen_id, unit_test_id):
+        fixed["단위시험_명"] = fallback_screen_name
 
     if not fixed["순서"]:
       fixed["순서"] = idx
@@ -560,6 +589,7 @@ def build_test_cases_from_text(
     expected_steps = len(flow_steps)
     screen_id = block["screen_id"]
     unit_test_id = block["unit_test_id"]
+    fallback_screen_name = extract_field_value(block["text"], "화면명")
     response_text = ""
     num_predict, request_timeout = get_llm_limits(expected_steps, block["text"])
     block_status_base = {
@@ -618,7 +648,7 @@ def build_test_cases_from_text(
       response_text = call_ollama(ollama_url, model_name, system_prompt, user_prompt, num_predict=num_predict, timeout=request_timeout)
       _check_cancel(cancel_check)
       parsed_json = parse_llm_json(response_text)
-      normalized_cases = normalize_test_cases(parsed_json, screen_id, unit_test_id)
+      normalized_cases = normalize_test_cases(parsed_json, screen_id, unit_test_id, fallback_screen_name)
 
       normalized_cases = sort_and_dedupe_cases(normalized_cases)
 
@@ -684,7 +714,7 @@ def build_test_cases_from_text(
         retry_text = call_ollama(ollama_url, model_name, system_prompt, retry_prompt, num_predict=num_predict, timeout=request_timeout)
         _check_cancel(cancel_check)
         retry_json = parse_llm_json(retry_text)
-        normalized_cases = normalize_test_cases(retry_json, screen_id, unit_test_id)
+        normalized_cases = normalize_test_cases(retry_json, screen_id, unit_test_id, fallback_screen_name)
 
         normalized_cases = sort_and_dedupe_cases(normalized_cases)
         print(f"[재호출 완료] {screen_id}: 생성 {len(normalized_cases)}개")
