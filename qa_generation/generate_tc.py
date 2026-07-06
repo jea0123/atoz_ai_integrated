@@ -58,6 +58,17 @@ REQUIRED_TC_KEYS = [
 ]
 
 CIRCLED_NUMBERS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+DESIGN_FIELD_LABELS = (
+  "요구사항ID",
+  "화면ID",
+  "화면명",
+  "화면설명",
+  "메뉴경로",
+  "개발구분",
+  "개인정보등급",
+)
+TITLE_CHANGE_WORDS = ("개선", "확대", "추가", "변경", "보완", "개발", "수정", "고도화")
+ID_LIKE_PATTERN = re.compile(r"^(?:UI|UT|SFR)-[A-Z0-9]+(?:-[A-Z0-9]+)*$", re.IGNORECASE)
 
 
 class TestCaseGenerationError(RuntimeError):
@@ -308,6 +319,7 @@ def normalize_test_cases(parsed_json, screen_id, unit_test_id):
 
     fixed["화면_ID"] = screen_id or fixed.get("화면_ID", "")
     fixed["단위시험_ID"] = unit_test_id or fixed.get("단위시험_ID", "")
+    fixed["테스트_데이터"] = ""
 
     if not fixed["순서"]:
       fixed["순서"] = idx
@@ -315,6 +327,94 @@ def normalize_test_cases(parsed_json, screen_id, unit_test_id):
     normalized.append(fixed)
 
   return normalized
+
+def clean_design_value(value):
+  value = re.sub(r"\s+", " ", str(value or "")).strip(" :：\t\r\n")
+  if value.upper() in {"N/A", "NA"}:
+    return ""
+  return value
+
+def is_identifier_like(value):
+  return bool(ID_LIKE_PATTERN.fullmatch(clean_design_value(value)))
+
+def extract_section_title(block_text):
+  for line in str(block_text or "").splitlines():
+    match = re.match(r"^\s*\d+\.\d+\.\s*(.+?)\s*$", line)
+    if match:
+      title = clean_design_value(match.group(1))
+      if title and not is_identifier_like(title):
+        return title
+  return ""
+
+def extract_design_field(block_text, label):
+  text = str(block_text or "").replace("\r", "\n")
+  labels_pattern = "|".join(re.escape(item) for item in DESIGN_FIELD_LABELS if item != label)
+  match = re.search(
+    rf"{re.escape(label)}\s*[:：]?\s*(.*?)(?=\s*(?:{labels_pattern})\s*[:：]?|\n\s*\d+\.\d+\.|\n\s*화면구성|\n\s*처리\s*흐름|\n\s*이벤트\s*정의|$)",
+    text,
+    flags=re.S,
+  )
+  if match:
+    value = clean_design_value(match.group(1))
+    if value and not is_identifier_like(value):
+      return value
+
+  lines = [line.strip() for line in text.splitlines() if line.strip()]
+  normalized_label = re.sub(r"\s+", "", label)
+  normalized_labels = {re.sub(r"\s+", "", item) for item in DESIGN_FIELD_LABELS}
+  for index, line in enumerate(lines):
+    normalized = re.sub(r"\s+", "", line)
+    if normalized == normalized_label:
+      for candidate in lines[index + 1:index + 4]:
+        if re.sub(r"\s+", "", candidate) in normalized_labels:
+          break
+        value = clean_design_value(candidate)
+        if value and not is_identifier_like(value):
+          return value
+    if normalized.startswith(normalized_label):
+      value = clean_design_value(line[len(label):])
+      if value and not is_identifier_like(value):
+        return value
+  return ""
+
+def infer_unit_test_metadata(block_text):
+  section_title = extract_section_title(block_text)
+  screen_name = extract_design_field(block_text, "화면명")
+  development_type = extract_design_field(block_text, "개발구분")
+  display_title = section_title or screen_name
+  unit_test_name = display_title
+
+  if (
+      unit_test_name
+      and development_type == "개선"
+      and screen_name
+      and unit_test_name == screen_name
+      and not any(word in unit_test_name for word in TITLE_CHANGE_WORDS)
+  ):
+    unit_test_name = f"{unit_test_name} 개선"
+
+  return {
+    "section_title": section_title,
+    "screen_name": screen_name,
+    "development_type": development_type,
+    "display_title": display_title,
+    "unit_test_name": unit_test_name,
+  }
+
+def apply_unit_test_metadata(test_cases, metadata):
+  display_title = clean_design_value(metadata.get("display_title"))
+  screen_name = clean_design_value(metadata.get("screen_name"))
+  unit_test_name = clean_design_value(metadata.get("unit_test_name"))
+
+  for case in test_cases:
+    if display_title:
+      case["단위시험_제목"] = display_title
+    if screen_name:
+      case["화면명"] = screen_name
+    if unit_test_name:
+      case["단위시험_명"] = unit_test_name
+
+  return test_cases
 
 def get_missing_sequences(test_cases, expected_steps):
   if not expected_steps:
@@ -387,9 +487,8 @@ def build_retry_prompt(screen_id, unit_test_id, expected_steps, block_text, bad_
   [잘못된 이전 응답]
   {bad_response}
 
-  아래 JSON 구조만 다시 출력하세요.
+  아래 화면 정의를 다시 분석해 순수 JSON 객체만 출력하세요.
   최상위 키는 반드시 "test_cases" 하나만 사용하세요.
-  "@type", "@cases", "id", "description", "data", "screenId" 같은 키는 절대 사용하지 마세요.
 
   [대상 화면ID]
   {screen_id}
@@ -397,25 +496,27 @@ def build_retry_prompt(screen_id, unit_test_id, expected_steps, block_text, bad_
   [대상 단위시험_ID]
   {unit_test_id}
 
-  [예상 처리흐름 번호 개수]
-  {expected_steps if expected_steps else "텍스트에서 직접 판단"}
+  [처리흐름 참고 개수]
+  {expected_steps if expected_steps else "추출 안 됨"}
 
-  반드시 아래 구조의 순수 JSON 객체만 출력하세요.
+  [작성 기준]
+  - 사용자 조작은 "테스트_케이스"로 작성하세요.
+  - 시스템 반응, 조회 결과, 팝업 호출은 "예상_결과"로 작성하세요.
+  - 처리흐름 번호 개수와 test_cases 개수를 억지로 맞추지 마세요.
+  - "테스트_데이터"는 출력하지 마세요. 시스템에서 빈 값으로 채웁니다.
+  - 화면_ID, 단위시험_ID, 단위시험_명은 시스템에서 보정합니다.
+
+  [출력 JSON]
   {{
     "test_cases": [
       {{
         "단위시험_ID": "{unit_test_id}",
         "화면명": "",
-        "수행자": "",
-        "단위시험_명": "",
-        "수행_일자": "",
         "사전조건": "",
         "화면_ID": "{screen_id}",
         "순서": 1,
         "테스트_케이스": "",
-        "테스트_데이터": "",
-        "예상_결과": "",
-        "수행_결과": ""
+        "예상_결과": ""
       }}
     ]
   }}
@@ -445,123 +546,23 @@ def build_test_cases_from_text(
   print(f"\nAI 추론 중... ({model_name})")
 
   system_prompt = """
-  당신은 전문 QA 엔지니어입니다.
-  주어진 사용자인터페이스설계서의 '화면/보고서 정의' 블록을 분석하여 단위시험 케이스를 작성하세요.
+  당신은 UI 설계서의 화면 정의를 단위시험 케이스로 정리하는 QA 엔지니어입니다.
 
-  [설계서 구조]
-  - 설계서의 핵심 단위는 '화면/보고서 정의'입니다.
-  - 각 화면 정의는 보통 다음 항목을 포함합니다.
-    - 요구사항ID
-    - 화면ID
-    - 화면명
-    - 화면설명
-    - 메뉴경로
-    - 개발구분
-    - 개인정보등급
-    - 화면구성
-    - 처리흐름
-    - 이벤트 정의
-    - 입력데이터 검증 및 표현
-  - '화면구성' 영역은 이미지가 많으면 여러 페이지에 걸쳐 이어질 수 있습니다.
-  - 테스트 케이스 생성의 핵심 기준은 '처리흐름'입니다.
-  - '이벤트 정의'와 '입력데이터 검증 및 표현'은 테스트 케이스/예상 결과/테스트 데이터 작성 시 참고 정보로만 사용합니다.
+  처리흐름과 이벤트 정의를 함께 보고 사용자 조작 단위로 test_cases를 작성하세요.
+  시스템 반응, 조회 결과, 팝업 호출처럼 사용자가 직접 수행하지 않는 항목은 별도 케이스로 만들지 말고 "예상_결과"에 반영하세요.
+  처리흐름 번호 개수와 test_cases 개수를 억지로 맞추지 마세요.
 
-  [단위시험 생성 기준]
-  - 고유한 화면ID 1개당 단위시험_ID 1개를 생성합니다.
-  - 설계서에서는 '화면ID'처럼 공백 없이 표기됩니다.
-  - 기존 단위시험 케이스 양식에서는 '화면 ID'처럼 공백이 포함될 수 있으나 같은 의미입니다.
-  - 같은 화면ID 안의 처리흐름은 같은 단위시험_ID 아래 여러 순서로 작성합니다.
-  - 화면명, 메뉴명, 사용자 유형, 요구사항ID, 처리흐름 개수만 보고 단위시험_ID를 추가 생성하지 마세요.
-  - 같은 화면ID가 반복되면 중복 화면ID는 1개로 계산합니다.
+  작성 필드:
+  - 화면명
+  - 사전조건
+  - 순서
+  - 테스트_케이스
+  - 예상_결과
 
-  [ID 매핑 규칙]
-  - 단위시험_ID는 화면ID의 앞부분 'UI'만 'UT'로 치환하여 만듭니다.
-  - 화면ID의 나머지 문자, 숫자, 하이픈은 절대 변경하지 않습니다.
-  - 예: UI-ABC-001-01-01 -> UT-ABC-001-01-01
-  - 요구사항ID를 기준으로 단위시험_ID를 만들지 않습니다.
-  - 단위시험_ID 뒤에 임의 번호를 추가하지 않습니다.
-  - 출력 JSON의 화면ID 키 이름은 반드시 "화면_ID"를 사용합니다.
-
-  [처리흐름 기반 테스트 스텝 생성 규칙]
-  - 테스트 스텝은 반드시 '처리흐름' 영역을 기준으로 생성합니다.
-  - 처리흐름의 번호 항목 1개를 test_cases 배열의 객체 1개로 변환합니다.
-  - 처리흐름 번호는 ①, ②, ③뿐 아니라 ④, ⑤, ⑥, ⑦, ⑧, ⑨, ⑩ 이상도 있을 수 있습니다.
-  - 처리흐름이 ①부터 N까지 있으면 test_cases 객체도 반드시 N개여야 합니다.
-  - 처리흐름 번호가 적을 수도 많을 수도 있으므로, 마지막 번호까지 모두 확인하세요.
-  - 중간 번호와 마지막 번호를 절대 누락하지 마세요.
-  - 여러 처리흐름을 하나의 "테스트_케이스" 값에 합치지 마세요.
-  - "테스트_케이스" 값 안에는 줄바꿈, 번호 목록, 1., 2., ①, ② 같은 단계 번호를 넣지 마세요.
-  - 각 객체는 현재 순서에 해당하는 처리흐름 1개만 표현해야 합니다.
-
-  [테스트 케이스/예상 결과 작성 규칙]
-  - "테스트_케이스"에는 처리흐름 문장을 사용자 조작 중심으로 작성합니다.
-  - 처리흐름에 사용자 조작과 시스템 결과가 함께 있으면:
-    - 사용자 조작은 "테스트_케이스"에 작성합니다.
-    - 시스템 반응 또는 기대 상태는 "예상_결과"에 작성합니다.
-  - 처리흐름 문장만으로 예상 결과가 명확하지 않으면, 이벤트 정의의 처리설명과 화면설명을 참고하여 작성합니다.
-  - 이벤트 정의는 처리흐름을 대체하는 기준이 아니라, 예상 결과를 보강하는 참고 자료입니다.
-  - 입력데이터 검증 및 표현 표는 테스트 데이터 작성 시 참고하되, 명확한 입력값이 없으면 "테스트_데이터"는 빈 문자열("")로 둡니다.
-
-  [필드 작성 규칙]
-  - 화면_ID는 설계서의 화면ID 값을 변형 없이 사용합니다.
-  - 화면명과 단위시험_명은 설계서의 화면명 값을 사용합니다.
-  - 사전조건은 메뉴경로, 화면설명, 사용자 맥락을 참고하여 간결하게 작성합니다.
-  - 수행자, 수행_일자, 수행_결과는 빈 문자열("")로 둡니다.
-  - 값이 없는 항목은 빈 문자열("")로 처리합니다.
-
-  [출력 형식]
-  - 반드시 순수 JSON 객체만 출력합니다.
-  - 마크다운 코드블록, 설명, 인사말을 포함하지 마세요.
-  - 최상위 키는 반드시 "test_cases"입니다.
-  - 출력 전, 처리흐름 번호 개수와 test_cases 객체 개수가 같은지 스스로 검증하세요.
-
-  [JSON 예시]
-  {
-    "test_cases": [
-      {
-        "화면명": "한글표시사항 도움 팝업",
-        "단위시험_ID": "UT-IIL-001-01-01",
-        "수행자": "",
-        "단위시험_명": "한글표시사항 OCR 도움 기능 테스트",
-        "수행_일자": "",
-        "사전조건": "외부사용자가 접속한 상태이다.",
-        "화면_ID": "UI-IIL-001-01-01",
-        "순서": 1,
-        "테스트_케이스": "이미지 파일을 선택한다.",
-        "테스트_데이터": "",
-        "예상_결과": "이미지 파일이 선택된다.",
-        "수행_결과": ""
-      },
-      {
-        "화면명": "한글표시사항 도움 팝업",
-        "단위시험_ID": "UT-IIL-001-01-01",
-        "수행자": "",
-        "단위시험_명": "한글표시사항 OCR 도움 기능 테스트",
-        "수행_일자": "",
-        "사전조건": "외부사용자가 접속한 상태이다.",
-        "화면_ID": "UI-IIL-001-01-01",
-        "순서": 2,
-        "테스트_케이스": "텍스트 추출 버튼을 클릭한다.",
-        "테스트_데이터": "",
-        "예상_결과": "이미지 내 텍스트가 추출된다.",
-        "수행_결과": ""
-      },
-      {
-        "화면명": "한글표시사항 도움 팝업",
-        "단위시험_ID": "UT-IIL-001-01-01",
-        "수행자": "",
-        "단위시험_명": "한글표시사항 OCR 도움 기능 테스트",
-        "수행_일자": "",
-        "사전조건": "외부사용자가 접속한 상태이다.",
-        "화면_ID": "UI-IIL-001-01-01",
-        "순서": 3,
-        "테스트_케이스": "추출된 텍스트와 이미지 파일의 내용이 일치하는지 확인한다.",
-        "테스트_데이터": "",
-        "예상_결과": "추출된 텍스트와 이미지 파일의 내용이 일치함을 확인한다.",
-        "수행_결과": ""
-      }
-    ]
-  }
+  화면_ID, 단위시험_ID, 단위시험_명, 테스트_데이터, 수행자, 수행_일자, 수행_결과는 시스템에서 보정합니다.
+  "단위시험_명" 필드는 출력하지 마세요.
+  "테스트_데이터" 필드는 출력하지 마세요.
+  반드시 마크다운 없이 순수 JSON 객체만 출력하고, 최상위 키는 "test_cases"만 사용하세요.
   """
 
   screen_blocks = screen_blocks if screen_blocks is not None else extract_screen_blocks(extracted_text)
@@ -590,6 +591,7 @@ def build_test_cases_from_text(
     expected_steps = len(flow_steps)
     screen_id = block["screen_id"]
     unit_test_id = block["unit_test_id"]
+    unit_test_metadata = infer_unit_test_metadata(block["text"])
     response_text = ""
     num_predict, request_timeout = get_llm_limits(expected_steps, block["text"])
     flow_steps_text = "\n".join(
@@ -597,39 +599,27 @@ def build_test_cases_from_text(
     )
 
     user_prompt = f"""
-    다음은 전체 사용자인터페이스설계서 중 단 하나의 화면ID에 해당하는 화면 정의 텍스트 블록입니다.
-    이번 응답에서는 반드시 대상 화면ID "{screen_id}"에 대한 테스트 케이스만 생성하세요.
+    아래 화면 정의 블록으로 단위시험 케이스를 작성하세요.
 
-    [대상 화면ID]
+    [대상 화면ID - 참고용]
     {screen_id}
 
-    [대상 단위시험_ID]
+    [대상 단위시험_ID - 참고용]
     {unit_test_id}
 
-    [예상 처리흐름 번호 개수]
-    {expected_steps if expected_steps else "텍스트에서 직접 판단"}
-
-    [코드가 추출한 처리흐름 목록]
+    [코드가 추출한 처리흐름 목록 - 참고용]
     {flow_steps_text if flow_steps_text else "처리흐름 목록을 추출하지 못했습니다. 설계서 화면 정의 블록에서 직접 판단하세요."}
 
-    [작업 절차]
-    1. 화면 정의 블록에서 화면ID, 화면명, 화면설명, 메뉴경로를 확인하세요.
-    2. "처리흐름" 영역을 찾으세요.
-    3. 처리흐름의 번호 항목을 처음부터 마지막 번호까지 모두 추출하세요.
-    4. [코드가 추출한 처리흐름 목록]이 있으면 이 목록의 각 행 1개를 test_cases 객체 1개로 작성하세요.
-    5. 이벤트 정의와 입력데이터 검증 및 표현은 보조 참고 자료로만 사용하세요.
-    6. 출력 전, 처리흐름 번호 개수와 test_cases 객체 개수가 같은지 확인하세요.
+    [작성 기준]
+    - 사용자 조작 단위로 test_cases를 작성하세요.
+    - 조회됨, 표시됨, 팝업 호출 같은 시스템 반응은 "예상_결과"에 작성하세요.
+    - 처리흐름 번호 개수와 test_cases 개수를 억지로 맞추지 마세요.
+    - "단위시험_명"은 출력하지 마세요. 시스템에서 채웁니다.
+    - "테스트_데이터"는 출력하지 마세요. 시스템에서 빈 값으로 채웁니다.
+    - 순수 JSON 객체만 출력하세요.
 
-    [반드시 지킬 규칙]
-    - 출력되는 모든 객체의 "화면_ID" 값은 반드시 "{screen_id}"여야 합니다.
-    - 출력되는 모든 객체의 "단위시험_ID" 값은 반드시 "{unit_test_id}"여야 합니다.
-    - 처리흐름 번호 개수와 test_cases 객체 개수는 반드시 같아야 합니다.
-    - 처리흐름 번호가 ①~N까지 있으면 순서 1~N을 모두 출력하세요.
-    - ④, ⑤, ⑥ 이후의 뒤쪽 항목도 누락하지 마세요.
-    - 처리흐름 6번과 7번처럼 의미가 이어져 보여도 절대 합치지 마세요.
-    - 여러 처리흐름을 하나의 "테스트_케이스" 값에 합치지 마세요.
-    - 다른 화면ID에 대한 테스트 케이스는 절대 출력하지 마세요.
-    - 반드시 순수 JSON 객체만 출력하세요.
+    [JSON 형식]
+    {{"test_cases":[{{"화면명":"","사전조건":"","순서":1,"테스트_케이스":"","예상_결과":""}}]}}
 
     [설계서 화면 정의 블록]:
     {block["text"]}
@@ -647,11 +637,7 @@ def build_test_cases_from_text(
       _check_cancel(cancel_check)
       parsed_json = parse_llm_json(response_text)
       normalized_cases = normalize_test_cases(parsed_json, screen_id, unit_test_id)
-
-      missing_sequences = get_missing_sequences(normalized_cases, expected_steps)
-      if missing_sequences:
-        print(f"[경고] {screen_id}: 누락 순서 {missing_sequences}")
-        print(f"[경고] {screen_id}: 처리흐름 예상 {expected_steps}개, 생성 {len(normalized_cases)}개입니다. 누락 보강은 수행하지 않습니다.")
+      normalized_cases = apply_unit_test_metadata(normalized_cases, unit_test_metadata)
 
       normalized_cases = sort_and_dedupe_cases(normalized_cases)
 
@@ -700,10 +686,7 @@ def build_test_cases_from_text(
         _check_cancel(cancel_check)
         retry_json = parse_llm_json(retry_text)
         normalized_cases = normalize_test_cases(retry_json, screen_id, unit_test_id)
-
-        missing_sequences = get_missing_sequences(normalized_cases, expected_steps)
-        if missing_sequences:
-          print(f"[경고] {screen_id}: 재호출 후에도 누락 순서 {missing_sequences}가 있어 임의 보강하지 않고 제외합니다.")
+        normalized_cases = apply_unit_test_metadata(normalized_cases, unit_test_metadata)
 
         normalized_cases = sort_and_dedupe_cases(normalized_cases)
         print(f"[재호출 완료] {screen_id}: 생성 {len(normalized_cases)}개")
@@ -774,10 +757,10 @@ def save_test_cases_to_excel(test_cases, output_dir: Path, base_filename="genera
 
     current_row = 1
     common = group[0]
-    screen_name = common.get("화면명", "")
+    display_title = common.get("단위시험_제목") or common.get("단위시험_명") or common.get("화면명", "")
 
     # -- 타이틀 --
-    title = f"{group_idx}. {tc_id} - {screen_name}"
+    title = f"{group_idx}. {tc_id} - {display_title}"
     ws.cell(row=current_row, column=1, value=title).font = Font(bold=True, size=12)
     ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=5)
     ws.cell(row=current_row, column=1).alignment = Alignment(horizontal="left", vertical="center")
@@ -1078,12 +1061,13 @@ def save_test_cases_to_hwpx(test_cases, temp_path, output_filename, performer=""
     hwp.Run("MoveDocBegin")
     for tc_idx, (tc_id, steps) in enumerate(grouped_tc.items(), start=1):
       first_step = steps[0]
+      display_title = first_step.get("단위시험_제목") or first_step.get("단위시험_명") or first_step.get("화면명", "")
 
       if find_text("단위시험 ID"):
         hwp.Run("Cancel")
         hwp.Run("MoveUp"); hwp.Run("MoveUp")
         hwp.Run("MoveLineBegin"); hwp.Run("Select"); hwp.Run("MoveLineEnd"); hwp.Run("Delete")
-        hwp.insert_text(f"{tc_id} - {first_step.get('단위시험_명','')}")
+        hwp.insert_text(f"{tc_id} - {display_title}")
 
         find_text("단위시험 ID"); hwp.Run("TableRightCell"); clear_and_write(tc_id)
         if find_text("수행자"):
