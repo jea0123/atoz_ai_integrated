@@ -26,7 +26,14 @@ class FakePdfDocument:
 
 
 class GenerateTcTextExtractionTest(unittest.TestCase):
-    def build_cases_from_block(self, block_text, screen_id="UI-SFD-001-01-01", unit_test_id="UT-SFD-001-01-01"):
+    def build_cases_from_block(
+        self,
+        block_text,
+        screen_id="UI-SFD-001-01-01",
+        unit_test_id="UT-SFD-001-01-01",
+        progress_callback=None,
+        block_status_callback=None,
+    ):
         return generate_tc.build_test_cases_from_text(
             extracted_text=block_text,
             model_name="model",
@@ -36,6 +43,8 @@ class GenerateTcTextExtractionTest(unittest.TestCase):
                 "unit_test_id": unit_test_id,
                 "text": block_text,
             }],
+            progress_callback=progress_callback,
+            block_status_callback=block_status_callback,
         )
 
     def test_hwp_design_is_not_supported_yet(self):
@@ -109,6 +118,126 @@ class GenerateTcTextExtractionTest(unittest.TestCase):
             self.assertIn("AI 응답 시간 초과", result["error"])
             self.assertIn("UI-SFR-001-01", result["error"])
 
+    def test_document_size_classification_uses_screen_id_count(self):
+        self.assertEqual("small", generate_tc.classify_document_size(5))
+        self.assertEqual("medium", generate_tc.classify_document_size(6))
+        self.assertEqual("medium", generate_tc.classify_document_size(10))
+        self.assertEqual("large", generate_tc.classify_document_size(11))
+
+    def test_block_size_classification_uses_flow_count_and_text_length(self):
+        self.assertEqual("small", generate_tc.classify_block_size(3, "x" * 1499))
+        self.assertEqual("medium", generate_tc.classify_block_size(4, "x"))
+        self.assertEqual("medium", generate_tc.classify_block_size(1, "x" * 1500))
+        self.assertEqual("large", generate_tc.classify_block_size(9, "x"))
+        self.assertEqual("large", generate_tc.classify_block_size(1, "x" * 3000))
+
+    def test_llm_limits_follow_block_size_classification(self):
+        self.assertEqual((1024, 60), generate_tc.get_llm_limits(3, "x" * 1499))
+        self.assertEqual((2048, 90), generate_tc.get_llm_limits(4, "x"))
+        self.assertEqual((4096, 180), generate_tc.get_llm_limits(9, "x"))
+
+    def test_progress_message_includes_actual_llm_request_limits(self):
+        block_text = """4.1. 내부사용자관리
+화면ID UI-SFD-001-01-01
+화면명 내부사용자관리
+처리흐름
+① 검색 버튼을 클릭한다.
+"""
+        messages = []
+        ai_response = """{
+          "test_cases": [
+            {
+              "순서": 1,
+              "테스트_케이스": "검색 버튼 클릭",
+              "예상_결과": "목록이 조회된다."
+            }
+          ]
+        }"""
+
+        with patch("qa_generation.generate_tc.call_ollama", return_value=ai_response):
+            self.build_cases_from_block(block_text, progress_callback=messages.append)
+
+        joined_messages = "\n".join(messages)
+        self.assertIn("num_predict=1024", joined_messages)
+        self.assertIn("timeout=60s", joined_messages)
+
+    def test_block_status_callback_reports_request_limits_and_statuses(self):
+        block_text = """4.1. 내부사용자관리
+화면ID UI-SFD-001-01-01
+화면명 내부사용자관리
+처리흐름
+① 검색 버튼을 클릭한다.
+"""
+        events = []
+        ai_response = """{
+          "test_cases": [
+            {
+              "순서": 1,
+              "테스트_케이스": "검색 버튼 클릭",
+              "예상_결과": "목록이 조회된다."
+            }
+          ]
+        }"""
+
+        with patch("qa_generation.generate_tc.call_ollama", return_value=ai_response):
+            self.build_cases_from_block(block_text, block_status_callback=events.append)
+
+        self.assertEqual(["queued", "running", "updated"], [event["status"] for event in events])
+        self.assertEqual("UI-SFD-001-01-01", events[-1]["screen_id"])
+        self.assertEqual("small", events[-1]["block_size"])
+        self.assertEqual(1024, events[-1]["num_predict"])
+        self.assertEqual(60, events[-1]["timeout"])
+        self.assertEqual(1, events[-1]["generated_count"])
+
+    def test_small_blocks_are_processed_first_but_results_keep_original_order(self):
+        large_block = """4.1. 큰 화면
+화면ID UI-LARGE-001
+화면명 큰 화면
+처리흐름
+① 첫 번째 작업을 수행한다.
+② 두 번째 작업을 수행한다.
+③ 세 번째 작업을 수행한다.
+④ 네 번째 작업을 수행한다.
+"""
+        small_block = """4.2. 작은 화면
+화면ID UI-SMALL-001
+화면명 작은 화면
+처리흐름
+① 검색 버튼을 클릭한다.
+"""
+        screen_blocks = [
+            {
+                "screen_id": "UI-LARGE-001",
+                "unit_test_id": "UT-LARGE-001",
+                "text": large_block,
+            },
+            {
+                "screen_id": "UI-SMALL-001",
+                "unit_test_id": "UT-SMALL-001",
+                "text": small_block,
+            },
+        ]
+        call_order = []
+
+        def fake_call(_url, _model, _system_prompt, user_prompt, **_kwargs):
+            if "UI-SMALL-001" in user_prompt:
+                call_order.append("UI-SMALL-001")
+                return '{"test_cases":[{"순서":1,"테스트_케이스":"작은 화면 처리","예상_결과":"성공"}]}'
+            call_order.append("UI-LARGE-001")
+            return '{"test_cases":[{"순서":1,"테스트_케이스":"큰 화면 처리","예상_결과":"성공"}]}'
+
+        with patch("qa_generation.generate_tc.call_ollama", side_effect=fake_call):
+            cases = generate_tc.build_test_cases_from_text(
+                extracted_text=f"{large_block}\n{small_block}",
+                model_name="model",
+                ollama_url="http://localhost",
+                screen_blocks=screen_blocks,
+            )
+
+        self.assertEqual(["UI-SMALL-001", "UI-LARGE-001"], call_order)
+        self.assertEqual(["UT-LARGE-001", "UT-SMALL-001"], [case["단위시험_ID"] for case in cases])
+        self.assertNotIn("__block_original_index", cases[0])
+
     def test_unit_test_name_uses_screen_name_with_improvement_when_title_matches_screen(self):
         block_text = """4.1. 내부사용자관리
 요구사항ID SFR-SFD-001-01
@@ -142,6 +271,36 @@ class GenerateTcTextExtractionTest(unittest.TestCase):
         self.assertEqual("내부사용자관리 개선", cases[0]["단위시험_명"])
         self.assertEqual("내부사용자관리", cases[0]["화면명"])
         self.assertEqual("", cases[0]["테스트_데이터"])
+
+    def test_test_case_text_strips_leading_sequence_marker(self):
+        block_text = """4.1. 내부사용자관리
+요구사항ID SFR-SFD-001-01
+화면ID UI-SFD-001-01-01
+화면명 내부사용자관리
+처리흐름
+① 검색조건을 입력 후 검색 버튼을 클릭한다.
+② 내부사용자 목록 중 하나의 행을 클릭한다.
+"""
+        ai_response = """{
+          "test_cases": [
+            {
+              "순서": 1,
+              "테스트_케이스": "1. 검색조건을 입력 후 검색 버튼을 클릭한다.",
+              "예상_결과": "목록이 조회된다."
+            },
+            {
+              "순서": 2,
+              "테스트_케이스": "② 내부사용자 목록 중 하나의 행을 클릭한다.",
+              "예상_결과": "상세 정보가 조회된다."
+            }
+          ]
+        }"""
+
+        with patch("qa_generation.generate_tc.call_ollama", return_value=ai_response):
+            cases = self.build_cases_from_block(block_text)
+
+        self.assertEqual("검색조건을 입력 후 검색 버튼을 클릭한다.", cases[0]["테스트_케이스"])
+        self.assertEqual("내부사용자 목록 중 하나의 행을 클릭한다.", cases[1]["테스트_케이스"])
 
     def test_unit_test_name_uses_section_title_when_title_is_more_specific_than_screen(self):
         block_text = """4.1. 전자위생증명서 연계 국가 확대
