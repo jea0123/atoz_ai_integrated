@@ -58,31 +58,35 @@ REQUIRED_TC_KEYS = [
 ]
 
 CIRCLED_NUMBERS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
-SIZE_LABELS = {
-  "small": "소량",
-  "medium": "보통",
-  "large": "대량",
-}
+
+
+class TestCaseGenerationError(RuntimeError):
+  pass
+
+
 SIZE_ORDER = {
   "small": 0,
   "medium": 1,
   "large": 2,
 }
-DESIGN_FIELD_LABELS = (
-  "요구사항ID",
-  "화면ID",
-  "화면명",
-  "화면설명",
-  "메뉴경로",
-  "개발구분",
-  "개인정보등급",
-)
-TITLE_CHANGE_WORDS = ("개선", "확대", "추가", "변경", "보완", "개발", "수정", "고도화")
-ID_LIKE_PATTERN = re.compile(r"^(?:UI|UT|SFR)-[A-Z0-9]+(?:-[A-Z0-9]+)*$", re.IGNORECASE)
+
+SIZE_LABELS = {
+  "small": "소량",
+  "medium": "보통",
+  "large": "대량",
+}
 
 
-class TestCaseGenerationError(RuntimeError):
-  pass
+def classify_document_size(screen_count):
+  try:
+    count = int(screen_count or 0)
+  except (TypeError, ValueError):
+    count = 0
+  if count <= 5:
+    return "small"
+  if count <= 10:
+    return "medium"
+  return "large"
 
 
 def extract_cover_author_from_document(document_path):
@@ -330,7 +334,6 @@ def normalize_test_cases(parsed_json, screen_id, unit_test_id):
     fixed["화면_ID"] = screen_id or fixed.get("화면_ID", "")
     fixed["단위시험_ID"] = unit_test_id or fixed.get("단위시험_ID", "")
     fixed["테스트_데이터"] = ""
-    fixed["테스트_케이스"] = strip_leading_sequence_marker(fixed.get("테스트_케이스", ""))
 
     if not fixed["순서"]:
       fixed["순서"] = idx
@@ -338,103 +341,6 @@ def normalize_test_cases(parsed_json, screen_id, unit_test_id):
     normalized.append(fixed)
 
   return normalized
-
-def strip_leading_sequence_marker(value):
-  text = str(value or "").strip()
-  return re.sub(
-    r"^\s*(?:\d+|[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳])\s*[\.\)\-:：]?\s+",
-    "",
-    text,
-    count=1,
-  )
-
-def clean_design_value(value):
-  value = re.sub(r"\s+", " ", str(value or "")).strip(" :：\t\r\n")
-  if value.upper() in {"N/A", "NA"}:
-    return ""
-  return value
-
-def is_identifier_like(value):
-  return bool(ID_LIKE_PATTERN.fullmatch(clean_design_value(value)))
-
-def extract_section_title(block_text):
-  for line in str(block_text or "").splitlines():
-    match = re.match(r"^\s*\d+\.\d+\.\s*(.+?)\s*$", line)
-    if match:
-      title = clean_design_value(match.group(1))
-      if title and not is_identifier_like(title):
-        return title
-  return ""
-
-def extract_design_field(block_text, label):
-  text = str(block_text or "").replace("\r", "\n")
-  labels_pattern = "|".join(re.escape(item) for item in DESIGN_FIELD_LABELS if item != label)
-  match = re.search(
-    rf"{re.escape(label)}\s*[:：]?\s*(.*?)(?=\s*(?:{labels_pattern})\s*[:：]?|\n\s*\d+\.\d+\.|\n\s*화면구성|\n\s*처리\s*흐름|\n\s*이벤트\s*정의|$)",
-    text,
-    flags=re.S,
-  )
-  if match:
-    value = clean_design_value(match.group(1))
-    if value and not is_identifier_like(value):
-      return value
-
-  lines = [line.strip() for line in text.splitlines() if line.strip()]
-  normalized_label = re.sub(r"\s+", "", label)
-  normalized_labels = {re.sub(r"\s+", "", item) for item in DESIGN_FIELD_LABELS}
-  for index, line in enumerate(lines):
-    normalized = re.sub(r"\s+", "", line)
-    if normalized == normalized_label:
-      for candidate in lines[index + 1:index + 4]:
-        if re.sub(r"\s+", "", candidate) in normalized_labels:
-          break
-        value = clean_design_value(candidate)
-        if value and not is_identifier_like(value):
-          return value
-    if normalized.startswith(normalized_label):
-      value = clean_design_value(line[len(label):])
-      if value and not is_identifier_like(value):
-        return value
-  return ""
-
-def infer_unit_test_metadata(block_text):
-  section_title = extract_section_title(block_text)
-  screen_name = extract_design_field(block_text, "화면명")
-  development_type = extract_design_field(block_text, "개발구분")
-  display_title = section_title or screen_name
-  unit_test_name = display_title
-
-  if (
-      unit_test_name
-      and development_type == "개선"
-      and screen_name
-      and unit_test_name == screen_name
-      and not any(word in unit_test_name for word in TITLE_CHANGE_WORDS)
-  ):
-    unit_test_name = f"{unit_test_name} 개선"
-
-  return {
-    "section_title": section_title,
-    "screen_name": screen_name,
-    "development_type": development_type,
-    "display_title": display_title,
-    "unit_test_name": unit_test_name,
-  }
-
-def apply_unit_test_metadata(test_cases, metadata):
-  display_title = clean_design_value(metadata.get("display_title"))
-  screen_name = clean_design_value(metadata.get("screen_name"))
-  unit_test_name = clean_design_value(metadata.get("unit_test_name"))
-
-  for case in test_cases:
-    if display_title:
-      case["단위시험_제목"] = display_title
-    if screen_name:
-      case["화면명"] = screen_name
-    if unit_test_name:
-      case["단위시험_명"] = unit_test_name
-
-  return test_cases
 
 def get_missing_sequences(test_cases, expected_steps):
   if not expected_steps:
@@ -490,43 +396,28 @@ def call_ollama(ollama_url, model_name, system_prompt, user_prompt, num_predict=
   result_data = response.json()
   return result_data.get("message", {}).get("content", "")
 
-def classify_document_size(screen_id_count):
-  if screen_id_count <= 5:
-    return "small"
-  if screen_id_count <= 10:
-    return "medium"
-  return "large"
-
-def classify_block_size(expected_steps, block_text):
-  text_len = len(block_text or "")
-  if expected_steps >= 9 or text_len >= 3000:
-    return "large"
-  if expected_steps >= 4 or text_len >= 1500:
-    return "medium"
-  return "small"
-
 def get_llm_limits(expected_steps, block_text):
-  block_size = classify_block_size(expected_steps, block_text)
-  if block_size == "large":
+  if expected_steps >= 9 or len(block_text) >= 3000:
     return 4096, 180
-  if block_size == "medium":
+  if expected_steps >= 4 or len(block_text) >= 1500:
     return 2048, 90
   return 1024, 60
 
-def screen_block_processing_key(block):
-  return (
-    SIZE_ORDER.get(block.get("_block_size", "large"), SIZE_ORDER["large"]),
-    int(block.get("_original_index", 0)),
-  )
 
-def test_case_original_order_key(case):
-  try:
-    sequence = int(case.get("순서", 0))
-  except (TypeError, ValueError):
-    sequence = 0
+def classify_block_size(expected_steps, block_text):
+  if expected_steps >= 9 or len(block_text) >= 3000:
+    return "large"
+  if expected_steps >= 4 or len(block_text) >= 1500:
+    return "medium"
+  return "small"
+
+
+def block_processing_key(block):
+  flow_steps = extract_process_flow_steps(block["text"])
+  block_size = classify_block_size(len(flow_steps), block["text"])
   return (
-    int(case.get("__block_original_index", 0)),
-    sequence,
+    SIZE_ORDER.get(block_size, SIZE_ORDER["large"]),
+    int(block.get("_original_index") or 0),
   )
 
 def build_retry_prompt(screen_id, unit_test_id, expected_steps, block_text, bad_response, error_message):
@@ -556,7 +447,7 @@ def build_retry_prompt(screen_id, unit_test_id, expected_steps, block_text, bad_
   - 시스템 반응, 조회 결과, 팝업 호출은 "예상_결과"로 작성하세요.
   - 처리흐름 번호 개수와 test_cases 개수를 억지로 맞추지 마세요.
   - "테스트_데이터"는 출력하지 마세요. 시스템에서 빈 값으로 채웁니다.
-  - 화면_ID, 단위시험_ID, 단위시험_명은 시스템에서 보정합니다.
+  - 화면_ID와 단위시험_ID는 아래 값 그대로 사용하세요.
 
   [출력 JSON]
   {{
@@ -564,6 +455,7 @@ def build_retry_prompt(screen_id, unit_test_id, expected_steps, block_text, bad_
       {{
         "단위시험_ID": "{unit_test_id}",
         "화면명": "",
+        "단위시험_명": "",
         "사전조건": "",
         "화면_ID": "{screen_id}",
         "순서": 1,
@@ -587,9 +479,9 @@ def _report_progress(progress_callback: Callable[[str], None] | None, message: s
     progress_callback(message)
 
 
-def _report_block_status(block_status_callback: Callable[[dict[str, object]], None] | None, **payload: object) -> None:
+def _report_block_status(block_status_callback: Callable[[dict], None] | None, update: dict) -> None:
   if block_status_callback:
-    block_status_callback(payload)
+    block_status_callback(update)
 
 
 def build_test_cases_from_text(
@@ -599,7 +491,7 @@ def build_test_cases_from_text(
     screen_blocks=None,
     cancel_check: Callable[[], None] | None = None,
     progress_callback: Callable[[str], None] | None = None,
-    block_status_callback: Callable[[dict[str, object]], None] | None = None,
+    block_status_callback: Callable[[dict], None] | None = None,
 ):
   print(f"\nAI 추론 중... ({model_name})")
 
@@ -612,13 +504,13 @@ def build_test_cases_from_text(
 
   작성 필드:
   - 화면명
+  - 단위시험_명
   - 사전조건
   - 순서
   - 테스트_케이스
   - 예상_결과
 
-  화면_ID, 단위시험_ID, 단위시험_명, 테스트_데이터, 수행자, 수행_일자, 수행_결과는 시스템에서 보정합니다.
-  "단위시험_명" 필드는 출력하지 마세요.
+  화면_ID, 단위시험_ID, 테스트_데이터, 수행자, 수행_일자, 수행_결과는 시스템에서 보정합니다.
   "테스트_데이터" 필드는 출력하지 마세요.
   반드시 마크다운 없이 순수 JSON 객체만 출력하고, 최상위 키는 "test_cases"만 사용하세요.
   """
@@ -632,74 +524,53 @@ def build_test_cases_from_text(
       "text": extracted_text
     }]
 
-  document_size = classify_document_size(len(screen_blocks))
+  screen_blocks = [
+    {**block, "_original_index": index}
+    for index, block in enumerate(screen_blocks)
+  ]
+  screen_blocks = sorted(screen_blocks, key=block_processing_key)
+
   print(f"\n추출된 고유 화면ID 수: {len(screen_blocks)}")
-  print(f"[문서 분류] {SIZE_LABELS[document_size]}({document_size}) | 화면 ID {len(screen_blocks)}개")
-  prepared_blocks = []
   for idx, block in enumerate(screen_blocks, 1):
     flow_steps = extract_process_flow_steps(block["text"])
     expected_steps = len(flow_steps)
-    block_size = classify_block_size(expected_steps, block["text"])
     num_predict, request_timeout = get_llm_limits(expected_steps, block["text"])
-    prepared_block = dict(block)
-    prepared_block.update({
-      "_original_index": idx - 1,
-      "_display_index": idx,
-      "_flow_steps": flow_steps,
-      "_expected_steps": expected_steps,
-      "_block_size": block_size,
-      "_text_len": len(block["text"]),
-      "_num_predict": num_predict,
-      "_timeout": request_timeout,
+    _report_block_status(block_status_callback, {
+      "status": "queued",
+      "screen_id": block.get("screen_id", ""),
+      "unit_test_id": block.get("unit_test_id", ""),
+      "original_index": idx - 1,
+      "display_index": idx,
+      "expected_steps": expected_steps,
+      "num_predict": num_predict,
+      "timeout": request_timeout,
+      "generated_count": 0,
+      "error": "",
     })
-    prepared_blocks.append(prepared_block)
-    _report_block_status(
-      block_status_callback,
-      status="queued",
-      screen_id=block.get("screen_id") or "",
-      unit_test_id=block.get("unit_test_id") or "",
-      original_index=idx - 1,
-      display_index=idx,
-      block_size=block_size,
-      block_size_label=SIZE_LABELS[block_size],
-      expected_steps=expected_steps,
-      text_len=len(block["text"]),
-      num_predict=num_predict,
-      timeout=request_timeout,
-      generated_count=0,
-      error="",
-    )
-    print(
-      f"[화면 분할] {idx}/{len(screen_blocks)} screen_id={block['screen_id']} "
-      f"block_size={SIZE_LABELS[block_size]}({block_size}) expected_steps={expected_steps} text_len={len(block['text'])}"
-    )
+    print(f"[화면 분할] {idx}/{len(screen_blocks)} screen_id={block['screen_id']} expected_steps={expected_steps} text_len={len(block['text'])}")
     for step in flow_steps:
       print(f"  - 처리흐름 {step['순서']}: {step['내용']}")
 
-  processing_blocks = sorted(prepared_blocks, key=screen_block_processing_key)
-  processing_order = " -> ".join(
-    f"{block.get('screen_id') or '-'}:{block['_block_size']}"
-    for block in processing_blocks
-  )
-  print(f"[처리 순서] 소량 우선 | {processing_order}")
-
-  _report_progress(
-    progress_callback,
-    f"단위시험케이스 AI 생성 시작 | 문서={SIZE_LABELS[document_size]}({document_size}) 화면 블록 {len(screen_blocks)}개",
-  )
+  _report_progress(progress_callback, f"단위시험케이스 AI 생성 시작 | 화면 블록 {len(screen_blocks)}개")
   all_test_cases = []
 
-  for process_idx, block in enumerate(processing_blocks, 1):
+  for idx, block in enumerate(screen_blocks, 1):
     _check_cancel(cancel_check)
-    flow_steps = block["_flow_steps"]
-    expected_steps = block["_expected_steps"]
+    flow_steps = extract_process_flow_steps(block["text"])
+    expected_steps = len(flow_steps)
     screen_id = block["screen_id"]
     unit_test_id = block["unit_test_id"]
-    unit_test_metadata = infer_unit_test_metadata(block["text"])
     response_text = ""
-    block_size = block["_block_size"]
-    num_predict = int(block["_num_predict"])
-    request_timeout = int(block["_timeout"])
+    num_predict, request_timeout = get_llm_limits(expected_steps, block["text"])
+    block_status_base = {
+      "screen_id": screen_id,
+      "unit_test_id": unit_test_id,
+      "original_index": idx - 1,
+      "display_index": idx,
+      "expected_steps": expected_steps,
+      "num_predict": num_predict,
+      "timeout": request_timeout,
+    }
     flow_steps_text = "\n".join(
       f"{step['순서']}. {step['내용']}" for step in flow_steps
     )
@@ -720,123 +591,74 @@ def build_test_cases_from_text(
     - 사용자 조작 단위로 test_cases를 작성하세요.
     - 조회됨, 표시됨, 팝업 호출 같은 시스템 반응은 "예상_결과"에 작성하세요.
     - 처리흐름 번호 개수와 test_cases 개수를 억지로 맞추지 마세요.
-    - "단위시험_명"은 출력하지 마세요. 시스템에서 채웁니다.
     - "테스트_데이터"는 출력하지 마세요. 시스템에서 빈 값으로 채웁니다.
     - 순수 JSON 객체만 출력하세요.
 
     [JSON 형식]
-    {{"test_cases":[{{"화면명":"","사전조건":"","순서":1,"테스트_케이스":"","예상_결과":""}}]}}
+    {{"test_cases":[{{"화면명":"","단위시험_명":"","사전조건":"","순서":1,"테스트_케이스":"","예상_결과":""}}]}}
 
     [설계서 화면 정의 블록]:
     {block["text"]}
     """
 
     try:
-      print(f"\n[AI 호출] {process_idx}/{len(processing_blocks)} {screen_id} 처리 중... 원래순서={block['_display_index']}/{len(screen_blocks)}")
-      print(
-        f"[AI 호출 설정] {screen_id}: block_size={SIZE_LABELS[block_size]}({block_size}) "
-        f"expected_steps={expected_steps} text_len={len(block['text'])} "
-        f"num_predict={num_predict} timeout={request_timeout}s"
-      )
+      print(f"\n[AI 호출] {idx}/{len(screen_blocks)} {screen_id} 처리 중...")
+      print(f"[AI 호출 설정] {screen_id}: expected_steps={expected_steps} text_len={len(block['text'])} num_predict={num_predict} timeout={request_timeout}s")
       _check_cancel(cancel_check)
-      _report_block_status(
-        block_status_callback,
-        status="running",
-        screen_id=screen_id or "",
-        unit_test_id=unit_test_id or "",
-        original_index=block["_original_index"],
-        display_index=block["_display_index"],
-        block_size=block_size,
-        block_size_label=SIZE_LABELS[block_size],
-        expected_steps=expected_steps,
-        text_len=len(block["text"]),
-        num_predict=num_predict,
-        timeout=request_timeout,
-        generated_count=0,
-        error="",
-      )
       _report_progress(
         progress_callback,
-        f"단위시험케이스 AI 호출 중 | 처리 {process_idx}/{len(processing_blocks)} 원래 {block['_display_index']}/{len(screen_blocks)} 화면={screen_id or '-'} 블록={SIZE_LABELS[block_size]}({block_size}) num_predict={num_predict} timeout={request_timeout}s",
+        f"단위시험케이스 AI 호출 중 | {idx}/{len(screen_blocks)} 화면={screen_id or '-'} timeout={request_timeout}s",
       )
+      _report_block_status(block_status_callback, {
+        **block_status_base,
+        "status": "running",
+        "generated_count": 0,
+        "error": "",
+      })
       response_text = call_ollama(ollama_url, model_name, system_prompt, user_prompt, num_predict=num_predict, timeout=request_timeout)
       _check_cancel(cancel_check)
       parsed_json = parse_llm_json(response_text)
       normalized_cases = normalize_test_cases(parsed_json, screen_id, unit_test_id)
-      normalized_cases = apply_unit_test_metadata(normalized_cases, unit_test_metadata)
 
       normalized_cases = sort_and_dedupe_cases(normalized_cases)
-      for case in normalized_cases:
-        case["__block_original_index"] = block["_original_index"]
 
       print(f"[완료] {screen_id}: 생성 {len(normalized_cases)}개")
-      _report_block_status(
-        block_status_callback,
-        status="updated",
-        screen_id=screen_id or "",
-        unit_test_id=unit_test_id or "",
-        original_index=block["_original_index"],
-        display_index=block["_display_index"],
-        block_size=block_size,
-        block_size_label=SIZE_LABELS[block_size],
-        expected_steps=expected_steps,
-        text_len=len(block["text"]),
-        num_predict=num_predict,
-        timeout=request_timeout,
-        generated_count=len(normalized_cases),
-        error="",
-        cases=normalized_cases,
-      )
 
       _report_progress(
         progress_callback,
-        f"단위시험케이스 AI 응답 완료 | 처리 {process_idx}/{len(processing_blocks)} 화면={screen_id or '-'} 생성 {len(normalized_cases)}건",
+        f"단위시험케이스 AI 응답 완료 | {idx}/{len(screen_blocks)} 화면={screen_id or '-'} 생성 {len(normalized_cases)}건",
       )
+      _report_block_status(block_status_callback, {
+        **block_status_base,
+        "status": "updated",
+        "generated_count": len(normalized_cases),
+        "error": "",
+      })
       all_test_cases.extend(normalized_cases)
     
     except requests.exceptions.Timeout:
       message = f"단위시험케이스 AI 응답 시간 초과 | 화면={screen_id or '-'} | timeout={request_timeout}s"
       print(message)
       print("AI 응답 시간 초과로 전체 테스트 케이스 생성을 중단합니다.")
-      _report_block_status(
-        block_status_callback,
-        status="error",
-        screen_id=screen_id or "",
-        unit_test_id=unit_test_id or "",
-        original_index=block["_original_index"],
-        display_index=block["_display_index"],
-        block_size=block_size,
-        block_size_label=SIZE_LABELS[block_size],
-        expected_steps=expected_steps,
-        text_len=len(block["text"]),
-        num_predict=num_predict,
-        timeout=request_timeout,
-        generated_count=0,
-        error=message,
-      )
       _report_progress(progress_callback, message)
+      _report_block_status(block_status_callback, {
+        **block_status_base,
+        "status": "error",
+        "generated_count": 0,
+        "error": message,
+      })
       raise TestCaseGenerationError(message)
     except requests.exceptions.RequestException as e:
       message = f"단위시험케이스 AI 호출 실패 | 화면={screen_id or '-'} | {e}"
       print(message)
       print("AI 호출 실패로 전체 테스트 케이스 생성을 중단합니다.")
-      _report_block_status(
-        block_status_callback,
-        status="error",
-        screen_id=screen_id or "",
-        unit_test_id=unit_test_id or "",
-        original_index=block["_original_index"],
-        display_index=block["_display_index"],
-        block_size=block_size,
-        block_size_label=SIZE_LABELS[block_size],
-        expected_steps=expected_steps,
-        text_len=len(block["text"]),
-        num_predict=num_predict,
-        timeout=request_timeout,
-        generated_count=0,
-        error=message,
-      )
       _report_progress(progress_callback, message)
+      _report_block_status(block_status_callback, {
+        **block_status_base,
+        "status": "error",
+        "generated_count": 0,
+        "error": message,
+      })
       raise TestCaseGenerationError(message)
     except (json.JSONDecodeError, ValueError) as e:
       bad_response = response_text if "response_text" in locals() else ""
@@ -855,84 +677,40 @@ def build_test_cases_from_text(
       try:
         print(f"[AI 재호출] {screen_id} 응답 형식 보정 중...")
         _check_cancel(cancel_check)
-        _report_block_status(
-          block_status_callback,
-          status="running",
-          screen_id=screen_id or "",
-          unit_test_id=unit_test_id or "",
-          original_index=block["_original_index"],
-          display_index=block["_display_index"],
-          block_size=block_size,
-          block_size_label=SIZE_LABELS[block_size],
-          expected_steps=expected_steps,
-          text_len=len(block["text"]),
-          num_predict=num_predict,
-          timeout=request_timeout,
-          generated_count=0,
-          error="응답 형식 보정 중",
-        )
         _report_progress(
           progress_callback,
-          f"단위시험케이스 AI 응답 보정 호출 중 | 화면={screen_id or '-'} 블록={SIZE_LABELS[block_size]}({block_size}) num_predict={num_predict} timeout={request_timeout}s",
+          f"단위시험케이스 AI 응답 보정 호출 중 | 화면={screen_id or '-'} timeout={request_timeout}s",
         )
         retry_text = call_ollama(ollama_url, model_name, system_prompt, retry_prompt, num_predict=num_predict, timeout=request_timeout)
         _check_cancel(cancel_check)
         retry_json = parse_llm_json(retry_text)
         normalized_cases = normalize_test_cases(retry_json, screen_id, unit_test_id)
-        normalized_cases = apply_unit_test_metadata(normalized_cases, unit_test_metadata)
 
         normalized_cases = sort_and_dedupe_cases(normalized_cases)
-        for case in normalized_cases:
-          case["__block_original_index"] = block["_original_index"]
         print(f"[재호출 완료] {screen_id}: 생성 {len(normalized_cases)}개")
-        _report_block_status(
-          block_status_callback,
-          status="updated",
-          screen_id=screen_id or "",
-          unit_test_id=unit_test_id or "",
-          original_index=block["_original_index"],
-          display_index=block["_display_index"],
-          block_size=block_size,
-          block_size_label=SIZE_LABELS[block_size],
-          expected_steps=expected_steps,
-          text_len=len(block["text"]),
-          num_predict=num_predict,
-          timeout=request_timeout,
-          generated_count=len(normalized_cases),
-          error="",
-          cases=normalized_cases,
-        )
         _report_progress(
           progress_callback,
           f"단위시험케이스 AI 응답 보정 완료 | 화면={screen_id or '-'} 생성 {len(normalized_cases)}건",
         )
+        _report_block_status(block_status_callback, {
+          **block_status_base,
+          "status": "updated",
+          "generated_count": len(normalized_cases),
+          "error": "",
+        })
         all_test_cases.extend(normalized_cases)
       except Exception as retry_error:
         message = f"단위시험케이스 AI 응답 보정 실패 | 화면={screen_id or '-'} | {retry_error}"
         print(f"[재호출 실패] {screen_id}: {retry_error}")
         print("응답 보정 실패로 전체 테스트 케이스 생성을 중단합니다.")
-        _report_block_status(
-          block_status_callback,
-          status="error",
-          screen_id=screen_id or "",
-          unit_test_id=unit_test_id or "",
-          original_index=block["_original_index"],
-          display_index=block["_display_index"],
-          block_size=block_size,
-          block_size_label=SIZE_LABELS[block_size],
-          expected_steps=expected_steps,
-          text_len=len(block["text"]),
-          num_predict=num_predict,
-          timeout=request_timeout,
-          generated_count=0,
-          error=message,
-        )
         _report_progress(progress_callback, message)
+        _report_block_status(block_status_callback, {
+          **block_status_base,
+          "status": "error",
+          "generated_count": 0,
+          "error": message,
+        })
         raise TestCaseGenerationError(message)
-
-  all_test_cases = sorted(all_test_cases, key=test_case_original_order_key)
-  for case in all_test_cases:
-    case.pop("__block_original_index", None)
 
   print(f"\n전체 생성 테스트 케이스 행 수: {len(all_test_cases)}")
   return all_test_cases
@@ -989,10 +767,10 @@ def save_test_cases_to_excel(test_cases, output_dir: Path, base_filename="genera
 
     current_row = 1
     common = group[0]
-    display_title = common.get("단위시험_제목") or common.get("단위시험_명") or common.get("화면명", "")
+    screen_name = common.get("화면명", "")
 
     # -- 타이틀 --
-    title = f"{group_idx}. {tc_id} - {display_title}"
+    title = f"{group_idx}. {tc_id} - {screen_name}"
     ws.cell(row=current_row, column=1, value=title).font = Font(bold=True, size=12)
     ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=5)
     ws.cell(row=current_row, column=1).alignment = Alignment(horizontal="left", vertical="center")
@@ -1293,13 +1071,12 @@ def save_test_cases_to_hwpx(test_cases, temp_path, output_filename, performer=""
     hwp.Run("MoveDocBegin")
     for tc_idx, (tc_id, steps) in enumerate(grouped_tc.items(), start=1):
       first_step = steps[0]
-      display_title = first_step.get("단위시험_제목") or first_step.get("단위시험_명") or first_step.get("화면명", "")
 
       if find_text("단위시험 ID"):
         hwp.Run("Cancel")
         hwp.Run("MoveUp"); hwp.Run("MoveUp")
         hwp.Run("MoveLineBegin"); hwp.Run("Select"); hwp.Run("MoveLineEnd"); hwp.Run("Delete")
-        hwp.insert_text(f"{tc_id} - {display_title}")
+        hwp.insert_text(f"{tc_id} - {first_step.get('단위시험_명','')}")
 
         find_text("단위시험 ID"); hwp.Run("TableRightCell"); clear_and_write(tc_id)
         if find_text("수행자"):
@@ -1365,7 +1142,7 @@ def generate_test_cases(
     screen_blocks: list[dict] | None = None,
     cancel_check: Callable[[], None] | None = None,
     progress_callback: Callable[[str], None] | None = None,
-    block_status_callback: Callable[[dict[str, object]], None] | None = None,
+    block_status_callback: Callable[[dict], None] | None = None,
 ) -> dict:
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)

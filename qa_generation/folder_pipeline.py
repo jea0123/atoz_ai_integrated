@@ -75,6 +75,51 @@ def qa_batch_log(request_id: str, message: str) -> None:
     log_message(f"QA 배치[{request_id}] {message}")
 
 
+def qa_progress_log(request_id: str, requirement_id: str, message: str) -> None:
+    if "단위시험케이스 AI 생성 시작" in message:
+        match = re.search(r"화면 블록\s+(\d+)개", message)
+        block_count = match.group(1) if match else "-"
+        qa_batch_log(request_id, f"[{requirement_id}] 단위시험케이스 생성 시작 | 화면 {block_count}개")
+        return
+
+    if "단위시험케이스 AI 호출 중" in message:
+        match = re.search(r"(\d+)/(\d+).*화면=([^|\s]+).*timeout=(\d+)s", message)
+        if match:
+            current, total, screen_id, timeout = match.groups()
+            qa_batch_log(
+                request_id,
+                f"[{requirement_id}] 화면 처리 중 | {current}/{total} {screen_id} | timeout={timeout}초",
+            )
+        return
+
+    if "단위시험케이스 AI 응답 완료" in message:
+        match = re.search(r"(\d+)/(\d+).*화면=([^|\s]+).*생성\s+(\d+)건", message)
+        if match:
+            current, total, screen_id, count = match.groups()
+            qa_batch_log(
+                request_id,
+                f"[{requirement_id}] 화면 처리 완료 | {current}/{total} {screen_id} | 생성 {count}건",
+            )
+        return
+
+    if "단위시험케이스 AI 응답 보정 호출 중" in message:
+        match = re.search(r"화면=([^|\s]+).*timeout=(\d+)s", message)
+        if match:
+            screen_id, timeout = match.groups()
+            qa_batch_log(request_id, f"[{requirement_id}] 화면 응답 보정 중 | {screen_id} | timeout={timeout}초")
+        return
+
+    if "단위시험케이스 AI 응답 보정 완료" in message:
+        match = re.search(r"화면=([^|\s]+).*생성\s+(\d+)건", message)
+        if match:
+            screen_id, count = match.groups()
+            qa_batch_log(request_id, f"[{requirement_id}] 화면 응답 보정 완료 | {screen_id} | 생성 {count}건")
+        return
+
+    if "시간 초과" in message or "호출 실패" in message or "보정 실패" in message or "생성 0건" in message:
+        qa_batch_log(request_id, f"[{requirement_id}] {message}")
+
+
 def file_name(path: Path | str | None) -> str:
     return Path(str(path)).name if path else "-"
 
@@ -501,13 +546,9 @@ def run_folder_qa_pipeline(
                 emit_progress(item)
                 qa_batch_log(
                     request_id,
-                    f"[{requirement_id}] {index}/{len(processing_items)} 처리 시작 | 원래순서={int(item.get('_original_index') or 0) + 1}/{len(requirement_items)} | "
-                    f"문서={SIZE_LABELS.get(str(item.get('_document_size')), str(item.get('_document_size')))}({item.get('_document_size')}) | "
-                    f"입력 5종: 설계서={file_name(ui_design)}, "
-                    f"단위케이스={file_name(tc_template)}, "
-                    f"단위결과서={file_name(unit_result_template)}, "
-                    f"통합시나리오={file_name(ts_template)}, "
-                    f"통합결과서={file_name(integration_result_template)}",
+                    f"[{requirement_id}] 처리 시작 | {index}/{len(processing_items)} | "
+                    f"문서={SIZE_LABELS.get(str(item.get('_document_size')), str(item.get('_document_size')))} | "
+                    f"화면 {int(item.get('_screen_block_count') or 0)}개",
                 )
 
                 tc_payload = run_with_suppressed_output(
@@ -520,7 +561,7 @@ def run_folder_qa_pipeline(
                         extracted_text=str(item.get("_extracted_text") or ""),
                         screen_blocks=item.get("_screen_blocks") if isinstance(item.get("_screen_blocks"), list) else None,
                         cancel_check=cancel_check,
-                        progress_callback=lambda message: qa_batch_log(request_id, f"[{requirement_id}] {message}"),
+                        progress_callback=lambda message: qa_progress_log(request_id, requirement_id, message),
                         block_status_callback=lambda update: update_requirement_block_status(requirement_id, update),
                     )
                 )
@@ -553,7 +594,7 @@ def run_folder_qa_pipeline(
                     raise RuntimeError("교체할 단위시험결과서 HWPX가 생성되지 않았습니다.")
                 qa_batch_log(
                     request_id,
-                    f"[{requirement_id}] 단위시험결과서 생성 완료 | {file_name(unit_result_hwpx)}",
+                    f"[{requirement_id}] 단위시험결과서 생성 완료",
                 )
 
                 ts_payload = run_with_suppressed_output(
@@ -617,11 +658,7 @@ def run_folder_qa_pipeline(
                     placed["__requirement_original_index"] = int(item.get("_original_index") or 0)
                 qa_batch_log(
                     request_id,
-                    f"[{requirement_id}] 산출물 배치 완료 | "
-                    f"단위시험케이스={file_name(placed_for_requirement[0].get('path'))}, "
-                    f"단위시험결과서={file_name(placed_for_requirement[1].get('path'))}, "
-                    f"통합시험시나리오={file_name(placed_for_requirement[2].get('path'))}, "
-                    f"통합시험결과서={file_name(placed_for_requirement[3].get('path'))}",
+                    f"[{requirement_id}] 산출물 배치 완료 | 4개 파일 교체",
                 )
                 placed_files.extend(placed_for_requirement)
                 tc_count = int(tc_payload.get("count") or 0)
@@ -697,9 +734,7 @@ def run_folder_qa_pipeline(
             "완료 | "
             f"성공 {payload['processed_requirement_count']}/{len(requirement_items)}건 · "
             f"실패 {len(failed_items)}건 · "
-            f"TC {payload['tc_count']}행 · TS {payload['ts_count']}행 · "
-            f"배치 파일 {len(placed_files)}개"
-            f"{' (5종 세트 기준)' if placed_files else ''}",
+            f"배치 파일 {len(placed_files)}개",
         )
         return payload
     except QaFolderMatchingError:
