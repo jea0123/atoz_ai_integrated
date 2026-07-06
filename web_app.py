@@ -10,6 +10,8 @@ import shutil
 import sys
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Lock, Thread
+from time import time
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from uuid import uuid4
 
@@ -63,6 +65,116 @@ from cancellation import (
 RESULT_FILES: dict[str, Path] = {}
 RESULT_DOWNLOAD_NAMES: dict[str, str] = {}
 RESULT_DELETE_AFTER_DOWNLOAD: dict[str, bool] = {}
+QA_FOLDER_JOBS: dict[str, dict[str, object]] = {}
+QA_FOLDER_JOB_CONTEXTS: dict[str, dict[str, object]] = {}
+QA_FOLDER_JOBS_LOCK = Lock()
+
+
+def json_safe_copy(value: object) -> object:
+    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def create_qa_folder_job(request_id: str, dump_root: str) -> dict[str, object]:
+    now = time()
+    job = {
+        "ok": True,
+        "job_id": request_id,
+        "request_id": request_id,
+        "status": "queued",
+        "created_at": now,
+        "updated_at": now,
+        "dump_root": dump_root,
+        "match_preview": False,
+        "requirement_count": 0,
+        "processed_requirement_count": 0,
+        "failed_requirement_count": 0,
+        "tc_count": 0,
+        "ts_count": 0,
+        "role_counts": {},
+        "source_files": [],
+        "requirement_items": [],
+        "missing_requirements": [],
+        "placed_files": [],
+        "files": [],
+        "error": "",
+    }
+    with QA_FOLDER_JOBS_LOCK:
+        QA_FOLDER_JOBS[request_id] = job
+    return job
+
+
+def set_qa_folder_job_context(job_id: str, context: dict[str, object]) -> None:
+    with QA_FOLDER_JOBS_LOCK:
+        QA_FOLDER_JOB_CONTEXTS[job_id] = context
+
+
+def get_qa_folder_job_context(job_id: str) -> dict[str, object] | None:
+    with QA_FOLDER_JOBS_LOCK:
+        context = QA_FOLDER_JOB_CONTEXTS.get(job_id)
+        return dict(context) if context else None
+
+
+def get_qa_folder_job(job_id: str) -> dict[str, object] | None:
+    with QA_FOLDER_JOBS_LOCK:
+        job = QA_FOLDER_JOBS.get(job_id)
+        return json_safe_copy(job) if job else None
+
+
+def update_qa_folder_job(job_id: str, **updates: object) -> dict[str, object] | None:
+    with QA_FOLDER_JOBS_LOCK:
+        job = QA_FOLDER_JOBS.get(job_id)
+        if not job:
+            return None
+        job.update(updates)
+        job["updated_at"] = time()
+        return json_safe_copy(job)
+
+
+def merge_qa_folder_retry_update(job_id: str, requirement_id: str, **updates: object) -> dict[str, object] | None:
+    with QA_FOLDER_JOBS_LOCK:
+        job = QA_FOLDER_JOBS.get(job_id)
+        if not job:
+            return None
+
+        update_items = updates.get("requirement_items")
+        if isinstance(update_items, list):
+            current_items = list(job.get("requirement_items") or [])
+            by_requirement: dict[str, dict[str, object]] = {
+                str(item.get("requirement_id") or ""): dict(item)
+                for item in current_items
+                if isinstance(item, dict)
+            }
+            for item in update_items:
+                if isinstance(item, dict) and str(item.get("requirement_id") or "") == requirement_id:
+                    by_requirement[requirement_id] = dict(item)
+            job["requirement_items"] = list(by_requirement.values())
+
+        update_placed = updates.get("placed_files")
+        if isinstance(update_placed, list):
+            existing_placed = [
+                dict(item)
+                for item in (job.get("placed_files") or [])
+                if isinstance(item, dict) and str(item.get("requirement_id") or "") != requirement_id
+            ]
+            existing_placed.extend(dict(item) for item in update_placed if isinstance(item, dict))
+            job["placed_files"] = existing_placed
+
+        for key, value in updates.items():
+            if key in {"requirement_items", "placed_files", "requirement_count"}:
+                continue
+            job[key] = value
+
+        requirement_items = [item for item in (job.get("requirement_items") or []) if isinstance(item, dict)]
+        failed_items = [item for item in requirement_items if item.get("status") == "error"]
+        updated_items = [item for item in requirement_items if item.get("status") == "updated"]
+        job["requirement_count"] = len(requirement_items)
+        job["processed_requirement_count"] = len(updated_items)
+        job["failed_requirement_count"] = len(failed_items)
+        job["tc_count"] = sum(int(item.get("tc_count") or 0) for item in updated_items)
+        job["ts_count"] = sum(int(item.get("ts_count") or 0) for item in updated_items)
+        job["ok"] = bool(job.get("placed_files"))
+        job["updated_at"] = time()
+        return json_safe_copy(job)
 RESULT_CLEANUP_ROOTS: dict[str, Path] = {}
 TS_SET_KEY_PATTERN = re.compile(r"\bSFR-[A-Z0-9]+-\d{3}\b", re.IGNORECASE)
 
@@ -552,6 +664,33 @@ def resolve_qa_folder_target(
     return dump_root_value, "", []
 
 
+def resolve_qa_folder_preview_target(
+        dump_root_value: str,
+        qa_source_root_value: str,
+        uploaded_qa_source_items: list[tuple[str, bytes]],
+        temp_dir: Path,
+) -> tuple[str, str, list[tuple[str, bytes]]]:
+    # QA 매칭 확인은 미리보기이므로 업로드 폴더 복사본을 결과 폴더에 남기지 않는다.
+    dump_root_value = dump_root_value.strip()
+    qa_source_root_value = qa_source_root_value.strip()
+    uploaded_qa_source_items = list(uploaded_qa_source_items or [])
+
+    if qa_source_root_value:
+        return qa_source_root_value, qa_source_root_value, []
+
+    if uploaded_qa_source_items:
+        uploaded_qa_dump_root = create_uploaded_qa_source_dump(
+            uploaded_qa_source_items,
+            dump_parent=temp_dir / "qa-folder-preview",
+        )
+        if uploaded_qa_dump_root is not None:
+            resolved = str(uploaded_qa_dump_root)
+            return resolved, resolved, []
+        return "", "", uploaded_qa_source_items
+
+    return dump_root_value, "", []
+
+
 class WebHandler(BaseHTTPRequestHandler):
     server_version = "OutputMappingHTTP/1.0"
 
@@ -603,7 +742,23 @@ class WebHandler(BaseHTTPRequestHandler):
             self.serve_download(request_path.removeprefix("/download/"))
             return
 
+        if request_path == "/api/qa-folder-job":
+            self.handle_qa_folder_job_get()
+            return
+
         self.send_error(404)
+
+    def handle_qa_folder_job_get(self) -> None:
+        parsed = urlparse(self.path)
+        request_id = (parse_qs(parsed.query).get("id") or [""])[0].strip()
+        if not request_id:
+            self.send_json({"ok": False, "error": "job id가 없습니다."}, status=400)
+            return
+        job = get_qa_folder_job(request_id)
+        if not job:
+            self.send_json({"ok": False, "error": "QA job을 찾지 못했습니다.", "job_id": request_id}, status=404)
+            return
+        self.send_json(job, status=200)
 
     def handle_path_status_get(self) -> None:
         # 브라우저가 기억한 로컬 결과 폴더 경로가 아직 유효한지 확인한다.
@@ -655,6 +810,14 @@ class WebHandler(BaseHTTPRequestHandler):
 
         if request_path == "/api/run-qa-folder":
             self.handle_run_qa_folder_post()
+            return
+
+        if request_path == "/api/run-qa-folder-job":
+            self.handle_run_qa_folder_job_post()
+            return
+
+        if request_path == "/api/retry-qa-folder-block":
+            self.handle_retry_qa_folder_block_post()
             return
 
         if request_path == "/api/preview-qa-folder":
@@ -1035,6 +1198,163 @@ class WebHandler(BaseHTTPRequestHandler):
             if temp_dir is not None and not preserve_temp_dir:
                 remove_runtime_path(temp_dir)
 
+    def handle_run_qa_folder_job_post(self) -> None:
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            content_type = self.headers.get("Content-Type", "")
+            body = self.rfile.read(content_length)
+            if "application/json" in content_type.lower():
+                fields = parse_json_fields(content_type, body)
+                file_items: dict[str, list[tuple[str, bytes]]] = {}
+            else:
+                fields, file_items = parse_multipart_items(content_type, body)
+
+            dump_root_value = fields.get("dump_root", "").strip()
+            qa_source_root_value = fields.get("qa_source_root", "").strip()
+            uploaded_qa_source_items = file_items.get("qa_source_files") or []
+            effective_dump_root, qa_source_root_value, uploaded_qa_source_items = resolve_qa_folder_target(
+                dump_root_value,
+                qa_source_root_value,
+                uploaded_qa_source_items,
+            )
+            if not effective_dump_root:
+                raise ValueError("check 결과 폴더 경로, 다른 산출물 폴더 경로, 또는 산출물 폴더 업로드를 입력하세요.")
+
+            model_name, ollama_url = runtime_ai_settings(fields)
+            request_id = str(fields.get("request_id") or "").strip() or uuid4().hex[:8]
+            register_request(request_id)
+            create_qa_folder_job(request_id, str(effective_dump_root))
+            set_qa_folder_job_context(request_id, {
+                "effective_dump_root": str(effective_dump_root),
+                "model_name": model_name,
+                "ollama_url": ollama_url,
+                "file_items": file_items,
+                "uploaded_qa_source_items": uploaded_qa_source_items,
+                "qa_source_root_value": qa_source_root_value,
+                "fields": dict(fields),
+            })
+
+            def run_job() -> None:
+                try:
+                    update_qa_folder_job(request_id, status="running")
+                    payload = run_folder_qa_pipeline(
+                        Path(effective_dump_root),
+                        model_name=model_name,
+                        ollama_url=ollama_url,
+                        scenario_form_path=TS_TEMPLATE_PATH,
+                        result_form_path=RESULT_TEMPLATE_PATH,
+                        ui_design_items=file_items.get("ui_design_files") or [],
+                        ui_design_root=Path(fields.get("ui_design_root", "")) if fields.get("ui_design_root") else None,
+                        qa_source_items=uploaded_qa_source_items,
+                        qa_source_root=Path(qa_source_root_value) if qa_source_root_value else None,
+                        tc_source_root=Path(fields.get("tc_source_root", "")) if fields.get("tc_source_root") else None,
+                        unit_result_root=Path(fields.get("unit_result_root", "")) if fields.get("unit_result_root") else None,
+                        ts_source_root=Path(fields.get("ts_source_root", "")) if fields.get("ts_source_root") else None,
+                        integration_result_root=Path(fields.get("integration_result_root", "")) if fields.get("integration_result_root") else None,
+                        request_id=request_id,
+                        cancel_check=cancel_checker(request_id),
+                        status_callback=lambda updates: update_qa_folder_job(request_id, **updates),
+                    )
+                    update_qa_folder_job(request_id, **payload, status="done" if payload.get("ok") else "error")
+                except CancelledRequest as exc:
+                    log_event("qa.folder.job.cancelled", request_id=exc.request_id)
+                    update_qa_folder_job(
+                        request_id,
+                        ok=False,
+                        cancelled=True,
+                        status="cancelled",
+                        error="요청이 취소되었습니다.",
+                    )
+                except QaFolderMatchingError as exc:
+                    log_event("qa.folder.job.matching_error", error=str(exc), payload=exc.payload)
+                    update_qa_folder_job(request_id, **exc.payload, status="error")
+                except Exception as exc:
+                    log_event("qa.folder.job.error", error=str(exc), traceback=traceback.format_exc())
+                    update_qa_folder_job(request_id, ok=False, status="error", error=str(exc))
+                finally:
+                    unregister_request(request_id)
+
+            Thread(target=run_job, name=f"qa-folder-job-{request_id}", daemon=True).start()
+            self.send_json(get_qa_folder_job(request_id) or {"ok": True, "job_id": request_id}, status=202)
+        except Exception as exc:
+            log_event("qa.folder.job.start_error", error=str(exc), traceback=traceback.format_exc())
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def handle_retry_qa_folder_block_post(self) -> None:
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length)
+            payload = parse_json_object(body.decode("utf-8", errors="replace") if body else "{}")
+            job_id = str(payload.get("job_id") or payload.get("request_id") or "").strip()
+            requirement_id = str(payload.get("requirement_id") or "").strip()
+            if not job_id:
+                raise ValueError("job id가 없습니다.")
+            if not requirement_id:
+                raise ValueError("요구사항 ID가 없습니다.")
+
+            context = get_qa_folder_job_context(job_id)
+            if not context:
+                raise ValueError("재생성에 필요한 job 정보가 없습니다. 서버 재시작 후에는 재생성을 이어갈 수 없습니다.")
+
+            current_job = get_qa_folder_job(job_id)
+            if not current_job:
+                raise ValueError("QA job을 찾지 못했습니다.")
+            if current_job.get("status") == "running":
+                raise ValueError("이미 QA 생성 또는 재생성이 진행 중입니다.")
+
+            register_request(job_id)
+            update_qa_folder_job(job_id, status="running", error="")
+
+            def run_retry() -> None:
+                try:
+                    fields = context.get("fields") if isinstance(context.get("fields"), dict) else {}
+                    file_items = context.get("file_items") if isinstance(context.get("file_items"), dict) else {}
+                    payload = run_folder_qa_pipeline(
+                        Path(str(context["effective_dump_root"])),
+                        model_name=str(context["model_name"]),
+                        ollama_url=str(context["ollama_url"]),
+                        scenario_form_path=TS_TEMPLATE_PATH,
+                        result_form_path=RESULT_TEMPLATE_PATH,
+                        ui_design_items=file_items.get("ui_design_files") or [],
+                        ui_design_root=Path(str(fields.get("ui_design_root", ""))) if fields.get("ui_design_root") else None,
+                        qa_source_items=context.get("uploaded_qa_source_items") if isinstance(context.get("uploaded_qa_source_items"), list) else [],
+                        qa_source_root=Path(str(context.get("qa_source_root_value") or "")) if context.get("qa_source_root_value") else None,
+                        tc_source_root=Path(str(fields.get("tc_source_root", ""))) if fields.get("tc_source_root") else None,
+                        unit_result_root=Path(str(fields.get("unit_result_root", ""))) if fields.get("unit_result_root") else None,
+                        ts_source_root=Path(str(fields.get("ts_source_root", ""))) if fields.get("ts_source_root") else None,
+                        integration_result_root=Path(str(fields.get("integration_result_root", ""))) if fields.get("integration_result_root") else None,
+                        request_id=job_id,
+                        cancel_check=cancel_checker(job_id),
+                        status_callback=lambda updates: merge_qa_folder_retry_update(job_id, requirement_id, **updates),
+                        requirement_filter=requirement_id,
+                    )
+                    merged = merge_qa_folder_retry_update(job_id, requirement_id, **payload)
+                    failed_count = int((merged or {}).get("failed_requirement_count") or 0)
+                    update_qa_folder_job(job_id, status="done" if failed_count == 0 else "error")
+                except CancelledRequest as exc:
+                    log_event("qa.folder.retry.cancelled", request_id=exc.request_id, requirement_id=requirement_id)
+                    update_qa_folder_job(
+                        job_id,
+                        ok=False,
+                        cancelled=True,
+                        status="cancelled",
+                        error="요청이 취소되었습니다.",
+                    )
+                except QaFolderMatchingError as exc:
+                    log_event("qa.folder.retry.matching_error", request_id=job_id, requirement_id=requirement_id, error=str(exc))
+                    merge_qa_folder_retry_update(job_id, requirement_id, **exc.payload, status="error")
+                except Exception as exc:
+                    log_event("qa.folder.retry.error", request_id=job_id, requirement_id=requirement_id, error=str(exc), traceback=traceback.format_exc())
+                    update_qa_folder_job(job_id, status="error", error=str(exc))
+                finally:
+                    unregister_request(job_id)
+
+            Thread(target=run_retry, name=f"qa-folder-retry-{job_id}-{requirement_id}", daemon=True).start()
+            self.send_json(get_qa_folder_job(job_id) or {"ok": True, "job_id": job_id}, status=202)
+        except Exception as exc:
+            log_event("qa.folder.retry.start_error", error=str(exc), traceback=traceback.format_exc())
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+
     def handle_run_qa_folder_post(self) -> None:
         # check.html의 결과 폴더를 기준으로 TC/TS 생성과 기존 파일 교체를 한 번에 실행한다.
         request_id = ""
@@ -1093,6 +1413,7 @@ class WebHandler(BaseHTTPRequestHandler):
 
     def handle_preview_qa_folder_post(self) -> None:
         # QA 생성 전 요구사항별 5종 문서 매칭 상태만 확인한다.
+        temp_dir: Path | None = None
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
             content_type = self.headers.get("Content-Type", "")
@@ -1105,10 +1426,14 @@ class WebHandler(BaseHTTPRequestHandler):
             dump_root_value = fields.get("dump_root", "").strip()
             qa_source_root_value = fields.get("qa_source_root", "").strip()
             uploaded_qa_source_items = file_items.get("qa_source_files") or []
-            effective_dump_root, qa_source_root_value, uploaded_qa_source_items = resolve_qa_folder_target(
+            is_uploaded_preview = bool(uploaded_qa_source_items)
+            temp_dir = TEMP_DIR / f"qa-preview-{uuid4().hex}"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            effective_dump_root, qa_source_root_value, uploaded_qa_source_items = resolve_qa_folder_preview_target(
                 dump_root_value,
                 qa_source_root_value,
                 uploaded_qa_source_items,
+                temp_dir,
             )
             if not effective_dump_root:
                 raise ValueError("check 결과 폴더 경로, 다른 산출물 폴더 경로, 또는 산출물 폴더 업로드를 입력하세요.")
@@ -1124,10 +1449,15 @@ class WebHandler(BaseHTTPRequestHandler):
                 ts_source_root=Path(fields.get("ts_source_root", "")) if fields.get("ts_source_root") else None,
                 integration_result_root=Path(fields.get("integration_result_root", "")) if fields.get("integration_result_root") else None,
             )
+            if is_uploaded_preview:
+                payload["dump_root"] = ""
             self.send_json(payload, status=200 if payload.get("ok") else 400)
         except Exception as exc:
             log_event("qa.folder.preview.error", error=str(exc), traceback=traceback.format_exc())
             self.send_json({"ok": False, "error": str(exc), "files": []}, status=400)
+        finally:
+            if temp_dir is not None:
+                remove_runtime_path(temp_dir)
 
     def handle_generate_ts_post(self) -> None:
         # 통합시험 시나리오 생성 요청을 처리한다.

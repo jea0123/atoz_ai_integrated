@@ -6,10 +6,12 @@ from unittest.mock import patch
 from qa_generation.folder_pipeline import (
     build_requirement_work_items,
     create_uploaded_qa_source_dump,
+    mark_queued_blocks_interrupted,
+    prepare_requirement_processing_items,
     preview_folder_qa_matching,
     select_qa_source_files,
 )
-from web_app import resolve_qa_folder_target
+from web_app import resolve_qa_folder_preview_target, resolve_qa_folder_target
 
 
 def make_file(root: Path, name: str) -> Path:
@@ -20,6 +22,27 @@ def make_file(root: Path, name: str) -> Path:
 
 
 class QaFolderSelectionTest(unittest.TestCase):
+    def test_queued_blocks_are_marked_interrupted_after_prior_failure(self):
+        blocks = {
+            ("screen_id", "UI-001"): {
+                "screen_id": "UI-001",
+                "status": "error",
+                "error": "timeout",
+            },
+            ("screen_id", "UI-002"): {
+                "screen_id": "UI-002",
+                "status": "queued",
+                "error": "",
+            },
+        }
+
+        changed = mark_queued_blocks_interrupted(blocks, "앞 화면ID 실패로 실행하지 않았습니다.")
+
+        self.assertTrue(changed)
+        self.assertEqual("error", blocks[("screen_id", "UI-001")]["status"])
+        self.assertEqual("interrupted", blocks[("screen_id", "UI-002")]["status"])
+        self.assertEqual("앞 화면ID 실패로 실행하지 않았습니다.", blocks[("screen_id", "UI-002")]["error"])
+
     def test_full_alternative_source_folder_does_not_use_dump_root_candidates(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -228,6 +251,44 @@ class QaFolderSelectionTest(unittest.TestCase):
         self.assertEqual(str(uploaded_dump), effective)
         self.assertEqual(str(uploaded_dump), qa_source_root)
         self.assertEqual([], upload_items)
+
+    def test_qa_preview_upload_uses_temporary_dump_parent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp_root = Path(temp)
+            effective, qa_source_root, upload_items = resolve_qa_folder_preview_target(
+                "C:/dump",
+                "",
+                [("source/SFR-001_unit_case.hwpx", b"tc")],
+                temp_root,
+            )
+
+            effective_path = Path(effective)
+            self.assertEqual(effective, qa_source_root)
+            self.assertEqual([], upload_items)
+            self.assertTrue(effective_path.exists())
+            self.assertIn(temp_root / "qa-folder-preview", effective_path.parents)
+            self.assertTrue((effective_path / "SFR-001_unit_case.hwpx").exists())
+
+    def test_requirement_processing_prefers_small_documents_but_keeps_original_index(self):
+        items = [
+            {"requirement_id": "SFR-LARGE-001", "ui_design_path": "large.pdf"},
+            {"requirement_id": "SFR-SMALL-001", "ui_design_path": "small.pdf"},
+        ]
+
+        def fake_extract(path):
+            return Path(path).stem
+
+        def fake_blocks(text):
+            count = 11 if text == "large" else 1
+            return [{"screen_id": f"UI-{index}", "text": ""} for index in range(count)]
+
+        with patch("qa_generation.folder_pipeline.extract_text_from_pdf", side_effect=fake_extract):
+            with patch("qa_generation.folder_pipeline.extract_screen_blocks", side_effect=fake_blocks):
+                processing_items = prepare_requirement_processing_items(items, request_id="test")
+
+        self.assertEqual(["SFR-SMALL-001", "SFR-LARGE-001"], [item["requirement_id"] for item in processing_items])
+        self.assertEqual([1, 0], [item["_original_index"] for item in processing_items])
+        self.assertEqual(["small", "large"], [item["_document_size"] for item in processing_items])
 
     def test_qa_target_uses_dump_when_no_override_exists(self):
         effective, qa_source_root, upload_items = resolve_qa_folder_target("C:/dump", "", [])

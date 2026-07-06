@@ -16,7 +16,15 @@ from openpyxl import load_workbook
 from app_runtime import RESULT_DIR, TEMP_DIR, log_event, log_message, remove_runtime_path
 from cancellation import CancelledRequest
 from document_update.hwpx_text import extract_document_text
-from qa_generation.generate_tc import extract_cover_author_from_document, generate_test_cases
+from qa_generation.generate_tc import (
+    SIZE_LABELS,
+    SIZE_ORDER,
+    classify_document_size,
+    extract_cover_author_from_document,
+    extract_screen_blocks,
+    extract_text_from_pdf,
+    generate_test_cases,
+)
 from qa_generation.generate_ts import generate_integration_test_results, generate_test_scenarios
 from web_uploads import safe_relative_upload_path
 
@@ -143,6 +151,100 @@ def next_versioned_result_folder(parent: Path, folder_name: str) -> Path:
     return candidate
 
 
+def requirement_processing_key(item: dict[str, object]) -> tuple[int, int]:
+    return (
+        SIZE_ORDER.get(str(item.get("_document_size") or "large"), SIZE_ORDER["large"]),
+        int(item.get("_original_index") or 0),
+    )
+
+
+def original_requirement_key(item: dict[str, object]) -> int:
+    return int(item.get("_original_index") or 0)
+
+
+def public_requirement_item(item: dict[str, object]) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in item.items()
+        if not str(key).startswith("_")
+    }
+
+
+def block_status_key(update: dict[str, object]) -> tuple[str, object]:
+    screen_id = str(update.get("screen_id") or "")
+    if screen_id:
+        return ("screen_id", screen_id)
+    unit_test_id = str(update.get("unit_test_id") or "")
+    if unit_test_id:
+        return ("unit_test_id", unit_test_id)
+    return ("original_index", int(update.get("original_index") or 0))
+
+
+def sorted_block_statuses(blocks: dict[tuple[str, object], dict[str, object]]) -> list[dict[str, object]]:
+    return sorted(
+        (dict(value) for value in blocks.values()),
+        key=lambda value: int(value.get("original_index") or 0),
+    )
+
+
+def mark_queued_blocks_interrupted(
+        blocks: dict[tuple[str, object], dict[str, object]],
+        reason: str,
+) -> bool:
+    changed = False
+    for block in blocks.values():
+        if block.get("status") == "queued":
+            block["status"] = "interrupted"
+            block["error"] = reason
+            changed = True
+    return changed
+
+
+def prepare_requirement_processing_items(
+        requirement_items: list[dict[str, object]],
+        request_id: str,
+) -> list[dict[str, object]]:
+    prepared_items: list[dict[str, object]] = []
+    for index, item in enumerate(requirement_items):
+        prepared_item = {
+            **item,
+            "_original_index": index,
+            "_document_size": "large",
+            "_screen_block_count": 0,
+            "_extracted_text": None,
+            "_screen_blocks": None,
+            "_preparse_error": "",
+        }
+        requirement_id = str(item.get("requirement_id") or "")
+        ui_design = Path(str(item.get("ui_design_path") or ""))
+        try:
+            extracted_text = extract_text_from_pdf(ui_design)
+            screen_blocks = extract_screen_blocks(extracted_text)
+            document_size = classify_document_size(len(screen_blocks))
+            prepared_item.update({
+                "_document_size": document_size,
+                "_screen_block_count": len(screen_blocks),
+                "_extracted_text": extracted_text,
+                "_screen_blocks": screen_blocks,
+            })
+            qa_batch_log(
+                request_id,
+                f"[{requirement_id}] 문서 분류 | {SIZE_LABELS[document_size]}({document_size}) 화면 블록 {len(screen_blocks)}개",
+            )
+        except Exception as exc:
+            prepared_item["_preparse_error"] = str(exc)
+            qa_batch_log(request_id, f"[{requirement_id}] 문서 분류 실패 | {exc}")
+        prepared_items.append(prepared_item)
+
+    processing_items = sorted(prepared_items, key=requirement_processing_key)
+    processing_order = " -> ".join(
+        f"{item.get('requirement_id') or '-'}:{item.get('_document_size')}"
+        for item in processing_items
+    )
+    qa_batch_log(request_id, f"처리 순서 최적화 | 소량 문서 우선 | {processing_order}")
+    return processing_items
+
+
 def preview_folder_qa_matching(
         dump_root: Path,
         *,
@@ -227,6 +329,8 @@ def run_folder_qa_pipeline(
         integration_result_root: Path | None = None,
         request_id: str | None = None,
         cancel_check: Callable[[], None] | None = None,
+        status_callback: Callable[[dict[str, object]], None] | None = None,
+        requirement_filter: str | None = None,
 ) -> dict[str, object]:
     # check.html이 만든 결과 폴더 안에서 QA 입력물을 찾아 생성 결과를 같은 위치에 배치한다.
     request_id = request_id or uuid4().hex[:8]
@@ -267,8 +371,27 @@ def run_folder_qa_pipeline(
             ts_source_paths=ts_source_paths,
             integration_result_paths=integration_result_paths,
         )
-        requirement_items = build_requirement_work_items(selection)
+        all_requirement_items = build_requirement_work_items(selection)
+        requirement_items = [
+            item for item in all_requirement_items
+            if not requirement_filter or str(item.get("requirement_id") or "") == requirement_filter
+        ]
         role_counts = build_role_counts(selection)
+        if status_callback:
+            status_callback({
+                "status": "running",
+                "dump_root": str(dump_root),
+                "requirement_count": len(requirement_items),
+                "processed_requirement_count": 0,
+                "failed_requirement_count": 0,
+                "role_counts": role_counts,
+                "source_files": serialize_selection(selection),
+                "requirement_items": [
+                    {**item, "status": "queued"}
+                    for item in requirement_items
+                ],
+                "missing_requirements": build_missing_requirement_report(selection),
+            })
         qa_batch_log(
             request_id,
             "입력 매칭 완료 | "
@@ -280,21 +403,79 @@ def run_folder_qa_pipeline(
             f"통합시험결과서 {role_counts.get('integration_result_template', 0)}개",
         )
         if not requirement_items:
+            missing_message = (
+                f"재생성할 요구사항을 찾지 못했습니다: {requirement_filter}"
+                if requirement_filter
+                else "요구사항 ID 기준으로 함께 처리할 화면설계서, 단위시험케이스, 단위시험결과서, 통합시험시나리오, 통합시험결과서를 찾지 못했습니다."
+            )
             payload = build_matching_failure_payload(
                 request_id=request_id,
                 dump_root=dump_root,
                 selection=selection,
-                message="요구사항 ID 기준으로 함께 처리할 화면설계서, 단위시험케이스, 단위시험결과서, 통합시험시나리오, 통합시험결과서를 찾지 못했습니다.",
+                message=missing_message,
             )
             qa_batch_log(request_id, "중단 | 처리 가능한 5종 세트를 찾지 못했습니다.")
             raise QaFolderMatchingError(str(payload["error"]), payload)
 
         placed_files: list[dict[str, object]] = []
         processed_items: list[dict[str, object]] = []
+        block_status_by_requirement: dict[str, dict[tuple[str, object], dict[str, object]]] = {}
+        active_requirement_id: str | None = None
         total_tc_count = 0
         total_ts_count = 0
+        processing_items = prepare_requirement_processing_items(requirement_items, request_id)
 
-        for index, item in enumerate(requirement_items, start=1):
+        def get_requirement_blocks(requirement_id: str) -> list[dict[str, object]]:
+            return sorted_block_statuses(block_status_by_requirement.get(requirement_id, {}))
+
+        def update_requirement_block_status(requirement_id: str, update: dict[str, object]) -> None:
+            blocks = block_status_by_requirement.setdefault(requirement_id, {})
+            key = block_status_key(update)
+            current = blocks.get(key, {})
+            current.update(update)
+            blocks[key] = current
+            emit_progress()
+
+        def interrupt_queued_requirement_blocks(requirement_id: str, reason: str) -> None:
+            blocks = block_status_by_requirement.get(requirement_id, {})
+            if mark_queued_blocks_interrupted(blocks, reason):
+                emit_progress()
+
+        def emit_progress(current_item: dict[str, object] | None = None) -> None:
+            if not status_callback:
+                return
+            current_items = [
+                {
+                    **public_requirement_item(candidate),
+                    "status": "running"
+                    if candidate is current_item or str(candidate.get("requirement_id") or "") == active_requirement_id
+                    else "queued",
+                    "document_size": candidate.get("_document_size"),
+                    "screen_block_count": candidate.get("_screen_block_count"),
+                    "blocks": get_requirement_blocks(str(candidate.get("requirement_id") or "")),
+                }
+                for candidate in sorted(processing_items, key=original_requirement_key)
+            ]
+            for processed in processed_items:
+                for current in current_items:
+                    if current.get("requirement_id") == processed.get("requirement_id"):
+                        current.update(public_requirement_item(processed))
+                        current["status"] = processed.get("status")
+                        current["blocks"] = get_requirement_blocks(str(current.get("requirement_id") or ""))
+            status_callback({
+                "status": "running",
+                "processed_requirement_count": len([done for done in processed_items if done.get("status") != "error"]),
+                "failed_requirement_count": len([done for done in processed_items if done.get("status") == "error"]),
+                "tc_count": total_tc_count,
+                "ts_count": total_ts_count,
+                "placed_files": placed_files,
+                "requirement_items": current_items,
+            })
+
+        if status_callback:
+            emit_progress()
+
+        for index, item in enumerate(processing_items, start=1):
             if cancel_check:
                 cancel_check()
             requirement_id = str(item["requirement_id"])
@@ -304,6 +485,7 @@ def run_folder_qa_pipeline(
             item_ts_output_dir = req_temp_dir / "ts-output"
             item_integration_result_output_dir = req_temp_dir / "integration-result-output"
             try:
+                active_requirement_id = requirement_id
                 ui_design = Path(str(item["ui_design_path"]))
                 tc_template = Path(str(item["tc_template_path"]))
                 unit_result_template = Path(str(item["unit_result_template_path"]))
@@ -313,9 +495,14 @@ def run_folder_qa_pipeline(
                 unit_result_template_target = Path(str(item["unit_result_template_target_path"]))
                 ts_template_target = Path(str(item["ts_template_target_path"]))
                 integration_result_template_target = Path(str(item["integration_result_template_target_path"]))
+                preparse_error = str(item.get("_preparse_error") or "")
+                if preparse_error:
+                    raise RuntimeError(f"설계서 문서 분류/파싱 실패: {preparse_error}")
+                emit_progress(item)
                 qa_batch_log(
                     request_id,
-                    f"[{requirement_id}] {index}/{len(requirement_items)} 처리 시작 | "
+                    f"[{requirement_id}] {index}/{len(processing_items)} 처리 시작 | 원래순서={int(item.get('_original_index') or 0) + 1}/{len(requirement_items)} | "
+                    f"문서={SIZE_LABELS.get(str(item.get('_document_size')), str(item.get('_document_size')))}({item.get('_document_size')}) | "
                     f"입력 5종: 설계서={file_name(ui_design)}, "
                     f"단위케이스={file_name(tc_template)}, "
                     f"단위결과서={file_name(unit_result_template)}, "
@@ -330,8 +517,11 @@ def run_folder_qa_pipeline(
                         ollama_url=ollama_url,
                         output_dir=item_tc_output_dir,
                         template_path=tc_template,
+                        extracted_text=str(item.get("_extracted_text") or ""),
+                        screen_blocks=item.get("_screen_blocks") if isinstance(item.get("_screen_blocks"), list) else None,
                         cancel_check=cancel_check,
                         progress_callback=lambda message: qa_batch_log(request_id, f"[{requirement_id}] {message}"),
+                        block_status_callback=lambda update: update_requirement_block_status(requirement_id, update),
                     )
                 )
                 if cancel_check:
@@ -423,6 +613,8 @@ def run_folder_qa_pipeline(
                     place_generated_file(ts_xlsx, ts_template_target, "ts_xlsx", "통합시험시나리오", requirement_id),
                     place_generated_file(integration_result_xlsx, integration_result_template_target, "integration_result_xlsx", "통합시험결과서", requirement_id),
                 ]
+                for placed in placed_for_requirement:
+                    placed["__requirement_original_index"] = int(item.get("_original_index") or 0)
                 qa_batch_log(
                     request_id,
                     f"[{requirement_id}] 산출물 배치 완료 | "
@@ -437,21 +629,46 @@ def run_folder_qa_pipeline(
                 total_tc_count += tc_count
                 total_ts_count += ts_count
                 processed_items.append({
-                    **item,
+                    **public_requirement_item(item),
                     "status": "updated",
                     "tc_count": tc_count,
                     "ts_count": ts_count,
                     "placed_files": placed_for_requirement,
+                    "blocks": get_requirement_blocks(requirement_id),
+                    "_original_index": int(item.get("_original_index") or 0),
                 })
+                emit_progress()
             except CancelledRequest:
                 raise
             except Exception as exc:
                 qa_batch_log(request_id, f"[{requirement_id}] 실패 | {exc}")
+                interrupt_queued_requirement_blocks(
+                    requirement_id,
+                    "앞 화면ID 실패로 실행하지 않았습니다.",
+                )
                 processed_items.append({
-                    **item,
+                    **public_requirement_item(item),
                     "status": "error",
                     "error": str(exc),
+                    "blocks": get_requirement_blocks(requirement_id),
+                    "_original_index": int(item.get("_original_index") or 0),
                 })
+                emit_progress()
+
+        processed_items = sorted(processed_items, key=original_requirement_key)
+        placed_files = sorted(
+            placed_files,
+            key=lambda placed: int(placed.get("__requirement_original_index") or 0),
+        )
+        for processed_item in processed_items:
+            requirement_id = str(processed_item.get("requirement_id") or "")
+            processed_item["blocks"] = get_requirement_blocks(requirement_id)
+            processed_item.pop("_original_index", None)
+            for placed in processed_item.get("placed_files") or []:
+                if isinstance(placed, dict):
+                    placed.pop("__requirement_original_index", None)
+        for placed in placed_files:
+            placed.pop("__requirement_original_index", None)
 
         failed_items = [item for item in processed_items if item.get("status") == "error"]
         payload = {
@@ -468,7 +685,13 @@ def run_folder_qa_pipeline(
             "requirement_items": processed_items,
             "missing_requirements": build_missing_requirement_report(selection),
             "placed_files": placed_files,
+            "error": "" if placed_files else "생성되어 배치된 QA 산출물이 없습니다.",
         }
+        if status_callback:
+            status_callback({
+                **payload,
+                "status": "done" if payload.get("ok") else "error",
+            })
         qa_batch_log(
             request_id,
             "완료 | "

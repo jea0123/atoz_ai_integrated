@@ -1,10 +1,5 @@
 const statusBadge = document.querySelector("#statusBadge");
 const runtimeMode = document.querySelector("#runtimeMode");
-const loadingOverlay = document.querySelector("#loadingOverlay");
-const loadingTitle = document.querySelector("#loadingTitle");
-const loadingMessage = document.querySelector("#loadingMessage");
-const loadingSteps = document.querySelector("#loadingSteps");
-const loadingCancelButton = document.querySelector("#loadingCancelButton");
 
 const resultTitle = document.querySelector("#resultTitle");
 const resultMeta = document.querySelector("#resultMeta");
@@ -28,11 +23,7 @@ const taskTabs = [...document.querySelectorAll("[data-task-tab]")];
 const taskPanels = [...document.querySelectorAll("[data-task-panel]")];
 const fileInputs = [...document.querySelectorAll("input[type='file']")];
 const LAST_DUMP_ROOT_KEY = "atoz:lastDumpRoot";
-const QA_LOADING_STEPS = [
-  "입력 파일을 확인하는 중",
-  "설계서와 산출물을 분석하는 중",
-  "QA 결과를 생성하는 중",
-];
+const LAST_QA_FOLDER_JOB_KEY = "atoz:lastQaFolderJob";
 const initialFileLabels = new Map(
   fileInputs.map((input) => {
     const label = document.querySelector(`[data-file-label="${input.id}"]`);
@@ -41,9 +32,52 @@ const initialFileLabels = new Map(
 );
 
 let currentRuntimeMode = null;
-let loadingStepTimer = null;
-let loadingStepIndex = 0;
 let activeRequest = null;
+const cancelRequestedJobIds = new Set();
+
+function rememberQaFolderJob(jobId) {
+  if (!jobId) return;
+  try {
+    localStorage.setItem(LAST_QA_FOLDER_JOB_KEY, jobId);
+  } catch {
+    // localStorage를 쓸 수 없는 환경이면 복구 기능만 건너뛴다.
+  }
+}
+
+function forgetQaFolderJob(jobId = "") {
+  try {
+    const stored = localStorage.getItem(LAST_QA_FOLDER_JOB_KEY) || "";
+    if (!jobId || stored === jobId) {
+      localStorage.removeItem(LAST_QA_FOLDER_JOB_KEY);
+    }
+  } catch {
+    // 저장소 접근 실패는 화면 동작을 막지 않는다.
+  }
+}
+
+function getRememberedQaFolderJob() {
+  try {
+    return localStorage.getItem(LAST_QA_FOLDER_JOB_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function isTerminalQaFolderStatus(status) {
+  return ["done", "error", "cancelled"].includes(status || "");
+}
+
+function setQaFolderFinalStatus(data, fallbackRoot = "") {
+  if (data?.status === "cancelled") {
+    setBadge("취소됨", "");
+    resultMeta.textContent = "QA 생성 작업을 취소했습니다. 필요한 경우 다시 생성 및 배치를 실행하세요.";
+    return;
+  }
+
+  const isSuccess = data?.status === "done" && data?.ok;
+  setBadge(isSuccess ? "완료" : "확인 필요", isSuccess ? "done" : "error");
+  resultMeta.textContent = `QA 대상 산출물 폴더: ${data?.dump_root || fallbackRoot || "-"}`;
+}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -79,63 +113,11 @@ async function loadRuntimeMode() {
   }
 }
 
-function renderLoadingSteps(steps = [], activeIndex = 0) {
-  if (!loadingSteps) return;
-  if (!steps.length) {
-    loadingSteps.hidden = true;
-    loadingSteps.replaceChildren();
-    return;
-  }
-
-  loadingSteps.hidden = false;
-  loadingSteps.replaceChildren(
-    ...steps.map((step, index) => {
-      const item = document.createElement("li");
-      item.textContent = step;
-      if (index < activeIndex) item.classList.add("done");
-      if (index === activeIndex) item.classList.add("active");
-      return item;
-    })
-  );
-}
-
-function stopLoadingSteps() {
-  if (loadingStepTimer) {
-    clearInterval(loadingStepTimer);
-    loadingStepTimer = null;
-  }
-}
-
-function startLoadingSteps(steps = []) {
-  stopLoadingSteps();
-  loadingStepIndex = 0;
-  renderLoadingSteps(steps, loadingStepIndex);
-
-  if (steps.length <= 1) return;
-  loadingStepTimer = setInterval(() => {
-    loadingStepIndex = Math.min(loadingStepIndex + 1, steps.length - 1);
-    renderLoadingSteps(steps, loadingStepIndex);
-  }, 2600);
-}
-
-function setLoading(isLoading, title = "처리 중", message = "요청을 처리하고 있습니다.", steps = []) {
-  if (!isLoading) {
-    stopLoadingSteps();
-    renderLoadingSteps([]);
-  }
-  loadingOverlay.hidden = !isLoading;
-  loadingTitle.textContent = title;
-  loadingMessage.textContent = message;
-  loadingMessage.classList.toggle("is-hidden", isLoading && steps.length > 0);
-  if (isLoading) startLoadingSteps(steps.length ? steps : [message]);
+function setLoading(isLoading) {
   document.querySelectorAll("button").forEach((button) => {
     button.disabled = isLoading;
     button.classList.toggle("is-loading", isLoading);
   });
-  if (loadingCancelButton) {
-    loadingCancelButton.disabled = !isLoading;
-    loadingCancelButton.classList.toggle("is-loading", false);
-  }
 }
 
 function beginCancelableRequest() {
@@ -158,16 +140,6 @@ function isAbortError(error) {
 function markRequestCanceled() {
   setBadge("취소됨", "");
   resultMeta.textContent = "작업을 취소했습니다. 파일을 다시 선택한 뒤 실행할 수 있습니다.";
-}
-
-function sendCancelRequest(request) {
-  if (!request?.requestId) return;
-  fetch("/api/cancel-request", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ request_id: request.requestId }),
-    keepalive: true,
-  }).catch(() => {});
 }
 
 function setActiveTask(taskName) {
@@ -599,9 +571,120 @@ async function postJson(endpoint, payload) {
   });
   const data = await response.json().catch(() => ({ error: "서버 응답을 읽지 못했습니다." }));
   if (!response.ok) {
-    throw new Error(data.error || "처리 실패");
+    const error = new Error(data.error || "처리 실패");
+    error.data = data;
+    throw error;
   }
   return data;
+}
+
+async function cancelQaFolderJob(jobId) {
+  if (!jobId || cancelRequestedJobIds.has(jobId)) return;
+  cancelRequestedJobIds.add(jobId);
+  setBadge("취소중", "busy");
+  resultMeta.textContent = "QA 생성 취소를 요청했습니다. 현재 처리 중인 단계가 정리되면 중단됩니다.";
+  await postJson("/api/cancel-request", { request_id: jobId });
+}
+
+async function retryQaFolderBlock(jobId, requirementId, block) {
+  if (!jobId || !requirementId || !block) return null;
+  setBadge("재생성중", "busy");
+  resultMeta.textContent = `${requirementId} 재생성을 시작했습니다. 실패한 화면ID를 다시 처리하고 산출물을 재배치합니다.`;
+  return postJson("/api/retry-qa-folder-block", {
+    job_id: jobId,
+    requirement_id: requirementId,
+    screen_id: block.screen_id || "",
+    unit_test_id: block.unit_test_id || "",
+    original_index: block.original_index ?? "",
+  });
+}
+
+async function fetchQaFolderJob(jobId, request) {
+  const response = await fetch(`/api/qa-folder-job?id=${encodeURIComponent(jobId)}`, {
+    cache: "no-store",
+    signal: request?.controller.signal,
+  });
+  const data = await response.json().catch(() => ({ error: "서버 응답을 읽지 못했습니다." }));
+  if (!response.ok) {
+    const error = new Error(data.error || "QA job 상태 조회 실패");
+    error.data = data;
+    throw error;
+  }
+  return data;
+}
+
+function wait(ms, request) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    const signal = request?.controller?.signal;
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    }, { once: true });
+  });
+}
+
+async function pollQaFolderJob(jobId, request) {
+  let lastData = null;
+  rememberQaFolderJob(jobId);
+  while (true) {
+    const data = await fetchQaFolderJob(jobId, request);
+    lastData = data;
+    rememberQaFolderJob(data.job_id || data.request_id || jobId);
+    renderFolderQaResult(data);
+
+    const total = data.requirement_count ?? 0;
+    const done = data.processed_requirement_count ?? 0;
+    const failed = data.failed_requirement_count ?? 0;
+    resultMeta.textContent = `QA 생성 진행 중: 완료 ${done}/${total}건 · 실패 ${failed}건`;
+
+    if (["done", "error", "cancelled"].includes(data.status)) {
+      return data;
+    }
+    await wait(1500, request);
+  }
+}
+
+async function restoreLastQaFolderJob() {
+  const jobId = getRememberedQaFolderJob();
+  if (!jobId) return false;
+
+  const request = beginCancelableRequest();
+  try {
+    const data = await fetchQaFolderJob(jobId, request);
+    rememberQaFolderJob(data.job_id || data.request_id || jobId);
+    resultTitle.textContent = "QA 생성";
+
+    if (["queued", "running"].includes(data.status || "")) {
+      setBadge("처리중", "busy");
+      setLoading(true);
+      resultMeta.textContent = "이전 QA 생성 작업을 이어서 확인하고 있습니다.";
+      renderFolderQaResult(data);
+
+      const finalData = await pollQaFolderJob(data.job_id || data.request_id || jobId, request);
+      setQaFolderFinalStatus(finalData);
+      renderFolderQaResult(finalData);
+      return true;
+    }
+
+    if (isTerminalQaFolderStatus(data.status)) {
+      setQaFolderFinalStatus(data);
+      renderFolderQaResult(data);
+      return true;
+    }
+
+    renderFolderQaResult(data);
+    resultMeta.textContent = "최근 QA 생성 작업 상태를 확인했습니다.";
+    return true;
+  } catch (error) {
+    if (!isAbortError(error)) {
+      forgetQaFolderJob(jobId);
+    }
+    return false;
+  } finally {
+    endCancelableRequest(request);
+    setLoading(false);
+  }
 }
 
 async function fetchPathStatus(path) {
@@ -660,8 +743,11 @@ function renderFolderQaResult(data) {
   const sourceFiles = Array.isArray(data.source_files) ? data.source_files : [];
   const requirementItems = Array.isArray(data.requirement_items) ? data.requirement_items : [];
   const missingRequirements = Array.isArray(data.missing_requirements) ? data.missing_requirements : [];
-  const roleCounts = data.role_counts || {};
-  const isPreview = Boolean(data.match_preview);
+    const roleCounts = data.role_counts || {};
+    const isPreview = Boolean(data.match_preview);
+    const jobId = data.job_id || data.request_id || "";
+    const canCancelJob = !isPreview && jobId && ["queued", "running"].includes(data.status || "");
+    const cancelRequested = jobId && cancelRequestedJobIds.has(jobId);
   emptyState.hidden = Boolean(placedFiles.length || sourceFiles.length || requirementItems.length || missingRequirements.length);
   clearError();
 
@@ -716,56 +802,61 @@ function renderFolderQaResult(data) {
     return parts.slice(0, -1).join("\\");
   }
 
-  function renderSourceRows(files) {
-    const sortedFiles = [...files].sort((left, right) => {
+  function sortSourceFiles(files) {
+    return [...files].sort((left, right) => {
       const leftRole = roleOrder.indexOf(left.role);
       const rightRole = roleOrder.indexOf(right.role);
       return (leftRole < 0 ? 99 : leftRole) - (rightRole < 0 ? 99 : rightRole);
     });
-
-    return sortedFiles.map((file) => `
-      <article class="folder-qa-file input">
-        <span>${escapeHtml(roleLabels[file.role] || file.label || file.role || "입력 파일")}</span>
-        <strong>${escapeHtml(basename(file.path))}</strong>
-        <code>${escapeHtml(file.path || "-")}</code>
-      </article>
-    `).join("") || `<p class="folder-qa-empty">매칭된 입력 파일이 없습니다.</p>`;
   }
 
-  function renderPlacedRows(files) {
-    return files.map((file) => `
-      <article class="folder-qa-file output">
-        <span>${escapeHtml(resultLabels[file.kind] || file.label || file.kind || "배치 파일")}</span>
-        <strong>${escapeHtml(basename(file.path))}</strong>
-        <code>${escapeHtml(file.path || "-")}</code>
-        ${file.backup_path ? `<small>기존 파일 백업: ${escapeHtml(basename(file.backup_path))}</small>` : `<small>기존 파일 백업 없음</small>`}
-      </article>
-    `).join("") || `<p class="folder-qa-empty">생성되어 배치된 파일이 없습니다.</p>`;
-  }
+  function renderFileDetails(sources, outputs) {
+    const sortedSources = sortSourceFiles(sources);
+    const backupFiles = outputs.filter((file) => file.backup_path);
+    const summaryText = [
+      `입력 ${sources.length}개`,
+      isPreview ? "" : `생성 ${outputs.length}개`,
+      !isPreview && backupFiles.length ? "백업 있음" : "",
+    ].filter(Boolean).join(" · ");
 
-  function renderPathDetails(sources, outputs) {
-    const sourceRows = sources.map((file) => renderPathItem(
+    const sourceRows = sortedSources.map((file) => renderPathItem(
       roleLabels[file.role] || file.label || file.role || "입력 파일",
       file.path,
+      { pathLabel: "파일 위치" },
     )).join("");
     const outputRows = outputs.map((file) => renderPathItem(
       resultLabels[file.kind] || file.label || file.kind || "배치 파일",
       file.path,
+      { pathLabel: "배치 위치", backupPath: file.backup_path || "" },
     )).join("");
-    const backupRows = outputs
-      .filter((file) => file.backup_path)
-      .map((file) => renderPathItem("기존 파일 백업", file.backup_path))
-      .join("");
 
-    if (!sourceRows && !outputRows && !backupRows) return "";
+    if (!sourceRows && !outputRows) {
+      return `
+        <div class="folder-qa-file-summary">
+          <span>파일 요약</span>
+          <strong>매칭된 파일 없음</strong>
+        </div>
+      `;
+    }
 
-    function renderPathItem(label, path) {
+    function renderPathItem(label, path, options = {}) {
       const folder = dirname(path);
+      const backupFolder = dirname(options.backupPath || "");
+      const hasPathDetails = Boolean(folder || backupFolder);
       return `
         <article class="folder-qa-path-item">
-          <span>${escapeHtml(label)}</span>
+          <span class="folder-qa-path-kind">${escapeHtml(label)}</span>
           <strong>${escapeHtml(basename(path))}</strong>
-          ${folder ? `<code title="${escapeHtml(path || "")}">${escapeHtml(folder)}</code>` : ""}
+          <div class="folder-qa-path-meta">
+            ${options.backupPath ? `<em>백업 있음</em>` : ""}
+            ${hasPathDetails ? `
+              <details class="folder-qa-path-inline">
+                <summary>경로 보기</summary>
+                ${folder ? `<code title="${escapeHtml(path || "")}"><span>${escapeHtml(options.pathLabel || "파일 위치")}</span>${escapeHtml(folder)}</code>` : ""}
+                ${backupFolder ? `<code title="${escapeHtml(options.backupPath || "")}"><span>백업 위치</span>${escapeHtml(backupFolder)}</code>` : ""}
+              </details>
+            ` : ""}
+          </div>
         </article>
       `;
     }
@@ -783,16 +874,75 @@ function renderFolderQaResult(data) {
     return `
       <details class="folder-qa-path-details">
         <summary>
-          <span>상세 경로 보기</span>
-          <small>입력 ${sources.length}개 · 배치 ${outputs.length}개${backupRows ? " · 백업 있음" : ""}</small>
+          <span>파일 상세 보기</span>
+          <small>${escapeHtml(summaryText)}</small>
         </summary>
         <div class="folder-qa-path-groups">
-          ${renderPathGroup("선택된 입력 파일", sourceRows)}
-          ${renderPathGroup("생성 후 배치된 파일", outputRows)}
-          ${renderPathGroup("백업된 기존 파일", backupRows)}
+          ${renderPathGroup(isPreview ? "매칭된 입력 파일" : "입력 문서", sourceRows)}
+          ${isPreview ? "" : renderPathGroup("생성/배치 결과", outputRows)}
         </div>
       </details>
     `;
+  }
+
+  function renderBlockTree(item) {
+    const blocks = Array.isArray(item.blocks) ? item.blocks : [];
+    if (!blocks.length || isPreview) return "";
+    const requirementId = item.requirement_id || "";
+    const canRetryBlocks = jobId && ["error", "done"].includes(data.status || "");
+
+    return `
+      <div class="folder-qa-block-tree">
+        <div class="folder-qa-block-list">
+          ${blocks.map((block) => {
+            const status = block.status || "queued";
+            const statusClass = ["queued", "running", "updated", "error", "interrupted"].includes(status) ? status : "queued";
+            const blockLabel = block.screen_id || block.unit_test_id || `블록 ${Number(block.display_index || 0) || "-"}`;
+            const retryPayload = encodeURIComponent(JSON.stringify({
+              job_id: jobId,
+              requirement_id: requirementId,
+              screen_id: block.screen_id || "",
+              unit_test_id: block.unit_test_id || "",
+              original_index: block.original_index ?? "",
+            }));
+
+            return `
+              <article class="folder-qa-block ${statusClass}">
+                <div class="folder-qa-block-main">
+                  <span class="folder-qa-block-title">
+                    <strong>${escapeHtml(blockLabel)}</strong>
+                  </span>
+                  ${block.error ? `<p>${escapeHtml(block.error)}</p>` : ""}
+                </div>
+                <div class="folder-qa-block-actions">
+                  ${canRetryBlocks && status === "error" ? `
+                    <button class="folder-qa-retry-button" type="button" data-retry-qa-block="${escapeHtml(retryPayload)}">재생성</button>
+                  ` : ""}
+                </div>
+              </article>
+            `;
+          }).join("")}
+        </div>
+      </div>
+    `;
+  }
+
+  function getBlockSummary(item) {
+    const blocks = Array.isArray(item.blocks) ? item.blocks : [];
+    if (!blocks.length || isPreview) return "";
+    const statusCounts = blocks.reduce((counts, block) => {
+      const status = block.status || "queued";
+      counts[status] = (counts[status] || 0) + 1;
+      return counts;
+    }, {});
+    return [
+      `${blocks.length}개 화면`,
+      statusCounts.updated ? `완료 ${statusCounts.updated}` : "",
+      statusCounts.running ? `진행 ${statusCounts.running}` : "",
+      statusCounts.error ? `실패 ${statusCounts.error}` : "",
+      statusCounts.interrupted ? `중단 ${statusCounts.interrupted}` : "",
+      statusCounts.queued ? `대기 ${statusCounts.queued}` : "",
+    ].filter(Boolean).join(" · ");
   }
 
   function renderRequirementCards() {
@@ -811,37 +961,40 @@ function renderFolderQaResult(data) {
     return requirementIds.map((requirementId) => {
       const item = requirementById.get(requirementId) || {};
       const isError = item.status === "error";
+      const isRunning = item.status === "running";
+      const isUpdated = item.status === "updated";
       const sources = sourceByRequirement.get(requirementId) || [];
       const outputs = placedByRequirement.get(requirementId) || [];
-      const statusText = isError ? "실패" : outputs.length ? "배치 완료" : isPreview ? "매칭 완료" : "대기";
-      const metricText = isError
-        ? item.error || "처리 중 오류가 발생했습니다."
+      const blockSummary = getBlockSummary(item);
+      const statusText = isError
+        ? "실패"
+        : isRunning
+        ? "진행 중"
+        : isUpdated || outputs.length
+        ? "배치 완료"
         : isPreview
-        ? `입력 ${sources.length}개`
-        : `TC ${item.tc_count ?? 0}행 · TS ${item.ts_count ?? 0}행`;
-
+        ? "매칭 완료"
+        : "대기";
+      const statusClass = isError
+        ? "status-error"
+        : isRunning
+        ? "status-running"
+        : isUpdated || outputs.length
+        ? "status-done"
+        : isPreview
+        ? "status-done"
+        : "status-queued";
       return `
-        <article class="folder-qa-requirement ${isError ? "has-errors" : ""}">
+        <article class="folder-qa-requirement ${isError ? "has-errors" : ""} ${statusClass}">
           <div class="folder-qa-requirement-head">
             <div>
               <strong>${escapeHtml(requirementId)}</strong>
-              <small>${escapeHtml(metricText)}</small>
+              ${blockSummary ? `<small>${escapeHtml(blockSummary)}</small>` : ""}
             </div>
             <span>${escapeHtml(statusText)}</span>
           </div>
-          <div class="folder-qa-columns">
-            <section>
-              <h3>${isPreview ? "매칭된 파일" : "선택된 입력 파일"}</h3>
-              <div class="folder-qa-file-list">${renderSourceRows(sources)}</div>
-            </section>
-            ${isPreview ? "" : `
-            <section>
-              <h3>생성 후 배치된 파일</h3>
-              <div class="folder-qa-file-list">${renderPlacedRows(outputs)}</div>
-            </section>
-            `}
-          </div>
-          ${isPreview ? "" : renderPathDetails(sources, outputs)}
+          ${renderBlockTree(item)}
+          ${renderFileDetails(sources, outputs)}
         </article>
       `;
     }).join("");
@@ -851,15 +1004,22 @@ function renderFolderQaResult(data) {
   downloadPanel.innerHTML = `
     <div class="download-panel-head">
       <strong>${isPreview ? "QA 매칭 확인" : data.ok === false ? "QA 생성 현황" : "QA 배치 결과"}</strong>
-      <span>${isPreview ? `${data.requirement_count ?? 0}개 요구사항` : `${data.processed_requirement_count ?? 0}/${data.requirement_count ?? 0}개 요구사항`}</span>
+      <div class="folder-qa-job-actions">
+        <span>${isPreview ? `${data.requirement_count ?? 0}개 요구사항` : `${data.processed_requirement_count ?? 0}/${data.requirement_count ?? 0}개 요구사항`}</span>
+        ${canCancelJob ? `
+          <button class="folder-qa-cancel-button" type="button" data-cancel-qa-job="${escapeHtml(jobId)}" ${cancelRequested ? "disabled" : ""}>
+            ${cancelRequested ? "취소 요청됨" : "취소"}
+          </button>
+        ` : ""}
+      </div>
     </div>
     <div class="role-count-list">
       <article>
-        <span>입력 설계서</span>
+        <span>사용자인터페이스설계서</span>
         <strong>${escapeHtml(roleCounts.ui_design ?? "-")}</strong>
       </article>
       <article>
-        <span>TC 양식</span>
+        <span>단위시험 케이스</span>
         <strong>${escapeHtml(roleCounts.tc_template ?? "-")}</strong>
       </article>
       <article>
@@ -867,7 +1027,7 @@ function renderFolderQaResult(data) {
         <strong>${escapeHtml(roleCounts.unit_result_template ?? "-")}</strong>
       </article>
       <article>
-        <span>TS 양식</span>
+        <span>통합시험 시나리오</span>
         <strong>${escapeHtml(roleCounts.ts_template ?? "-")}</strong>
       </article>
       <article>
@@ -939,7 +1099,7 @@ async function previewFolderQa() {
   if (!selection) return;
 
   setBadge("확인중", "busy");
-  setLoading(true, "QA 매칭 확인 중", "요구사항별 입력 문서 매칭을 확인하고 있습니다.", ["대상 폴더 확인", "5종 문서 매칭", "누락 항목 정리"]);
+  setLoading(true);
   clearDownloads();
   clearError();
   resultTitle.textContent = "QA 매칭 확인";
@@ -976,7 +1136,7 @@ async function runFolderQa(event) {
   const { dumpRoot, sourceRoot } = selection;
 
   setBadge("처리중", "busy");
-  setLoading(true, "QA 생성 중", "QA 산출물을 생성하고 있습니다.", QA_LOADING_STEPS);
+  setLoading(true);
   clearDownloads();
   clearError();
   resultTitle.textContent = "QA 생성";
@@ -985,9 +1145,14 @@ async function runFolderQa(event) {
   const request = beginCancelableRequest();
 
   try {
-    const data = await postForm("/api/run-qa-folder", buildFormData(folderQaForm), request);
-    setBadge("완료", "done");
-    resultMeta.textContent = `QA 대상 산출물 폴더: ${data.dump_root || dumpRoot || sourceRoot}`;
+    const job = await postForm("/api/run-qa-folder-job", buildFormData(folderQaForm), request);
+    const jobId = job.job_id || job.request_id || "";
+    rememberQaFolderJob(jobId);
+    resultMeta.textContent = `QA 생성 작업을 시작했습니다: ${jobId || "-"}`;
+    renderFolderQaResult(job);
+
+    const data = await pollQaFolderJob(jobId, request);
+    setQaFolderFinalStatus(data, dumpRoot || sourceRoot);
     renderFolderQaResult(data);
   } catch (error) {
     if (isAbortError(error)) {
@@ -1012,7 +1177,7 @@ async function runTcGeneration(event) {
   ])) return;
 
   setBadge("처리중", "busy");
-  setLoading(true, "단위시험 케이스 생성 중", "QA 산출물을 생성하고 있습니다.", QA_LOADING_STEPS);
+  setLoading(true);
   clearDownloads();
   clearError();
   resultTitle.textContent = "단위시험 케이스 생성";
@@ -1054,7 +1219,7 @@ async function runTsGeneration(event) {
   ])) return;
 
   setBadge("처리중", "busy");
-  setLoading(true, "통합시험 시나리오 생성 중", "QA 산출물을 생성하고 있습니다.", QA_LOADING_STEPS);
+  setLoading(true);
   clearDownloads();
   clearError();
   resultTitle.textContent = "통합시험 시나리오 생성";
@@ -1095,11 +1260,67 @@ folderPreviewButton?.addEventListener("click", previewFolderQa);
 folderQaForm?.addEventListener("submit", runFolderQa);
 tcForm.addEventListener("submit", runTcGeneration);
 tsForm.addEventListener("submit", runTsGeneration);
-loadingCancelButton?.addEventListener("click", () => {
-  sendCancelRequest(activeRequest);
-  activeRequest?.controller.abort();
+downloadPanel?.addEventListener("click", async (event) => {
+  const button = event.target instanceof Element
+    ? event.target.closest("[data-cancel-qa-job]")
+    : null;
+  if (!button) return;
+  const jobId = button.dataset.cancelQaJob || "";
+  button.disabled = true;
+  button.textContent = "취소 요청됨";
+  try {
+    await cancelQaFolderJob(jobId);
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "취소";
+    showGenerationError(error, "folder");
+  }
+});
+downloadPanel?.addEventListener("click", async (event) => {
+  const button = event.target instanceof Element
+    ? event.target.closest("[data-retry-qa-block]")
+    : null;
+  if (!button) return;
+
+  let payload = {};
+  try {
+    payload = JSON.parse(decodeURIComponent(button.dataset.retryQaBlock || "{}"));
+  } catch {
+    payload = {};
+  }
+
+  const jobId = payload.job_id || "";
+  const requirementId = payload.requirement_id || "";
+  button.disabled = true;
+  button.textContent = "재생성 중";
+
+  const request = beginCancelableRequest();
+  try {
+    const job = await retryQaFolderBlock(jobId, requirementId, payload);
+    const nextJobId = job?.job_id || job?.request_id || jobId;
+    rememberQaFolderJob(nextJobId);
+    renderFolderQaResult(job);
+    const data = await pollQaFolderJob(nextJobId, request);
+    setQaFolderFinalStatus(data);
+    renderFolderQaResult(data);
+  } catch (error) {
+    if (isAbortError(error)) {
+      markRequestCanceled();
+      return;
+    }
+    button.disabled = false;
+    button.textContent = "재생성";
+    showGenerationError(error, "folder");
+  } finally {
+    endCancelableRequest(request);
+  }
 });
 
-initializeDumpRoot();
-setBadge("대기", "");
-loadRuntimeMode();
+async function initializeQaPage() {
+  setBadge("대기", "");
+  loadRuntimeMode();
+  await initializeDumpRoot();
+  await restoreLastQaFolderJob();
+}
+
+initializeQaPage();
