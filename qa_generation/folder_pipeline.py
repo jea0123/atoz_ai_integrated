@@ -16,6 +16,7 @@ from openpyxl import load_workbook
 from app_runtime import RESULT_DIR, TEMP_DIR, log_event, log_message, remove_runtime_path
 from cancellation import CancelledRequest
 from document_update.hwpx_text import extract_document_text
+from document_update.runtime_conversion import prepare_target_file
 from qa_generation.generate_tc import (
     SIZE_LABELS,
     SIZE_ORDER,
@@ -30,12 +31,13 @@ from web_uploads import safe_relative_upload_path
 
 
 IGNORED_FOLDER_NAMES = {"bak", "backup", "백업"}
-DESIGN_DOCUMENT_SUFFIXES = {".pdf"}
+DESIGN_DOCUMENT_SUFFIXES = {".pdf", ".hwp", ".hwpx"}
 TC_TEMPLATE_SUFFIXES = {".hwpx"}
 TS_TEMPLATE_SUFFIXES = {".xlsx"}
 QA_SOURCE_SUFFIXES = DESIGN_DOCUMENT_SUFFIXES | TC_TEMPLATE_SUFFIXES | TS_TEMPLATE_SUFFIXES
 QA_UPLOAD_DUMP_DIRNAME = "qa-folder-dumps"
 REQ_ID_PATTERN = re.compile(r"SFR-[A-Z0-9]+(?:-[A-Z0-9]+)*", re.IGNORECASE)
+DESIGN_KEYWORDS = ("사용자인터페이스설계서", "사용자 인터페이스 설계서", "화면설계서", "화면정의서", "ui설계서")
 TC_KEYWORDS = (
     "단위시험케이스",
     "단위시험 케이스",
@@ -69,6 +71,12 @@ class QaFolderMatchingError(ValueError):
     def __init__(self, message: str, payload: dict[str, object]):
         super().__init__(message)
         self.payload = payload
+
+
+def prepare_ui_design_for_processing(ui_design: Path, temp_dir: Path) -> tuple[Path, bool]:
+    if ui_design.suffix.lower() == ".pdf":
+        return ui_design, False
+    return prepare_target_file(ui_design, temp_dir)
 
 
 def qa_batch_log(request_id: str, message: str) -> None:
@@ -248,6 +256,7 @@ def mark_queued_blocks_interrupted(
 def prepare_requirement_processing_items(
         requirement_items: list[dict[str, object]],
         request_id: str,
+        temp_dir: Path,
 ) -> list[dict[str, object]]:
     prepared_items: list[dict[str, object]] = []
     for index, item in enumerate(requirement_items):
@@ -258,12 +267,18 @@ def prepare_requirement_processing_items(
             "_screen_block_count": 0,
             "_extracted_text": None,
             "_screen_blocks": None,
+            "_ui_design_processing_path": "",
+            "_ui_design_converted": False,
             "_preparse_error": "",
         }
         requirement_id = str(item.get("requirement_id") or "")
         ui_design = Path(str(item.get("ui_design_path") or ""))
         try:
-            extracted_text = extract_text_from_pdf(ui_design)
+            processing_design, converted = prepare_ui_design_for_processing(
+                ui_design,
+                temp_dir / "ui-design-processing" / safe_requirement_dirname(requirement_id or f"item-{index + 1}"),
+            )
+            extracted_text = extract_text_from_pdf(processing_design)
             screen_blocks = extract_screen_blocks(extracted_text)
             document_size = classify_document_size(len(screen_blocks))
             prepared_item.update({
@@ -271,6 +286,8 @@ def prepare_requirement_processing_items(
                 "_screen_block_count": len(screen_blocks),
                 "_extracted_text": extracted_text,
                 "_screen_blocks": screen_blocks,
+                "_ui_design_processing_path": str(processing_design),
+                "_ui_design_converted": converted,
             })
             qa_batch_log(
                 request_id,
@@ -468,7 +485,7 @@ def run_folder_qa_pipeline(
         active_requirement_id: str | None = None
         total_tc_count = 0
         total_ts_count = 0
-        processing_items = prepare_requirement_processing_items(requirement_items, request_id)
+        processing_items = prepare_requirement_processing_items(requirement_items, request_id, temp_dir)
 
         def get_requirement_blocks(requirement_id: str) -> list[dict[str, object]]:
             return sorted_block_statuses(block_status_by_requirement.get(requirement_id, {}))
@@ -531,7 +548,7 @@ def run_folder_qa_pipeline(
             item_integration_result_output_dir = req_temp_dir / "integration-result-output"
             try:
                 active_requirement_id = requirement_id
-                ui_design = Path(str(item["ui_design_path"]))
+                ui_design = Path(str(item.get("_ui_design_processing_path") or item["ui_design_path"]))
                 tc_template = Path(str(item["tc_template_path"]))
                 unit_result_template = Path(str(item["unit_result_template_path"]))
                 ts_template = Path(str(item["ts_template_path"]))
@@ -778,7 +795,7 @@ def select_qa_source_files(
         and requirement_ids_from_path(path)
         and score_keywords(
             searchable_text(dump_root, path),
-            ("사용자인터페이스설계서", "사용자 인터페이스 설계서", "화면설계서", "화면정의서", "ui설계서"),
+            DESIGN_KEYWORDS,
         ) > 0
     ]
     return {
@@ -962,7 +979,7 @@ def collect_documents(root: Path | None, suffixes: set[str], label: str) -> list
 
 
 def collect_design_documents(root: Path | None) -> list[Path]:
-    # 사용자가 지정한 화면설계서 폴더에서 PDF 설계서를 모은다.
+    # 사용자가 지정한 화면설계서 폴더에서 PDF/HWPX 설계서를 모은다.
     return collect_documents(root, DESIGN_DOCUMENT_SUFFIXES, "화면설계서 폴더")
 
 
@@ -1018,12 +1035,22 @@ def index_design_files_by_requirement(files: list[Path]) -> dict[str, dict[str, 
         if path.suffix.lower() not in DESIGN_DOCUMENT_SUFFIXES:
             continue
 
+        searchable = searchable_text(path.parent, path)
+        design_score = score_keywords(searchable, DESIGN_KEYWORDS)
+        if path.suffix.lower() in {".hwp", ".hwpx"} and design_score <= 0:
+            non_design_score = score_keywords(
+                searchable,
+                TC_KEYWORDS + UNIT_RESULT_KEYWORDS + INTEGRATION_RESULT_KEYWORDS,
+            )
+            if non_design_score > 0:
+                continue
+
         requirement_ids = requirement_ids_from_path(path)
         if not requirement_ids:
             requirement_ids = requirement_ids_from_document_text(path)
 
         for requirement_id in requirement_ids:
-            score = 1000 + score_keywords(searchable_text(path.parent, path), ("사용자인터페이스설계서", "화면설계서", "화면정의서"))
+            score = 1000 + design_score
             upsert_requirement_file(result, requirement_id, path, score)
 
     return result

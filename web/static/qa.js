@@ -566,7 +566,7 @@ function friendlyErrorInfo(message, taskName) {
         checks: [
           "check.html에서 문서 반영이 끝난 산출물 폴더 경로인지 확인하세요.",
           "다섯 문서가 함께 있다면 '추가 문서 폴더'를 선택하세요.",
-          "화면/사용자인터페이스설계서는 PDF 파일을 직접 업로드하세요.",
+          "화면/사용자인터페이스설계서는 PDF, HWP 또는 HWPX 파일을 직접 업로드하세요.",
           "여러 건이면 '화면설계서 폴더'에 전체 폴더 경로를 입력하면 하위 파일을 일괄 탐색합니다.",
           "업로드한 설계서와 QA 대상 산출물 폴더의 단위시험케이스/단위시험결과서/통합시험시나리오/통합시험결과서 파일명이 같은 SFR 요구사항 ID를 포함하는지 확인하세요.",
           "QA 대상 산출물 폴더 안에 단위시험케이스 양식이 없으면 TC HWPX를 기존 위치에 배치할 수 없습니다.",
@@ -606,11 +606,11 @@ function friendlyErrorInfo(message, taskName) {
       };
     }
 
-    if (rawMessage.includes("사용자인터페이스 설계서 문서를 선택하세요") || rawMessage.includes("사용자인터페이스 설계서 PDF를 선택하세요") || rawMessage.includes("ui_pdf") || rawMessage.includes("PDF 파일을 찾을 수 없습니다")) {
+    if (rawMessage.includes("사용자인터페이스 설계서 문서를 선택하세요") || rawMessage.includes("사용자인터페이스 설계서 PDF를 선택하세요") || rawMessage.includes("ui_pdf") || rawMessage.includes("사용자인터페이스설계서 파일을 찾을 수 없습니다") || rawMessage.includes("PDF 파일을 찾을 수 없습니다")) {
       return {
         summary: "'사용자인터페이스설계서' 파일을 확인하세요.",
         checks: [
-          "'사용자인터페이스설계서' 칸에는 PDF 파일을 넣어야 합니다.",
+          "'사용자인터페이스설계서' 칸에는 PDF, HWP 또는 HWPX 파일을 넣어야 합니다.",
           "문서 안에 화면 ID, 화면명, 처리흐름 정보가 포함되어 있어야 단위시험 케이스를 만들 수 있습니다.",
           "파일이 비어 있거나 텍스트를 추출할 수 없는 문서라면 다른 파일로 다시 선택하세요.",
         ],
@@ -1392,7 +1392,7 @@ async function runTcGeneration(event) {
   event.preventDefault();
   if (!validateFiles(tcForm, [
     ["#tcTemplateHwpx", "기존 단위시험 케이스 HWPX를 선택하세요."],
-    ["#tcUiPdf", "사용자인터페이스 설계서 PDF를 선택하세요."],
+    ["#tcUiPdf", "사용자인터페이스 설계서 문서를 선택하세요."],
   ])) return;
 
   setBadge("처리중", "busy");
@@ -1441,7 +1441,7 @@ async function runTsGeneration(event) {
   if (!validateFiles(tsForm, [
     ["#tsTemplateXlsx", "기존 통합시험 시나리오 XLSX를 선택하세요."],
     ["#tsTcXlsx", "단위시험 케이스 XLSX를 선택하세요."],
-    ["#tsUiPdf", "사용자인터페이스설계서 PDF를 선택하세요."],
+    ["#tsUiPdf", "사용자인터페이스설계서 문서를 선택하세요."],
   ])) return;
 
   setBadge("처리중", "busy");

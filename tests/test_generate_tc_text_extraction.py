@@ -47,18 +47,22 @@ class GenerateTcTextExtractionTest(unittest.TestCase):
             block_status_callback=block_status_callback,
         )
 
-    def test_hwp_design_is_not_supported_yet(self):
+    def test_hwp_design_converts_to_hwpx_for_text_extraction(self):
         with tempfile.TemporaryDirectory() as temp:
             document_path = Path(temp) / "SFR-001_사용자인터페이스설계서.hwp"
             document_path.write_bytes(b"placeholder")
 
-            with patch("qa_generation.generate_tc.extract_document_text") as extract_text:
-                fake_fitz = SimpleNamespace(open=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("MuPDF should not open HWP")))
-                with patch("qa_generation.generate_tc.fitz", fake_fitz):
-                    with self.assertRaisesRegex(ValueError, "PDF"):
-                        extract_text_from_pdf(document_path)
+            converted_path = Path(temp) / "converted.hwpx"
+            with patch("qa_generation.generate_tc.prepare_target_file", return_value=(converted_path, True)) as prepare_target:
+                with patch("qa_generation.generate_tc.extract_document_text", return_value="UI-SFR-001-01") as extract_text:
+                    fake_fitz = SimpleNamespace(open=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("MuPDF should not open HWP")))
+                    with patch("qa_generation.generate_tc.fitz", fake_fitz):
+                        result = extract_text_from_pdf(document_path)
 
-            extract_text.assert_not_called()
+            self.assertEqual("UI-SFR-001-01", result)
+            prepare_target.assert_called_once()
+            self.assertEqual(document_path, prepare_target.call_args.args[0])
+            extract_text.assert_called_once_with(converted_path)
 
     def test_pdf_design_uses_mupdf_first(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -149,7 +153,7 @@ class GenerateTcTextExtractionTest(unittest.TestCase):
             {
               "순서": 1,
               "테스트_케이스": "검색 버튼 클릭",
-              "예상_결과": "목록이 조회된다."
+              "예상_결과": "2. 목록이 조회된다."
             }
           ]
         }"""
@@ -238,7 +242,7 @@ class GenerateTcTextExtractionTest(unittest.TestCase):
         self.assertEqual(["UT-LARGE-001", "UT-SMALL-001"], [case["단위시험_ID"] for case in cases])
         self.assertNotIn("__block_original_index", cases[0])
 
-    def test_unit_test_name_uses_screen_name_with_improvement_when_title_matches_screen(self):
+    def test_unit_test_name_uses_section_title_when_section_number_exists(self):
         block_text = """4.1. 내부사용자관리
 요구사항ID SFR-SFD-001-01
 화면ID UI-SFD-001-01-01
@@ -268,7 +272,7 @@ class GenerateTcTextExtractionTest(unittest.TestCase):
             cases = self.build_cases_from_block(block_text)
 
         self.assertEqual("내부사용자관리", cases[0]["단위시험_제목"])
-        self.assertEqual("내부사용자관리 개선", cases[0]["단위시험_명"])
+        self.assertEqual("내부사용자관리", cases[0]["단위시험_명"])
         self.assertEqual("내부사용자관리", cases[0]["화면명"])
         self.assertEqual("", cases[0]["테스트_데이터"])
 
@@ -291,7 +295,7 @@ class GenerateTcTextExtractionTest(unittest.TestCase):
             {
               "순서": 2,
               "테스트_케이스": "② 내부사용자 목록 중 하나의 행을 클릭한다.",
-              "예상_결과": "상세 정보가 조회된다."
+              "예상_결과": "④ 상세 정보가 조회된다."
             }
           ]
         }"""
@@ -301,6 +305,8 @@ class GenerateTcTextExtractionTest(unittest.TestCase):
 
         self.assertEqual("검색조건을 입력 후 검색 버튼을 클릭한다.", cases[0]["테스트_케이스"])
         self.assertEqual("내부사용자 목록 중 하나의 행을 클릭한다.", cases[1]["테스트_케이스"])
+        self.assertEqual("목록이 조회된다.", cases[0]["예상_결과"])
+        self.assertEqual("상세 정보가 조회된다.", cases[1]["예상_결과"])
 
     def test_unit_test_name_uses_section_title_when_title_is_more_specific_than_screen(self):
         block_text = """4.1. 전자위생증명서 연계 국가 확대
@@ -337,6 +343,178 @@ class GenerateTcTextExtractionTest(unittest.TestCase):
         self.assertEqual("전자위생증명서 연계 국가 확대", cases[0]["단위시험_제목"])
         self.assertEqual("전자위생증명서 연계 국가 확대", cases[0]["단위시험_명"])
         self.assertEqual("전자위생증명서(수입업무)", cases[0]["화면명"])
+
+    def test_unit_test_title_strips_hwpx_inline_tags(self):
+        block_text = """4.1. 전자위생증명서 연계 국가 확대<hp:tab width="24256" leader="3" type="2"/>4
+요구사항ID SFR-IIL-002-01
+화면ID UI-IIL-002-01-01-01
+화면명 전자위생증명서(수입업무)
+처리흐름
+① 보고서 버튼을 클릭한다.
+"""
+        ai_response = """{
+          "test_cases": [
+            {
+              "화면명": "UT-IIL-002-01-01-01",
+              "단위시험_명": "UT-IIL-002-01-01-01",
+              "사전조건": "로그인 상태",
+              "순서": 1,
+              "테스트_케이스": "보고서 버튼 클릭",
+              "예상_결과": "보고서가 표시된다."
+            }
+          ]
+        }"""
+
+        with patch("qa_generation.generate_tc.call_ollama", return_value=ai_response):
+            cases = self.build_cases_from_block(
+                block_text,
+                screen_id="UI-IIL-002-01-01-01",
+                unit_test_id="UT-IIL-002-01-01-01",
+            )
+
+        self.assertEqual("전자위생증명서 연계 국가 확대", cases[0]["단위시험_제목"])
+        self.assertEqual("전자위생증명서 연계 국가 확대", cases[0]["단위시험_명"])
+
+    def test_unit_test_title_reads_hwpx_split_section_heading(self):
+        block_text = """4.1.
+전자위생증명서 연계 국가 확대
+요구사항ID SFR-IIL-002-01
+화면ID UI-IIL-002-01-01-01
+화면명 전자위생증명서(수입업무)
+처리흐름
+① 보고서 버튼을 클릭한다.
+"""
+        ai_response = """{
+          "test_cases": [
+            {
+              "화면명": "UT-IIL-002-01-01-01",
+              "단위시험_명": "UT-IIL-002-01-01-01",
+              "사전조건": "로그인 상태",
+              "순서": 1,
+              "테스트_케이스": "보고서 버튼 클릭",
+              "예상_결과": "보고서가 표시된다."
+            }
+          ]
+        }"""
+
+        with patch("qa_generation.generate_tc.call_ollama", return_value=ai_response):
+            cases = self.build_cases_from_block(
+                block_text,
+                screen_id="UI-IIL-002-01-01-01",
+                unit_test_id="UT-IIL-002-01-01-01",
+            )
+
+        self.assertEqual("전자위생증명서 연계 국가 확대", cases[0]["단위시험_제목"])
+        self.assertEqual("전자위생증명서 연계 국가 확대", cases[0]["단위시험_명"])
+
+    def test_only_first_screen_in_section_uses_section_title(self):
+        extracted_text = """4.1. 전자위생증명서 연계 국가 확대<hp:tab width="24256" leader="3" type="2"/>4
+요구사항ID SFR-IIL-002-01
+화면ID UI-IIL-002-01-01-01
+화면명 전자위생증명서(수입업무)
+처리흐름
+① 보고서 버튼을 클릭한다.
+
+요구사항ID SFR-IIL-002-01
+화면ID UI-IIL-002-01-01-02
+화면명 수입전자위생증명서
+처리흐름
+① 수입전자위생증명서 정보를 확인한다.
+"""
+        screen_blocks = generate_tc.extract_screen_blocks(extracted_text)
+        ai_response = """{
+          "test_cases": [
+            {
+              "화면명": "UT",
+              "단위시험_명": "UT",
+              "사전조건": "로그인 상태",
+              "순서": 1,
+              "테스트_케이스": "확인",
+              "예상_결과": "정상"
+            }
+          ]
+        }"""
+
+        with patch("qa_generation.generate_tc.call_ollama", return_value=ai_response):
+            cases = generate_tc.build_test_cases_from_text(
+                extracted_text=extracted_text,
+                model_name="model",
+                ollama_url="http://localhost",
+                screen_blocks=screen_blocks,
+            )
+
+        by_id = {case["단위시험_ID"]: case for case in cases}
+        self.assertEqual("전자위생증명서 연계 국가 확대", by_id["UT-IIL-002-01-01-01"]["단위시험_명"])
+        self.assertEqual("수입전자위생증명서", by_id["UT-IIL-002-01-01-02"]["단위시험_명"])
+
+    def test_replaced_hwpx_screen_candidate_keeps_section_title(self):
+        extracted_text = """4.1. 전자위생증명서 연계 국가 확대<hp:tab width="24256" leader="3" type="2"/>4
+화면/보고서 목록
+화면 목록
+화면ID
+화면명
+UI-IIL-002-01-01-01
+전자위생증명서(수입업무)
+UI-IIL-002-01-01-02
+수입전자위생증명서
+화면/보고서 정의
+전자위생증명서 연계 국가 확대
+요구사항ID
+SFR-IIL-002-01
+화면ID
+UI-IIL-002-01-01-01
+화면명
+전자위생증명서(수입업무)
+처리흐름
+① 보고서 버튼을 클릭한다.
+요구사항ID
+SFR-IIL-002-01
+화면ID
+UI-IIL-002-01-01-02
+화면명
+수입전자위생증명서
+처리흐름
+① 수입전자위생증명서 정보를 확인한다.
+"""
+        screen_blocks = generate_tc.extract_screen_blocks(extracted_text)
+        by_screen = {block["screen_id"]: block for block in screen_blocks}
+
+        self.assertEqual("전자위생증명서 연계 국가 확대", by_screen["UI-IIL-002-01-01-01"]["section_title"])
+        self.assertEqual("", by_screen["UI-IIL-002-01-01-02"]["section_title"])
+
+    def test_unit_test_name_uses_screen_name_when_section_title_is_missing(self):
+        block_text = """요구사항ID SFR-IIL-002-01
+화면ID UI-IIL-002-01-01-02
+화면명 수입전자위생증명서
+화면설명 내부담당자가 수입전자위생증명서를 확인 및 상태를 처리할 수 있는 팝업
+메뉴경로 시스템관리 > 연계관리 > 전자위생증명서(수입업무)
+개발구분 개선
+처리흐름
+① 수입전자위생증명서 정보를 확인한다.
+"""
+        ai_response = """{
+          "test_cases": [
+            {
+              "화면명": "UT-IIL-002-01-01-02",
+              "단위시험_명": "02",
+              "사전조건": "로그인 상태",
+              "순서": 1,
+              "테스트_케이스": "정보 확인",
+              "예상_결과": "팝업 정보가 표시된다."
+            }
+          ]
+        }"""
+
+        with patch("qa_generation.generate_tc.call_ollama", return_value=ai_response):
+            cases = self.build_cases_from_block(
+                block_text,
+                screen_id="UI-IIL-002-01-01-02",
+                unit_test_id="UT-IIL-002-01-01-02",
+            )
+
+        self.assertEqual("수입전자위생증명서", cases[0]["단위시험_제목"])
+        self.assertEqual("수입전자위생증명서", cases[0]["단위시험_명"])
+        self.assertEqual("수입전자위생증명서", cases[0]["화면명"])
 
 
 if __name__ == "__main__":

@@ -1,11 +1,15 @@
 import os
 from pathlib import Path
+import tempfile
 import fitz
 import re
 import copy
 import openpyxl
 from typing import Callable
 from openpyxl.styles import Alignment, Border, Side
+from openpyxl.utils import get_column_letter, range_boundaries
+from document_update.hwpx_text import extract_document_text
+from document_update.runtime_conversion import prepare_target_file
 
 SCREEN_ID_PATTERN = re.compile(r"\bUI-[A-Z0-9]+(?:-[A-Z0-9]+)+\b", re.IGNORECASE)
 
@@ -22,9 +26,19 @@ def derive_requirement_id_from_screen_id(screen_id):
 
 def extract_text_from_pdf(pdf_path):
   if not os.path.exists(pdf_path):
-    raise FileNotFoundError(f"PDF 파일을 찾을 수 없습니다: {pdf_path}")
+    raise FileNotFoundError(f"사용자인터페이스설계서 파일을 찾을 수 없습니다: {pdf_path}")
   
   print(f"\n*** 사용자인터페이스설계서에서 텍스트 추출 중: {pdf_path}")
+  suffix = Path(pdf_path).suffix.lower()
+  if suffix == ".hwp":
+    with tempfile.TemporaryDirectory(prefix="qa-ui-hwp-") as temp:
+      converted_path, _converted = prepare_target_file(Path(pdf_path), Path(temp))
+      return extract_document_text(converted_path).strip()
+  if suffix == ".hwpx":
+    return extract_document_text(Path(pdf_path)).strip()
+  if suffix != ".pdf":
+    raise ValueError("사용자인터페이스설계서는 PDF, HWP 또는 HWPX 파일만 지원합니다.")
+
   text_content = ""
   with fitz.open(pdf_path) as doc:
     for page_num in range(len(doc)):
@@ -34,7 +48,7 @@ def extract_text_from_pdf(pdf_path):
   return text_content.strip()
 
 def extract_req_mapping_from_pdf(pdf_path):
-  """사용자인터페이스설계서 PDF에서 {화면ID: 요구사항ID} 매핑을 만든다."""
+  """사용자인터페이스설계서 PDF/HWPX에서 {화면ID: 요구사항ID} 매핑을 만든다."""
   text = extract_text_from_pdf(pdf_path)
   mapping = {}
 
@@ -232,28 +246,86 @@ def build_test_scenarios_from_unit_tests(unit_test_data, author=""):
 
   return scenarios
   
-def copy_worksheet_template(source_ws, target_ws):
-  """외부 엑셀 시트의 너비, 높이, 병합, 셀 서식을 완벽하게 복사하는 도우미 함수"""
-  # 1. 열 너비 복사
+def safe_sheet_title(value, fallback="미분류"):
+  title = re.sub(r"[\[\]\:\*\?\/\\]", "_", str(value or "").strip()) or fallback
+  return title[:31]
+
+def unique_sheet_title(wb, value, fallback="미분류"):
+  base = safe_sheet_title(value, fallback)
+  title = base
+  counter = 2
+  while title in wb.sheetnames:
+    suffix = f"_{counter}"
+    title = f"{base[:31 - len(suffix)]}{suffix}"
+    counter += 1
+  return title
+
+def group_test_scenarios_by_requirement(test_scenarios):
+  grouped = {}
+  for ts in test_scenarios:
+    req_id = str(ts.get("요구사항_ID") or "").strip()
+    if not req_id:
+      req_id = derive_requirement_id_from_screen_id(ts.get("화면ID", "")) or "미분류"
+
+    scenario_id = str(ts.get("시나리오ID") or "미분류").strip() or "미분류"
+    grouped.setdefault(req_id, {})
+    grouped[req_id].setdefault(scenario_id, [])
+    grouped[req_id][scenario_id].append(ts)
+  return grouped
+
+REPEATED_SCENARIO_BLOCK_START_ROW = 3
+TEMPLATE_DATA_START_ROW = 7
+
+def get_effective_template_block_end_row(source_ws):
+  end_row = TEMPLATE_DATA_START_ROW
+
+  for row in source_ws.iter_rows():
+    if any(cell.value not in (None, "") for cell in row):
+      end_row = max(end_row, row[0].row)
+
+  for merged_range in source_ws.merged_cells.ranges:
+    end_row = max(end_row, merged_range.max_row)
+
+  return end_row
+
+def copy_worksheet_block(source_ws, target_ws, row_offset=0, source_start_row=1, source_end_row=None):
+  source_end_row = source_end_row or get_effective_template_block_end_row(source_ws)
+
   for key, dim in source_ws.column_dimensions.items():
     target_ws.column_dimensions[key].min = dim.min
     target_ws.column_dimensions[key].max = dim.max
     target_ws.column_dimensions[key].width = dim.width
     target_ws.column_dimensions[key].hidden = dim.hidden
-  
-  # 2. 행 높이 복사
+
   for key, dim in source_ws.row_dimensions.items():
-    target_ws.row_dimensions[key].height = dim.height
-    target_ws.row_dimensions[key].hidden = dim.hidden
-  
-  # 3. 병합된 셀 복사
+    if key < source_start_row or key > source_end_row:
+      continue
+    target_key = key + row_offset
+    target_ws.row_dimensions[target_key].height = dim.height
+    target_ws.row_dimensions[target_key].hidden = dim.hidden
+
+  existing_ranges = {str(m_range) for m_range in target_ws.merged_cells.ranges}
   for m_range in source_ws.merged_cells.ranges:
-    target_ws.merge_cells(str(m_range))
-  
-  # 4. 셀 데이터 및 스타일 복사
+    min_col, min_row, max_col, max_row = range_boundaries(str(m_range))
+    if min_row < source_start_row or max_row > source_end_row:
+      continue
+    target_range = (
+      f"{get_column_letter(min_col)}{min_row + row_offset}:"
+      f"{get_column_letter(max_col)}{max_row + row_offset}"
+    )
+    if target_range not in existing_ranges:
+      target_ws.merge_cells(target_range)
+      existing_ranges.add(target_range)
+
   for row in source_ws.iter_rows():
     for cell in row:
-      new_cell = target_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+      if cell.row < source_start_row or cell.row > source_end_row:
+        continue
+      new_cell = target_ws.cell(
+        row=cell.row + row_offset,
+        column=cell.column,
+        value=cell.value,
+      )
       if cell.has_style:
         new_cell.font = copy.copy(cell.font)
         new_cell.border = copy.copy(cell.border)
@@ -261,6 +333,73 @@ def copy_worksheet_template(source_ws, target_ws):
         new_cell.number_format = copy.copy(cell.number_format)
         new_cell.protection = copy.copy(cell.protection)
         new_cell.alignment = copy.copy(cell.alignment)
+
+def ensure_row_merge(ws, row, start_column, end_column):
+  target_range = (
+    f"{get_column_letter(start_column)}{row}:"
+    f"{get_column_letter(end_column)}{row}"
+  )
+  if target_range not in {str(m_range) for m_range in ws.merged_cells.ranges}:
+    ws.merge_cells(
+      start_row=row,
+      start_column=start_column,
+      end_row=row,
+      end_column=end_column,
+    )
+
+def set_cell_value(ws, row, column, value):
+  cell = ws.cell(row=row, column=column)
+  if cell.__class__.__name__ == "MergedCell":
+    for merged_range in ws.merged_cells.ranges:
+      if cell.coordinate in merged_range:
+        cell = ws.cell(row=merged_range.min_row, column=merged_range.min_col)
+        break
+  cell.value = value
+  return cell
+
+def apply_data_row_style(ws, source_ws, row, max_column, border, center_align, center_columns):
+  template_row = min(7, source_ws.max_row)
+
+  for col in range(1, max_column + 1):
+    cell = ws.cell(row=row, column=col)
+    template_cell = source_ws.cell(row=template_row, column=min(col, source_ws.max_column))
+    if template_cell.has_style:
+      cell.font = copy.copy(template_cell.font)
+      cell.fill = copy.copy(template_cell.fill)
+      cell.number_format = copy.copy(template_cell.number_format)
+      cell.protection = copy.copy(template_cell.protection)
+    cell.border = copy.copy(template_cell.border) if template_cell.has_style else border
+    if col in center_columns:
+      cell.alignment = center_align
+
+def write_scenario_block(ws, source_ws, group, row_offset, max_column, border, center_align, left_align, center_columns):
+  common = group[0]
+  if row_offset == 0:
+    set_cell_value(ws, 2, 2, common.get("시스템", ""))
+    set_cell_value(ws, 2, 6, common.get("작성자", ""))
+  set_cell_value(ws, row_offset + 4, 2, common.get("시나리오ID", ""))
+  set_cell_value(ws, row_offset + 4, 6, common.get("시나리오명", ""))
+  set_cell_value(ws, row_offset + 4, 9, common.get("요구사항_ID", ""))
+
+  for i, ts in enumerate(group):
+    row_number = row_offset + 7 + i
+    ensure_row_merge(ws, row_number, 1, 2)
+    apply_data_row_style(ws, source_ws, row_number, max_column, border, center_align, center_columns)
+
+    set_cell_value(ws, row_number, 1, ts.get("케이스명", ""))
+    data_mapping = [
+      (3, i + 1, center_align),
+      (4, ts.get("업무처리내용", ""), left_align),
+      (5, ts.get("시험항목", ""), left_align),
+      (6, ts.get("사전조건", ""), left_align),
+      (7, "", left_align),
+      (8, ts.get("예상결과", ""), left_align),
+      (9, ts.get("화면ID", ""), left_align),
+    ]
+
+    for col, val, align in data_mapping:
+      cell = set_cell_value(ws, row_number, col, str(val) if val else "")
+      cell.alignment = align
 
 def save_test_scenarios_to_excel(test_scenarios, base_workbook_path, output_dir: Path, scenario_sheet_form_path, base_filename="generated_TS"):
   if not test_scenarios:
@@ -321,68 +460,38 @@ def save_test_scenarios_to_excel(test_scenarios, base_workbook_path, output_dir:
   center_align = Alignment(horizontal="center", vertical="center")
   left_align = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
-  # 시나리오ID 기준으로 데이터 그룹화
-  grouped = {}
-  for ts in test_scenarios:
-    ts_id = ts.get("시나리오ID", "미분류")
-    if ts_id not in grouped:
-      grouped[ts_id] = []
-    grouped[ts_id].append(ts)
+  grouped = group_test_scenarios_by_requirement(test_scenarios)
+  max_scenario_column = max(source_ws.max_column, 9)
+  template_block_end_row = get_effective_template_block_end_row(source_ws)
 
-  # 4. '양식' 시트를 복사하여 새 데이터 채우기
-  for ts_id, group in grouped.items():
-    sheet_title = str(ts_id)[:31]
-    
-    # 새 시트를 원하는 위치에 바로 생성
+  # 4. 요구사항ID 시트 안에 시나리오 블록을 반복하여 새 데이터 채우기
+  for req_id, scenario_groups in grouped.items():
+    sheet_title = unique_sheet_title(wb, req_id)
     new_ws = wb.create_sheet(title=sheet_title, index=insert_idx)
     insert_idx += 1
 
-    copy_worksheet_template(source_ws, new_ws)
-    
-    common = group[0]
+    next_start_row = 1
+    is_first_block = True
+    for group in scenario_groups.values():
+      source_start_row = 1 if is_first_block else REPEATED_SCENARIO_BLOCK_START_ROW
+      row_offset = next_start_row - source_start_row
+      copy_worksheet_block(source_ws, new_ws, row_offset, source_start_row, template_block_end_row)
+      write_scenario_block(
+        new_ws,
+        source_ws,
+        group,
+        row_offset,
+        max_scenario_column,
+        border,
+        center_align,
+        left_align,
+        center_columns={1, 2, 3},
+      )
+      block_last_row = row_offset + max(template_block_end_row, 6 + len(group))
+      next_start_row = block_last_row + 1
+      is_first_block = False
 
-    # 상단 메타 정보 입력
-    new_ws['B2'] = common.get("시스템", "")
-    new_ws['F2'] = common.get("작성자", "")
-    new_ws['B4'] = common.get("시나리오ID", "")
-    new_ws['F4'] = common.get("시나리오명", "")
-    new_ws['I4'] = common.get("요구사항_ID", "")
-
-    # 7행부터 본문 데이터 입력
-    for i, ts in enumerate(group):
-      r = 7 + i 
-      
-      new_ws.cell(row=r, column=1, value=ts.get("케이스명", ""))
-      new_ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=2)
-      
-      data_mapping = [
-        (3, i + 1, center_align),
-        (4, ts.get("업무처리내용", ""), left_align),
-        (5, ts.get("시험항목", ""), left_align),
-        (6, ts.get("사전조건", ""), left_align),
-        (7, "", left_align),
-        (8, ts.get("예상결과", ""), left_align),
-        (9, ts.get("화면ID", ""), left_align)
-      ]
-
-      # 셀 병합 및 테두리 복원
-      for col in range(1, 10):
-        cell = new_ws.cell(row=r, column=col)
-        cell.border = border
-
-        # 7행의 폰트를 새로 생성되는 행에 적용
-        reference_font = new_ws.cell(row=7, column=col).font
-        if reference_font:
-          cell.font = copy.copy(reference_font)
-
-        if col in [1, 2]:
-           cell.alignment = center_align
-
-      # 값 입력 및 정렬 적용
-      for col, val, align in data_mapping:
-        cell = new_ws.cell(row=r, column=col, value=str(val) if val else "")
-        cell.alignment = align
-
+  form_wb.close()
   wb.save(full_path)
   print(f"통합시험 시나리오 저장 완료: {full_path.resolve()}")
   return full_path
@@ -445,56 +554,35 @@ def save_integration_test_results_to_excel(test_scenarios, base_workbook_path, o
   center_align = Alignment(horizontal="center", vertical="center")
   left_align = Alignment(horizontal="left", vertical="center", wrap_text=True)
   max_result_column = max(source_ws.max_column, 13)
+  template_block_end_row = get_effective_template_block_end_row(source_ws)
 
-  grouped = {}
-  for ts in test_scenarios:
-    ts_id = ts.get("시나리오ID", "미분류")
-    if ts_id not in grouped:
-      grouped[ts_id] = []
-    grouped[ts_id].append(ts)
+  grouped = group_test_scenarios_by_requirement(test_scenarios)
 
-  for ts_id, group in grouped.items():
-    sheet_title = str(ts_id)[:31]
+  for req_id, scenario_groups in grouped.items():
+    sheet_title = unique_sheet_title(wb, req_id)
     new_ws = wb.create_sheet(title=sheet_title, index=insert_idx)
     insert_idx += 1
 
-    copy_worksheet_template(source_ws, new_ws)
-    common = group[0]
-
-    new_ws['B2'] = common.get("시스템", "")
-    new_ws['F2'] = common.get("작성자", "")
-    new_ws['B4'] = common.get("시나리오ID", "")
-    new_ws['F4'] = common.get("시나리오명", "")
-    new_ws['I4'] = common.get("요구사항_ID", "")
-
-    for i, ts in enumerate(group):
-      r = 7 + i
-
-      new_ws.cell(row=r, column=1, value=ts.get("케이스명", ""))
-      new_ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=2)
-
-      data_mapping = [
-        (3, i + 1, center_align),
-        (4, ts.get("업무처리내용", ""), left_align),
-        (5, ts.get("시험항목", ""), left_align),
-        (6, ts.get("사전조건", ""), left_align),
-        (7, "", left_align),
-        (8, ts.get("예상결과", ""), left_align),
-        (9, ts.get("화면ID", ""), left_align),
-      ]
-
-      for col in range(1, max_result_column + 1):
-        cell = new_ws.cell(row=r, column=col)
-        cell.border = border
-        reference_font = new_ws.cell(row=7, column=col).font
-        if reference_font:
-          cell.font = copy.copy(reference_font)
-        if col in [1, 2, 3]:
-          cell.alignment = center_align
-
-      for col, val, align in data_mapping:
-        cell = new_ws.cell(row=r, column=col, value=str(val) if val else "")
-        cell.alignment = align
+    next_start_row = 1
+    is_first_block = True
+    for group in scenario_groups.values():
+      source_start_row = 1 if is_first_block else REPEATED_SCENARIO_BLOCK_START_ROW
+      row_offset = next_start_row - source_start_row
+      copy_worksheet_block(source_ws, new_ws, row_offset, source_start_row, template_block_end_row)
+      write_scenario_block(
+        new_ws,
+        source_ws,
+        group,
+        row_offset,
+        max_result_column,
+        border,
+        center_align,
+        left_align,
+        center_columns={1, 2, 3},
+      )
+      block_last_row = row_offset + max(template_block_end_row, 6 + len(group))
+      next_start_row = block_last_row + 1
+      is_first_block = False
 
   form_wb.close()
   wb.save(full_path)

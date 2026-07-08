@@ -43,6 +43,7 @@ from document_update.metadata_workflow import (
     save_metadata_required_files,
     split_excluded_paths,
 )
+from document_update.runtime_conversion import prepare_target_file
 from qa_generation.generate_tc import (
     call_ollama,
     extract_process_flow_steps,
@@ -68,6 +69,7 @@ RESULT_DELETE_AFTER_DOWNLOAD: dict[str, bool] = {}
 QA_FOLDER_JOBS: dict[str, dict[str, object]] = {}
 QA_FOLDER_JOB_CONTEXTS: dict[str, dict[str, object]] = {}
 QA_FOLDER_JOBS_LOCK = Lock()
+UI_DESIGN_DOCUMENT_SUFFIXES = {".pdf", ".hwp", ".hwpx"}
 
 
 def json_safe_copy(value: object) -> object:
@@ -359,6 +361,26 @@ def save_uploaded_items(
     return saved
 
 
+def prepare_ui_design_upload_for_processing(item: dict[str, object], temp_dir: Path) -> dict[str, object]:
+    path = Path(str(item["path"]))
+    if path.suffix.lower() == ".pdf":
+        return item
+    converted_path, converted = prepare_target_file(path, temp_dir / "ui-design-converted")
+    return {
+        **item,
+        "path": converted_path,
+        "original_path": path,
+        "converted_to_hwpx": converted,
+    }
+
+
+def prepare_ui_design_path_for_processing(path: Path, temp_dir: Path) -> Path:
+    if path.suffix.lower() == ".pdf":
+        return path
+    converted_path, _converted = prepare_target_file(path, temp_dir / "ui-design-converted")
+    return converted_path
+
+
 def analyze_ts_tc_file(item: dict[str, object]) -> dict[str, object]:
     path = Path(str(item["path"]))
     unit_test_data = extract_unit_test_from_excel(path)
@@ -461,7 +483,7 @@ def ai_refine_ts_sets(
         }
 
     prompt = {
-        "task": "통합시험 시나리오 생성을 위한 단위시험 케이스 XLSX와 사용자인터페이스설계서 PDF 세트를 매칭하세요.",
+        "task": "통합시험 시나리오 생성을 위한 단위시험 케이스 XLSX와 사용자인터페이스설계서 세트를 매칭하세요.",
         "rules": [
             "같은 SFR 키가 있으면 같은 세트일 가능성이 높습니다.",
             "SFR 키가 없거나 애매하면 화면ID 교집합을 기준으로 판단합니다.",
@@ -482,7 +504,7 @@ def ai_refine_ts_sets(
             "sets": [
                 {
                     "tc_file": "TC 파일명",
-                    "ui_file": "UI PDF 파일명",
+                    "ui_file": "UI 설계서 파일명",
                     "confidence": 0.0,
                     "reason": "매칭 근거",
                 }
@@ -520,7 +542,7 @@ def analyze_tc_pdf(pdf_path: Path, source_name: str, model_name: str, ollama_url
         extracted_text = extract_text_from_pdf(pdf_path)
         screen_blocks = extract_screen_blocks(extracted_text)
     except Exception as exc:
-        analysis["summary"] = "PDF 텍스트 추출 또는 화면 분석에 실패했습니다."
+        analysis["summary"] = "설계서 텍스트 추출 또는 화면 분석에 실패했습니다."
         analysis["quality"] = "poor"
         analysis["risks"] = [str(exc)]
         return analysis
@@ -539,7 +561,7 @@ def analyze_tc_pdf(pdf_path: Path, source_name: str, model_name: str, ollama_url
 
     risks: list[str] = []
     if not extracted_text.strip():
-        risks.append("PDF에서 텍스트를 추출하지 못했습니다.")
+        risks.append("설계서에서 텍스트를 추출하지 못했습니다.")
     if not screens:
         risks.append("화면ID를 찾지 못했습니다.")
     no_step_screens = [screen["screen_id"] for screen in screens if not screen.get("process_step_count")]
@@ -567,7 +589,7 @@ def analyze_tc_pdf(pdf_path: Path, source_name: str, model_name: str, ollama_url
         for screen in screens[:20]
     )
     prompt = f"""
-다음 사용자인터페이스설계서 PDF의 사전 분석 결과를 보고 단위시험 케이스 생성 관점으로 요약하세요.
+다음 사용자인터페이스설계서의 사전 분석 결과를 보고 단위시험 케이스 생성 관점으로 요약하세요.
 반드시 JSON 객체만 출력하세요.
 
 파일명: {source_name}
@@ -1014,7 +1036,7 @@ class WebHandler(BaseHTTPRequestHandler):
 
     def handle_generate_tc_post(self) -> None:
         # 단위시험 케이스 생성 요청을 처리한다.
-        """업로드된 HWPX 양식과 UI 설계서 PDF를 임시 폴더에 저장한 뒤 TC 생성 모듈을 실행한다.
+        """업로드된 HWPX 양식과 UI 설계서를 임시 폴더에 저장한 뒤 TC 생성 모듈을 실행한다.
 
         생성 결과는 요청별 output 폴더에 두고 다운로드 토큰을 붙인다.
         업로드 원본은 생성 직후 삭제하고, 결과 파일은 다운로드 후 정리한다.
@@ -1045,7 +1067,7 @@ class WebHandler(BaseHTTPRequestHandler):
             )
             ui_pdf_items = file_items.get("ui_pdf") or []
             if not ui_pdf_items:
-                raise ValueError("사용자인터페이스 설계서 PDF를 선택하세요.")
+                raise ValueError("사용자인터페이스 설계서 문서를 선택하세요.")
 
             log_event(
                 "qa.tc.start",
@@ -1070,14 +1092,15 @@ class WebHandler(BaseHTTPRequestHandler):
                         raise ValueError("빈 문서 파일입니다.")
 
                     source_suffix = Path(source_name).suffix.lower()
-                    if source_suffix != ".pdf":
-                        raise ValueError("사용자인터페이스설계서는 PDF 파일만 업로드할 수 있습니다.")
+                    if source_suffix not in UI_DESIGN_DOCUMENT_SUFFIXES:
+                        raise ValueError("사용자인터페이스설계서는 PDF, HWP 또는 HWPX 파일만 업로드할 수 있습니다.")
 
                     safe_pdf_name = safe_upload_filename(source_name, f"ui_pdf_{index}", source_suffix or ".pdf")
                     pdf_stem = Path(safe_pdf_name).stem
                     pdf_path = temp_dir / f"ui_pdf_{index}_{safe_pdf_name}"
                     pdf_path.write_bytes(pdf_payload)
-                    analysis = analyze_tc_pdf(pdf_path, source_name, model_name, ollama_url)
+                    ui_processing_path = prepare_ui_design_path_for_processing(pdf_path, temp_dir)
+                    analysis = analyze_tc_pdf(ui_processing_path, source_name, model_name, ollama_url)
                     check_cancel()
                     extracted_text = None
                     screen_blocks = None
@@ -1093,7 +1116,7 @@ class WebHandler(BaseHTTPRequestHandler):
                     pdf_output_dir.mkdir(parents=True, exist_ok=True)
 
                     item_payload = generate_test_cases(
-                        pdf_path=pdf_path,
+                        pdf_path=ui_processing_path,
                         model_name=model_name,
                         ollama_url=ollama_url,
                         output_dir=pdf_output_dir,
@@ -1505,10 +1528,13 @@ class WebHandler(BaseHTTPRequestHandler):
                 file_items,
                 "ui_pdf",
                 "ui.pdf",
-                {".pdf"},
+                UI_DESIGN_DOCUMENT_SUFFIXES,
             )
             tc_items = save_uploaded_items(temp_dir, file_items, "tc_xlsx", "test_cases.xlsx", {".xlsx"})
-            ui_items = save_uploaded_items(temp_dir, file_items, "ui_pdf", "ui.pdf", {".pdf"})
+            ui_items = [
+                prepare_ui_design_upload_for_processing(item, temp_dir)
+                for item in save_uploaded_items(temp_dir, file_items, "ui_pdf", "ui.pdf", UI_DESIGN_DOCUMENT_SUFFIXES)
+            ]
 
             log_event(
                 "qa.ts.start",
@@ -1665,8 +1691,8 @@ class WebHandler(BaseHTTPRequestHandler):
                         "ok": False,
                         "count": 0,
                         "file_count": 0,
-                        "error": "매칭되는 사용자인터페이스설계서 PDF를 찾지 못했습니다.",
-                        "analysis": {"summary": "세트 매칭 실패", "quality": "poor", "screen_count": 0, "risks": ["UI PDF 누락"], "recommendations": []},
+                        "error": "매칭되는 사용자인터페이스설계서를 찾지 못했습니다.",
+                        "analysis": {"summary": "세트 매칭 실패", "quality": "poor", "screen_count": 0, "risks": ["UI 설계서 누락"], "recommendations": []},
                     }
                 )
             for name in unmatched_ui_names:
@@ -1738,6 +1764,8 @@ class WebHandler(BaseHTTPRequestHandler):
             remove_runtime_path(template_xlsx_path)
             for item in [*tc_items, *ui_items]:
                 remove_runtime_path(Path(str(item.get("path") or "")))
+                if item.get("original_path"):
+                    remove_runtime_path(Path(str(item.get("original_path") or "")))
 
             log_event(
                 "qa.ts.done",

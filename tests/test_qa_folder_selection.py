@@ -111,7 +111,7 @@ class QaFolderSelectionTest(unittest.TestCase):
 
             self.assertIn("원본", selected_ts.parts)
 
-    def test_ui_design_matching_uses_pdf_only(self):
+    def test_ui_design_matching_accepts_pdf_hwp_and_hwpx(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             dump_root = root / "dump"
@@ -123,8 +123,8 @@ class QaFolderSelectionTest(unittest.TestCase):
             selection = select_qa_source_files(dump_root, [])
             ui_by_requirement = selection["ui_design"]["by_requirement"]
 
-            self.assertNotIn("SFR-001", ui_by_requirement)
-            self.assertNotIn("SFR-002", ui_by_requirement)
+            self.assertEqual(str(dump_root / "SFR-001_사용자인터페이스설계서.hwp"), ui_by_requirement["SFR-001"]["path"])
+            self.assertEqual(str(dump_root / "SFR-002_사용자인터페이스설계서.hwpx"), ui_by_requirement["SFR-002"]["path"])
             self.assertEqual(str(pdf_design), ui_by_requirement["SFR-003"]["path"])
 
     def test_uploaded_source_files_do_not_replace_dump_root_artifact_targets(self):
@@ -282,9 +282,10 @@ class QaFolderSelectionTest(unittest.TestCase):
             count = 11 if text == "large" else 1
             return [{"screen_id": f"UI-{index}", "text": ""} for index in range(count)]
 
-        with patch("qa_generation.folder_pipeline.extract_text_from_pdf", side_effect=fake_extract):
-            with patch("qa_generation.folder_pipeline.extract_screen_blocks", side_effect=fake_blocks):
-                processing_items = prepare_requirement_processing_items(items, request_id="test")
+        with tempfile.TemporaryDirectory() as temp:
+            with patch("qa_generation.folder_pipeline.extract_text_from_pdf", side_effect=fake_extract):
+                with patch("qa_generation.folder_pipeline.extract_screen_blocks", side_effect=fake_blocks):
+                    processing_items = prepare_requirement_processing_items(items, request_id="test", temp_dir=Path(temp))
 
         self.assertEqual(["SFR-SMALL-001", "SFR-LARGE-001"], [item["requirement_id"] for item in processing_items])
         self.assertEqual([1, 0], [item["_original_index"] for item in processing_items])

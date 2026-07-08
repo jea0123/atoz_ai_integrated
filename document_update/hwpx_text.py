@@ -633,8 +633,8 @@ def extract_text_from_pdf_cover(file_path: Path, max_chars: int = 5000) -> str:
             from pypdf import PdfReader
         except ImportError as exc:
             raise RuntimeError(
-                "PDF 臾몄꽌瑜??쎌쑝?ㅻ㈃ pypdf ?⑦궎吏媛 ?꾩슂?⑸땲?? "
-                "pip install pypdf ???ㅼ떆 ?ㅽ뻾?섏꽭??"
+                "PDF 문서를 읽으려면 pypdf 패키지가 필요합니다. "
+                "pip install pypdf 후 다시 실행하세요."
             ) from exc
 
     reader = PdfReader(str(file_path))

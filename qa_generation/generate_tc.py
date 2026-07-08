@@ -4,12 +4,14 @@ import re
 import time
 import ctypes
 import zipfile
+import tempfile
 from typing import Callable
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 from pathlib import Path
 import time
 from document_update.hwpx_text import extract_document_text
+from document_update.runtime_conversion import prepare_target_file
 
 try:
   import requests
@@ -108,12 +110,20 @@ def extract_cover_author_from_document(document_path):
 def extract_text_from_pdf(pdf_path):
   document_path = Path(pdf_path)
   if not document_path.exists():
-    raise FileNotFoundError(f"PDF 파일을 찾을 수 없습니다: {document_path}")
+    raise FileNotFoundError(f"사용자인터페이스설계서 파일을 찾을 수 없습니다: {document_path}")
 
   print(f"\n*** 사용자인터페이스설계서에서 텍스트 추출 중: {document_path}")
   suffix = document_path.suffix.lower()
-  if suffix != ".pdf":
-    raise ValueError("사용자인터페이스설계서는 PDF 파일만 지원합니다.")
+  if suffix not in {".pdf", ".hwp", ".hwpx"}:
+    raise ValueError("사용자인터페이스설계서는 PDF, HWP 또는 HWPX 파일만 지원합니다.")
+
+  if suffix == ".hwp":
+    with tempfile.TemporaryDirectory(prefix="qa-ui-hwp-") as temp:
+      converted_path, _converted = prepare_target_file(document_path, Path(temp))
+      return extract_document_text(converted_path).strip()
+
+  if suffix == ".hwpx":
+    return extract_document_text(document_path).strip()
 
   if fitz is not None:
     try:
@@ -130,9 +140,41 @@ def extract_text_from_pdf(pdf_path):
 
   return extract_document_text(document_path).strip()
 
+
+def extract_section_title(section_heading):
+  raw_text = str(section_heading or "")
+  if not re.match(r"\s*4\s*\.\s*\d+\s*\.", raw_text, re.DOTALL):
+    return ""
+  title_source = re.sub(r"^\s*4\s*\.\s*\d+\s*\.\s*", "", raw_text, count=1, flags=re.DOTALL)
+  title = ""
+  metadata_labels = ("요구사항ID", "화면ID", "화면명", "화면설명", "메뉴경로", "개발구분", "개인정보등급", "화면구성", "처리흐름")
+  for line in title_source.splitlines():
+    candidate = clean_extracted_text_value(line)
+    if not candidate or candidate.isdigit():
+      continue
+    if any(candidate.startswith(label) for label in metadata_labels):
+      return ""
+    title = candidate
+    break
+  title = re.sub(r"\s+\d{1,4}$", "", title).strip()
+  return title
+
+
+def extract_block_section_title(block_text):
+  match = re.search(r"(?m)^\s*4\s*\.\s*\d+\s*\.\s*[^\n]*(?:\n\s*[^\n]+)?", str(block_text or ""))
+  return extract_section_title(match.group(0)) if match else ""
+
+
+def clean_extracted_text_value(value):
+  text = str(value or "")
+  text = re.sub(r"<[^>]+>", " ", text)
+  text = re.sub(r"\s+", " ", text).strip()
+  return text
+
+
 def extract_screen_blocks(extracted_text):
   screen_pattern = re.compile(r"\bUI-[A-Z0-9]+(?:-[A-Z0-9]+)+\b")
-  section_pattern = re.compile(r"(?m)^\s*4\.\d+\.\s*[^\n]+")
+  section_pattern = re.compile(r"(?m)^\s*4\s*\.\s*\d+\s*\.\s*[^\n]*(?:\n\s*[^\n]+)?")
   main_section_match = re.search(r"(?m)^\s*4\.\s*화면/보고서\s*정의", extracted_text)
   search_offset = main_section_match.start() if main_section_match else 0
   target_text = extracted_text[search_offset:]
@@ -157,10 +199,11 @@ def extract_screen_blocks(extracted_text):
     else:
       print("'4. 화면/보고서 정의' 본문 시작점을 찾지 못해 전체 텍스트에서 화면 제목 분할을 적용합니다.")
 
-    def add_screen_candidate(screen_id, candidate_text):
+    def add_screen_candidate(screen_id, candidate_text, section_title=""):
       candidate = {
         "screen_id": screen_id,
         "unit_test_id": screen_id.replace("UI", "UT", 1),
+        "section_title": section_title,
         "text": candidate_text,
         "score": screen_block_score(candidate_text)
       }
@@ -172,6 +215,8 @@ def extract_screen_blocks(extracted_text):
 
       if existing:
         print(f"[screen split replace] duplicate screen_id: {screen_id} (existing score {existing['score']} < candidate score {candidate['score']})")
+        if not candidate.get("section_title") and existing.get("section_title"):
+          candidate["section_title"] = existing["section_title"]
 
       blocks_by_screen_id[screen_id] = candidate
 
@@ -179,6 +224,7 @@ def extract_screen_blocks(extracted_text):
       start = section_match.start()
       end = section_matches[idx + 1].start() if idx + 1 < len(section_matches) else len(target_text)
       block_text = target_text[start:end].strip()
+      section_title = extract_section_title(section_match.group(0))
       screen_matches = list(screen_pattern.finditer(block_text))
 
       if not screen_matches:
@@ -193,7 +239,7 @@ def extract_screen_blocks(extracted_text):
         screen_boundaries.append(screen_match)
 
       if len(screen_boundaries) == 1:
-        add_screen_candidate(screen_boundaries[0].group(0), block_text)
+        add_screen_candidate(screen_boundaries[0].group(0), block_text, section_title)
         continue
 
       print(f"[screen split] {section_match.group(0).strip()} contains {len(screen_boundaries)} screen IDs")
@@ -205,7 +251,8 @@ def extract_screen_blocks(extracted_text):
           if screen_idx + 1 < len(screen_boundaries)
           else len(block_text)
         )
-        add_screen_candidate(screen_id, block_text[screen_start:screen_end].strip())
+        screen_section_title = section_title if screen_idx == 0 else ""
+        add_screen_candidate(screen_id, block_text[screen_start:screen_end].strip(), screen_section_title)
       continue
 
     if blocks_by_screen_id:
@@ -246,6 +293,7 @@ def extract_screen_blocks(extracted_text):
     blocks.append({
       "screen_id": screen_id,
       "unit_test_id": screen_id.replace("UI", "UT", 1),
+      "section_title": "",
       "text": merged_block
     })
 
@@ -310,14 +358,13 @@ def parse_llm_json(response_text):
 
 def extract_field_value(block_text, field_name):
   pattern = re.compile(
-    rf"{re.escape(field_name)}\s*[:：]?\s*(.+?)(?=\s+(?:요구사항ID|화면ID|화면명|화면설명|메뉴경로|개발구분|개인정보등급)\b|$)",
+    rf"{re.escape(field_name)}\s*[:：]?\s*(.+?)(?=\s+(?:요구사항ID|화면ID|화면명|화면설명|메뉴경로|개발구분|개인정보등급|화면구성|처리흐름|이벤트\s*정의)\b|$)",
     re.DOTALL,
   )
   match = pattern.search(block_text)
   if not match:
     return ""
-  value = re.sub(r"\s+", " ", match.group(1)).strip()
-  return value
+  return clean_extracted_text_value(match.group(1))
 
 
 def is_bad_generated_title(value, screen_id, unit_test_id):
@@ -331,7 +378,17 @@ def is_bad_generated_title(value, screen_id, unit_test_id):
   return text in set(screen_parts + unit_parts)
 
 
-def normalize_test_cases(parsed_json, screen_id, unit_test_id, fallback_screen_name=""):
+def strip_leading_sequence_marker(value):
+  text = str(value or "").strip()
+  if not text:
+    return ""
+  text = re.sub(r"^\s*\d{1,3}\s*[\.\)]\s*", "", text).strip()
+  circled_pattern = re.compile(rf"^\s*[{re.escape(CIRCLED_NUMBERS)}]\s*")
+  text = circled_pattern.sub("", text).strip()
+  return text
+
+
+def normalize_test_cases(parsed_json, screen_id, unit_test_id, fallback_screen_name="", unit_test_title=""):
   if not isinstance(parsed_json, dict):
     raise ValueError("응답이 JSON 객체가 아닙니다.")
 
@@ -358,11 +415,16 @@ def normalize_test_cases(parsed_json, screen_id, unit_test_id, fallback_screen_n
     fixed["화면_ID"] = screen_id or fixed.get("화면_ID", "")
     fixed["단위시험_ID"] = unit_test_id or fixed.get("단위시험_ID", "")
     fixed["테스트_데이터"] = ""
+    fixed["테스트_케이스"] = strip_leading_sequence_marker(fixed.get("테스트_케이스", ""))
+    fixed["예상_결과"] = strip_leading_sequence_marker(fixed.get("예상_결과", ""))
     if fallback_screen_name:
       if is_bad_generated_title(fixed.get("화면명"), screen_id, unit_test_id):
         fixed["화면명"] = fallback_screen_name
-      if is_bad_generated_title(fixed.get("단위시험_명"), screen_id, unit_test_id):
-        fixed["단위시험_명"] = fallback_screen_name
+
+    title = unit_test_title or fallback_screen_name
+    if title:
+      fixed["단위시험_제목"] = title
+      fixed["단위시험_명"] = title
 
     if not fixed["순서"]:
       fixed["순서"] = idx
@@ -403,7 +465,7 @@ def sort_and_dedupe_cases(test_cases):
 
   return result
 
-def call_ollama(ollama_url, model_name, system_prompt, user_prompt, num_predict=8192, timeout=120):
+def call_ollama(ollama_url, model_name, system_prompt, user_prompt, num_predict=1024, timeout=60):
   if not ollama_url:
     raise ValueError("OLLAMA_URL 값이 비어 있습니다.")
 
@@ -590,6 +652,7 @@ def build_test_cases_from_text(
     screen_id = block["screen_id"]
     unit_test_id = block["unit_test_id"]
     fallback_screen_name = extract_field_value(block["text"], "화면명")
+    unit_test_title = str(block.get("section_title") or "").strip() or extract_block_section_title(block["text"]) or fallback_screen_name
     response_text = ""
     num_predict, request_timeout = get_llm_limits(expected_steps, block["text"])
     block_status_base = {
@@ -648,7 +711,7 @@ def build_test_cases_from_text(
       response_text = call_ollama(ollama_url, model_name, system_prompt, user_prompt, num_predict=num_predict, timeout=request_timeout)
       _check_cancel(cancel_check)
       parsed_json = parse_llm_json(response_text)
-      normalized_cases = normalize_test_cases(parsed_json, screen_id, unit_test_id, fallback_screen_name)
+      normalized_cases = normalize_test_cases(parsed_json, screen_id, unit_test_id, fallback_screen_name, unit_test_title)
 
       normalized_cases = sort_and_dedupe_cases(normalized_cases)
 
@@ -714,7 +777,7 @@ def build_test_cases_from_text(
         retry_text = call_ollama(ollama_url, model_name, system_prompt, retry_prompt, num_predict=num_predict, timeout=request_timeout)
         _check_cancel(cancel_check)
         retry_json = parse_llm_json(retry_text)
-        normalized_cases = normalize_test_cases(retry_json, screen_id, unit_test_id, fallback_screen_name)
+        normalized_cases = normalize_test_cases(retry_json, screen_id, unit_test_id, fallback_screen_name, unit_test_title)
 
         normalized_cases = sort_and_dedupe_cases(normalized_cases)
         print(f"[재호출 완료] {screen_id}: 생성 {len(normalized_cases)}개")
@@ -797,10 +860,10 @@ def save_test_cases_to_excel(test_cases, output_dir: Path, base_filename="genera
 
     current_row = 1
     common = group[0]
-    screen_name = common.get("화면명", "")
+    display_title = common.get("단위시험_제목") or common.get("단위시험_명") or common.get("화면명", "")
 
     # -- 타이틀 --
-    title = f"{group_idx}. {tc_id} - {screen_name}"
+    title = f"{group_idx}. {tc_id} - {display_title}"
     ws.cell(row=current_row, column=1, value=title).font = Font(bold=True, size=12)
     ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=5)
     ws.cell(row=current_row, column=1).alignment = Alignment(horizontal="left", vertical="center")
