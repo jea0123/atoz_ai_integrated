@@ -16,6 +16,7 @@ from openpyxl import load_workbook
 from app_runtime import RESULT_DIR, TEMP_DIR, log_event, log_message, remove_runtime_path
 from cancellation import CancelledRequest
 from document_update.hwpx_text import extract_document_text
+from document_update.runtime_conversion import prepare_target_file
 from qa_generation.generate_tc import (
     SIZE_LABELS,
     SIZE_ORDER,
@@ -30,12 +31,13 @@ from web_uploads import safe_relative_upload_path
 
 
 IGNORED_FOLDER_NAMES = {"bak", "backup", "백업"}
-DESIGN_DOCUMENT_SUFFIXES = {".pdf"}
+DESIGN_DOCUMENT_SUFFIXES = {".pdf", ".hwp", ".hwpx"}
 TC_TEMPLATE_SUFFIXES = {".hwpx"}
 TS_TEMPLATE_SUFFIXES = {".xlsx"}
 QA_SOURCE_SUFFIXES = DESIGN_DOCUMENT_SUFFIXES | TC_TEMPLATE_SUFFIXES | TS_TEMPLATE_SUFFIXES
 QA_UPLOAD_DUMP_DIRNAME = "qa-folder-dumps"
 REQ_ID_PATTERN = re.compile(r"SFR-[A-Z0-9]+(?:-[A-Z0-9]+)*", re.IGNORECASE)
+DESIGN_KEYWORDS = ("사용자인터페이스설계서", "사용자 인터페이스 설계서", "화면설계서", "화면정의서", "ui설계서")
 TC_KEYWORDS = (
     "단위시험케이스",
     "단위시험 케이스",
@@ -71,8 +73,59 @@ class QaFolderMatchingError(ValueError):
         self.payload = payload
 
 
+def prepare_ui_design_for_processing(ui_design: Path, temp_dir: Path) -> tuple[Path, bool]:
+    if ui_design.suffix.lower() == ".pdf":
+        return ui_design, False
+    return prepare_target_file(ui_design, temp_dir)
+
+
 def qa_batch_log(request_id: str, message: str) -> None:
     log_message(f"QA 배치[{request_id}] {message}")
+
+
+def qa_progress_log(request_id: str, requirement_id: str, message: str) -> None:
+    if "단위시험케이스 AI 생성 시작" in message:
+        match = re.search(r"화면 블록\s+(\d+)개", message)
+        block_count = match.group(1) if match else "-"
+        qa_batch_log(request_id, f"[{requirement_id}] 단위시험케이스 생성 시작 | 화면 {block_count}개")
+        return
+
+    if "단위시험케이스 AI 호출 중" in message:
+        match = re.search(r"(\d+)/(\d+).*화면=([^|\s]+).*timeout=(\d+)s", message)
+        if match:
+            current, total, screen_id, timeout = match.groups()
+            qa_batch_log(
+                request_id,
+                f"[{requirement_id}] 화면 처리 중 | {current}/{total} {screen_id} | timeout={timeout}초",
+            )
+        return
+
+    if "단위시험케이스 AI 응답 완료" in message:
+        match = re.search(r"(\d+)/(\d+).*화면=([^|\s]+).*생성\s+(\d+)건", message)
+        if match:
+            current, total, screen_id, count = match.groups()
+            qa_batch_log(
+                request_id,
+                f"[{requirement_id}] 화면 처리 완료 | {current}/{total} {screen_id} | 생성 {count}건",
+            )
+        return
+
+    if "단위시험케이스 AI 응답 보정 호출 중" in message:
+        match = re.search(r"화면=([^|\s]+).*timeout=(\d+)s", message)
+        if match:
+            screen_id, timeout = match.groups()
+            qa_batch_log(request_id, f"[{requirement_id}] 화면 응답 보정 중 | {screen_id} | timeout={timeout}초")
+        return
+
+    if "단위시험케이스 AI 응답 보정 완료" in message:
+        match = re.search(r"화면=([^|\s]+).*생성\s+(\d+)건", message)
+        if match:
+            screen_id, count = match.groups()
+            qa_batch_log(request_id, f"[{requirement_id}] 화면 응답 보정 완료 | {screen_id} | 생성 {count}건")
+        return
+
+    if "시간 초과" in message or "호출 실패" in message or "보정 실패" in message or "생성 0건" in message:
+        qa_batch_log(request_id, f"[{requirement_id}] {message}")
 
 
 def file_name(path: Path | str | None) -> str:
@@ -203,6 +256,7 @@ def mark_queued_blocks_interrupted(
 def prepare_requirement_processing_items(
         requirement_items: list[dict[str, object]],
         request_id: str,
+        temp_dir: Path,
 ) -> list[dict[str, object]]:
     prepared_items: list[dict[str, object]] = []
     for index, item in enumerate(requirement_items):
@@ -213,12 +267,18 @@ def prepare_requirement_processing_items(
             "_screen_block_count": 0,
             "_extracted_text": None,
             "_screen_blocks": None,
+            "_ui_design_processing_path": "",
+            "_ui_design_converted": False,
             "_preparse_error": "",
         }
         requirement_id = str(item.get("requirement_id") or "")
         ui_design = Path(str(item.get("ui_design_path") or ""))
         try:
-            extracted_text = extract_text_from_pdf(ui_design)
+            processing_design, converted = prepare_ui_design_for_processing(
+                ui_design,
+                temp_dir / "ui-design-processing" / safe_requirement_dirname(requirement_id or f"item-{index + 1}"),
+            )
+            extracted_text = extract_text_from_pdf(processing_design)
             screen_blocks = extract_screen_blocks(extracted_text)
             document_size = classify_document_size(len(screen_blocks))
             prepared_item.update({
@@ -226,6 +286,8 @@ def prepare_requirement_processing_items(
                 "_screen_block_count": len(screen_blocks),
                 "_extracted_text": extracted_text,
                 "_screen_blocks": screen_blocks,
+                "_ui_design_processing_path": str(processing_design),
+                "_ui_design_converted": converted,
             })
             qa_batch_log(
                 request_id,
@@ -327,6 +389,7 @@ def run_folder_qa_pipeline(
         unit_result_root: Path | None = None,
         ts_source_root: Path | None = None,
         integration_result_root: Path | None = None,
+        system_name: str = "",
         request_id: str | None = None,
         cancel_check: Callable[[], None] | None = None,
         status_callback: Callable[[dict[str, object]], None] | None = None,
@@ -423,7 +486,7 @@ def run_folder_qa_pipeline(
         active_requirement_id: str | None = None
         total_tc_count = 0
         total_ts_count = 0
-        processing_items = prepare_requirement_processing_items(requirement_items, request_id)
+        processing_items = prepare_requirement_processing_items(requirement_items, request_id, temp_dir)
 
         def get_requirement_blocks(requirement_id: str) -> list[dict[str, object]]:
             return sorted_block_statuses(block_status_by_requirement.get(requirement_id, {}))
@@ -486,7 +549,7 @@ def run_folder_qa_pipeline(
             item_integration_result_output_dir = req_temp_dir / "integration-result-output"
             try:
                 active_requirement_id = requirement_id
-                ui_design = Path(str(item["ui_design_path"]))
+                ui_design = Path(str(item.get("_ui_design_processing_path") or item["ui_design_path"]))
                 tc_template = Path(str(item["tc_template_path"]))
                 unit_result_template = Path(str(item["unit_result_template_path"]))
                 ts_template = Path(str(item["ts_template_path"]))
@@ -501,13 +564,9 @@ def run_folder_qa_pipeline(
                 emit_progress(item)
                 qa_batch_log(
                     request_id,
-                    f"[{requirement_id}] {index}/{len(processing_items)} 처리 시작 | 원래순서={int(item.get('_original_index') or 0) + 1}/{len(requirement_items)} | "
-                    f"문서={SIZE_LABELS.get(str(item.get('_document_size')), str(item.get('_document_size')))}({item.get('_document_size')}) | "
-                    f"입력 5종: 설계서={file_name(ui_design)}, "
-                    f"단위케이스={file_name(tc_template)}, "
-                    f"단위결과서={file_name(unit_result_template)}, "
-                    f"통합시나리오={file_name(ts_template)}, "
-                    f"통합결과서={file_name(integration_result_template)}",
+                    f"[{requirement_id}] 처리 시작 | {index}/{len(processing_items)} | "
+                    f"문서={SIZE_LABELS.get(str(item.get('_document_size')), str(item.get('_document_size')))} | "
+                    f"화면 {int(item.get('_screen_block_count') or 0)}개",
                 )
 
                 tc_payload = run_with_suppressed_output(
@@ -520,7 +579,7 @@ def run_folder_qa_pipeline(
                         extracted_text=str(item.get("_extracted_text") or ""),
                         screen_blocks=item.get("_screen_blocks") if isinstance(item.get("_screen_blocks"), list) else None,
                         cancel_check=cancel_check,
-                        progress_callback=lambda message: qa_batch_log(request_id, f"[{requirement_id}] {message}"),
+                        progress_callback=lambda message: qa_progress_log(request_id, requirement_id, message),
                         block_status_callback=lambda update: update_requirement_block_status(requirement_id, update),
                     )
                 )
@@ -553,7 +612,7 @@ def run_folder_qa_pipeline(
                     raise RuntimeError("교체할 단위시험결과서 HWPX가 생성되지 않았습니다.")
                 qa_batch_log(
                     request_id,
-                    f"[{requirement_id}] 단위시험결과서 생성 완료 | {file_name(unit_result_hwpx)}",
+                    f"[{requirement_id}] 단위시험결과서 생성 완료",
                 )
 
                 ts_payload = run_with_suppressed_output(
@@ -563,6 +622,7 @@ def run_folder_qa_pipeline(
                         ui_pdf_path=ui_design,
                         output_dir=item_ts_output_dir,
                         form_path=scenario_form_path,
+                        system_name=system_name,
                         cancel_check=cancel_check,
                     )
                 )
@@ -585,6 +645,7 @@ def run_folder_qa_pipeline(
                         ui_pdf_path=ui_design,
                         output_dir=item_integration_result_output_dir,
                         form_path=result_form_path,
+                        system_name=system_name,
                         cancel_check=cancel_check,
                     )
                 )
@@ -617,11 +678,7 @@ def run_folder_qa_pipeline(
                     placed["__requirement_original_index"] = int(item.get("_original_index") or 0)
                 qa_batch_log(
                     request_id,
-                    f"[{requirement_id}] 산출물 배치 완료 | "
-                    f"단위시험케이스={file_name(placed_for_requirement[0].get('path'))}, "
-                    f"단위시험결과서={file_name(placed_for_requirement[1].get('path'))}, "
-                    f"통합시험시나리오={file_name(placed_for_requirement[2].get('path'))}, "
-                    f"통합시험결과서={file_name(placed_for_requirement[3].get('path'))}",
+                    f"[{requirement_id}] 산출물 배치 완료 | 4개 파일 교체",
                 )
                 placed_files.extend(placed_for_requirement)
                 tc_count = int(tc_payload.get("count") or 0)
@@ -697,9 +754,7 @@ def run_folder_qa_pipeline(
             "완료 | "
             f"성공 {payload['processed_requirement_count']}/{len(requirement_items)}건 · "
             f"실패 {len(failed_items)}건 · "
-            f"TC {payload['tc_count']}행 · TS {payload['ts_count']}행 · "
-            f"배치 파일 {len(placed_files)}개"
-            f"{' (5종 세트 기준)' if placed_files else ''}",
+            f"배치 파일 {len(placed_files)}개",
         )
         return payload
     except QaFolderMatchingError:
@@ -743,7 +798,7 @@ def select_qa_source_files(
         and requirement_ids_from_path(path)
         and score_keywords(
             searchable_text(dump_root, path),
-            ("사용자인터페이스설계서", "사용자 인터페이스 설계서", "화면설계서", "화면정의서", "ui설계서"),
+            DESIGN_KEYWORDS,
         ) > 0
     ]
     return {
@@ -927,7 +982,7 @@ def collect_documents(root: Path | None, suffixes: set[str], label: str) -> list
 
 
 def collect_design_documents(root: Path | None) -> list[Path]:
-    # 사용자가 지정한 화면설계서 폴더에서 PDF 설계서를 모은다.
+    # 사용자가 지정한 화면설계서 폴더에서 PDF/HWPX 설계서를 모은다.
     return collect_documents(root, DESIGN_DOCUMENT_SUFFIXES, "화면설계서 폴더")
 
 
@@ -983,12 +1038,22 @@ def index_design_files_by_requirement(files: list[Path]) -> dict[str, dict[str, 
         if path.suffix.lower() not in DESIGN_DOCUMENT_SUFFIXES:
             continue
 
+        searchable = searchable_text(path.parent, path)
+        design_score = score_keywords(searchable, DESIGN_KEYWORDS)
+        if path.suffix.lower() in {".hwp", ".hwpx"} and design_score <= 0:
+            non_design_score = score_keywords(
+                searchable,
+                TC_KEYWORDS + UNIT_RESULT_KEYWORDS + INTEGRATION_RESULT_KEYWORDS,
+            )
+            if non_design_score > 0:
+                continue
+
         requirement_ids = requirement_ids_from_path(path)
         if not requirement_ids:
             requirement_ids = requirement_ids_from_document_text(path)
 
         for requirement_id in requirement_ids:
-            score = 1000 + score_keywords(searchable_text(path.parent, path), ("사용자인터페이스설계서", "화면설계서", "화면정의서"))
+            score = 1000 + design_score
             upsert_requirement_file(result, requirement_id, path, score)
 
     return result

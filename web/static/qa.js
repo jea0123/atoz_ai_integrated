@@ -67,6 +67,10 @@ function isTerminalQaFolderStatus(status) {
   return ["done", "error", "cancelled"].includes(status || "");
 }
 
+function isActiveQaFolderStatus(status) {
+  return ["queued", "running"].includes(status || "");
+}
+
 function setQaFolderFinalStatus(data, fallbackRoot = "") {
   if (data?.status === "cancelled") {
     setBadge("취소됨", "");
@@ -86,6 +90,12 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function formatUserErrorMessage(message) {
+  const text = String(message || "").trim();
+  if (!text) return "";
+  return text.split("|")[0].trim() || text;
 }
 
 function setBadge(text, mode) {
@@ -355,6 +365,131 @@ function renderSourceResults(sourceResults, options = {}) {
   `);
 }
 
+function renderIndividualGenerationResult(data, options = {}) {
+  const files = (data.download_files || data.files || []).filter((file) => file && file.download_url);
+  const sourceResults = Array.isArray(data.source_results) ? data.source_results : [];
+  const title = options.title || "생성 결과";
+  const itemLabel = options.itemLabel || "문서";
+  const countLabel = options.countLabel || "생성";
+  const fileLabel = options.fileLabel || "파일";
+  const totalItems = data.source_count ?? data.set_count ?? (sourceResults.filter((item) => !item.is_summary).length || 1);
+  const failedCount = data.failed_count ?? sourceResults.filter((item) => !item.ok && !item.is_summary).length;
+  const generatedCount = data.count ?? sourceResults.reduce((sum, item) => sum + Number(item.count || 0), 0);
+
+  function sourceTitle(item, index) {
+    if (item.source_tc || item.source_ui) return item.source_pdf || `${item.source_tc || "-"} + ${item.source_ui || "-"}`;
+    return item.source_pdf || `${itemLabel} ${index + 1}`;
+  }
+
+  function filesForSource(item) {
+    if (!sourceResults.length) return files;
+    const matched = files.filter((file) => {
+      if (item.source_pdf && file.source_pdf === item.source_pdf) return true;
+      if (item.source_tc && file.source_tc === item.source_tc) return true;
+      if (item.source_ui && file.source_ui === item.source_ui) return true;
+      return false;
+    });
+    if (matched.length) return matched;
+    return sourceResults.length === 1 ? files : [];
+  }
+
+  function renderDownloadButtons(downloadFiles) {
+    if (!downloadFiles.length) {
+      return `<p class="folder-qa-empty">생성된 다운로드 파일이 없습니다.</p>`;
+    }
+    return `
+      <div class="download-list individual-result-files">
+        ${downloadFiles.map((file) => `
+          <a class="download-button" href="${escapeHtml(file.download_url)}" download="${escapeHtml(file.download_name || file.name || "")}">
+            <span>${escapeHtml((file.kind || "file").toUpperCase())}</span>
+            <strong>${escapeHtml(file.download_name || file.name || "download")}</strong>
+          </a>
+        `).join("")}
+      </div>
+    `;
+  }
+
+  const resultItems = sourceResults.length ? sourceResults : [{
+    source_pdf: title,
+    ok: Boolean(data.ok),
+    count: generatedCount,
+    file_count: files.length,
+    error: data.error || "",
+    analysis: {},
+  }];
+
+  emptyState.hidden = true;
+  clearError();
+  downloadPanel.hidden = false;
+  downloadPanel.className = "download-panel";
+  downloadPanel.innerHTML = `
+    <div class="download-panel-head">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(itemLabel)} ${escapeHtml(totalItems)}개 · ${escapeHtml(fileLabel)} ${escapeHtml(files.length)}개${failedCount ? ` · 확인 필요 ${escapeHtml(failedCount)}개` : ""}</span>
+    </div>
+    <div class="source-result-overview">
+      <span>처리 ${escapeHtml(itemLabel)} <strong>${escapeHtml(totalItems)}</strong></span>
+      <span>${escapeHtml(countLabel)} <strong>${escapeHtml(generatedCount)}</strong></span>
+      <span>${escapeHtml(fileLabel)} <strong>${escapeHtml(files.length)}</strong></span>
+      <span>확인 필요 <strong>${escapeHtml(failedCount)}</strong></span>
+    </div>
+    <div class="folder-qa-result-list">
+      ${resultItems.map((item, index) => {
+        const analysis = item.analysis || {};
+        const isOk = Boolean(item.ok);
+        const isSummary = Boolean(item.is_summary);
+        const cardStatus = isSummary ? "status-queued" : isOk ? "status-done" : "status-error";
+        const statusText = isSummary ? "요약" : isOk ? "완료" : "확인 필요";
+        const downloadFiles = filesForSource(item);
+        const risks = analysis.risks || [];
+        const recommendations = analysis.recommendations || [];
+        const screens = analysis.screens || [];
+        const screenIds = screens
+          .map((screen) => typeof screen === "string" ? screen : screen?.screen_id)
+          .filter(Boolean)
+          .slice(0, 12);
+        return `
+          <article class="folder-qa-requirement ${isOk || isSummary ? "" : "has-errors"} ${cardStatus}">
+            <div class="folder-qa-requirement-head">
+              <div>
+                <strong>${escapeHtml(sourceTitle(item, index))}</strong>
+                <small>${escapeHtml(analysis.summary || (isOk ? "생성이 완료되었습니다." : item.error || "확인이 필요합니다."))}</small>
+              </div>
+              <div class="folder-qa-requirement-actions">
+                <span>${escapeHtml(statusText)}</span>
+              </div>
+            </div>
+            <div class="source-result-metrics">
+              <span>${escapeHtml(countLabel)} <strong>${escapeHtml(item.count ?? 0)}</strong></span>
+              <span>${escapeHtml(fileLabel)} <strong>${escapeHtml(downloadFiles.length || item.file_count || 0)}</strong></span>
+              ${screenIds.length ? `<span>화면 <strong>${escapeHtml(screenIds.length)}</strong></span>` : ""}
+            </div>
+            ${screenIds.length ? `
+              <div class="source-screen-list" aria-label="화면ID 목록">
+                ${screenIds.map((screenId) => `<span>${escapeHtml(screenId)}</span>`).join("")}
+              </div>
+            ` : ""}
+            ${item.error && !isOk ? `<p class="folder-qa-empty">${escapeHtml(formatUserErrorMessage(item.error))}</p>` : ""}
+            ${risks.length ? `
+              <div class="source-result-notes">
+                <b>확인할 내용</b>
+                <ul>${risks.map((risk) => `<li>${escapeHtml(risk)}</li>`).join("")}</ul>
+              </div>
+            ` : ""}
+            ${recommendations.length ? `
+              <div class="source-result-notes">
+                <b>${isSummary ? "매칭된 세트" : "권장 조치"}</b>
+                <ul>${recommendations.map((recommendation) => `<li>${escapeHtml(recommendation)}</li>`).join("")}</ul>
+              </div>
+            ` : ""}
+            ${isSummary ? "" : renderDownloadButtons(downloadFiles)}
+          </article>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
 function validateFiles(form, rules) {
   for (const [selector, message] of rules) {
     const input = form.querySelector(selector);
@@ -369,6 +504,43 @@ function validateFiles(form, rules) {
 function selectedFileName(inputId) {
   const input = document.querySelector(`#${inputId}`);
   return input?.files?.[0]?.name || "";
+}
+
+function selectedFileNames(inputId) {
+  const input = document.querySelector(`#${inputId}`);
+  return Array.from(input?.files || []).map((file) => fileDisplayPath(file));
+}
+
+function renderIndividualGenerationProgress(options = {}) {
+  const title = options.title || "생성 진행 중";
+  const itemLabel = options.itemLabel || "문서";
+  const items = options.items?.length ? options.items : [{ name: itemLabel }];
+
+  emptyState.hidden = true;
+  clearError();
+  downloadPanel.hidden = false;
+  downloadPanel.className = "download-panel";
+  downloadPanel.innerHTML = `
+    <div class="download-panel-head">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(itemLabel)} ${escapeHtml(items.length)}개 · 처리 중</span>
+    </div>
+    <div class="folder-qa-result-list">
+      ${items.map((item, index) => `
+        <article class="folder-qa-requirement status-running">
+          <div class="folder-qa-requirement-head">
+            <div>
+              <strong>${escapeHtml(item.name || `${itemLabel} ${index + 1}`)}</strong>
+              <small>${escapeHtml(item.detail || "생성 요청을 처리하고 있습니다.")}</small>
+            </div>
+            <div class="folder-qa-requirement-actions">
+              <span>진행 중</span>
+            </div>
+          </div>
+        </article>
+      `).join("")}
+    </div>
+  `;
 }
 
 function friendlyErrorInfo(message, taskName) {
@@ -394,7 +566,7 @@ function friendlyErrorInfo(message, taskName) {
         checks: [
           "check.html에서 문서 반영이 끝난 산출물 폴더 경로인지 확인하세요.",
           "다섯 문서가 함께 있다면 '추가 문서 폴더'를 선택하세요.",
-          "화면/사용자인터페이스설계서는 PDF 파일을 직접 업로드하세요.",
+          "화면/사용자인터페이스설계서는 PDF, HWP 또는 HWPX 파일을 직접 업로드하세요.",
           "여러 건이면 '화면설계서 폴더'에 전체 폴더 경로를 입력하면 하위 파일을 일괄 탐색합니다.",
           "업로드한 설계서와 QA 대상 산출물 폴더의 단위시험케이스/단위시험결과서/통합시험시나리오/통합시험결과서 파일명이 같은 SFR 요구사항 ID를 포함하는지 확인하세요.",
           "QA 대상 산출물 폴더 안에 단위시험케이스 양식이 없으면 TC HWPX를 기존 위치에 배치할 수 없습니다.",
@@ -434,11 +606,11 @@ function friendlyErrorInfo(message, taskName) {
       };
     }
 
-    if (rawMessage.includes("사용자인터페이스 설계서 문서를 선택하세요") || rawMessage.includes("사용자인터페이스 설계서 PDF를 선택하세요") || rawMessage.includes("ui_pdf") || rawMessage.includes("PDF 파일을 찾을 수 없습니다")) {
+    if (rawMessage.includes("사용자인터페이스 설계서 문서를 선택하세요") || rawMessage.includes("사용자인터페이스 설계서 PDF를 선택하세요") || rawMessage.includes("ui_pdf") || rawMessage.includes("사용자인터페이스설계서 파일을 찾을 수 없습니다") || rawMessage.includes("PDF 파일을 찾을 수 없습니다")) {
       return {
         summary: "'사용자인터페이스설계서' 파일을 확인하세요.",
         checks: [
-          "'사용자인터페이스설계서' 칸에는 PDF 파일을 넣어야 합니다.",
+          "'사용자인터페이스설계서' 칸에는 PDF, HWP 또는 HWPX 파일을 넣어야 합니다.",
           "문서 안에 화면 ID, 화면명, 처리흐름 정보가 포함되어 있어야 단위시험 케이스를 만들 수 있습니다.",
           "파일이 비어 있거나 텍스트를 추출할 수 없는 문서라면 다른 파일로 다시 선택하세요.",
         ],
@@ -540,7 +712,7 @@ function showGenerationError(error, taskName) {
   const title = taskName === "folder"
     ? "산출물 QA 생성 실패"
     : taskName === "ts" ? "통합시험 시나리오 생성 실패" : "단위시험 케이스 생성 실패";
-  const info = friendlyErrorInfo(error.message, taskName);
+  const info = friendlyErrorInfo(formatUserErrorMessage(error.message), taskName);
   resultTitle.textContent = title;
   resultMeta.textContent = "아래 안내를 확인한 뒤 파일을 다시 선택하세요.";
   renderErrorPanel(info);
@@ -586,16 +758,13 @@ async function cancelQaFolderJob(jobId) {
   await postJson("/api/cancel-request", { request_id: jobId });
 }
 
-async function retryQaFolderBlock(jobId, requirementId, block) {
-  if (!jobId || !requirementId || !block) return null;
+async function retryQaFolderRequirement(jobId, requirementId) {
+  if (!jobId || !requirementId) return null;
   setBadge("재생성중", "busy");
-  resultMeta.textContent = `${requirementId} 재생성을 시작했습니다. 실패한 화면ID를 다시 처리하고 산출물을 재배치합니다.`;
+  resultMeta.textContent = `${requirementId} 실패 화면 재생성을 시작했습니다.`;
   return postJson("/api/retry-qa-folder-block", {
     job_id: jobId,
     requirement_id: requirementId,
-    screen_id: block.screen_id || "",
-    unit_test_id: block.unit_test_id || "",
-    original_index: block.original_index ?? "",
   });
 }
 
@@ -748,6 +917,7 @@ function renderFolderQaResult(data) {
     const jobId = data.job_id || data.request_id || "";
     const canCancelJob = !isPreview && jobId && ["queued", "running"].includes(data.status || "");
     const cancelRequested = jobId && cancelRequestedJobIds.has(jobId);
+    const showFileDetails = isPreview || isTerminalQaFolderStatus(data.status);
   emptyState.hidden = Boolean(placedFiles.length || sourceFiles.length || requirementItems.length || missingRequirements.length);
   clearError();
 
@@ -819,16 +989,13 @@ function renderFolderQaResult(data) {
       !isPreview && backupFiles.length ? "백업 있음" : "",
     ].filter(Boolean).join(" · ");
 
-    const sourceRows = sortedSources.map((file) => renderPathItem(
-      roleLabels[file.role] || file.label || file.role || "입력 파일",
-      file.path,
-      { pathLabel: "파일 위치" },
-    )).join("");
-    const outputRows = outputs.map((file) => renderPathItem(
-      resultLabels[file.kind] || file.label || file.kind || "배치 파일",
-      file.path,
-      { pathLabel: "배치 위치", backupPath: file.backup_path || "" },
-    )).join("");
+    const sourceRows = sortedSources.map((file) => renderPathItem(file.path, {
+      pathLabel: "파일 위치",
+    })).join("");
+    const outputRows = outputs.map((file) => renderPathItem(file.path, {
+      pathLabel: "배치 위치",
+      backupPath: file.backup_path || "",
+    })).join("");
 
     if (!sourceRows && !outputRows) {
       return `
@@ -839,24 +1006,25 @@ function renderFolderQaResult(data) {
       `;
     }
 
-    function renderPathItem(label, path, options = {}) {
+    function renderPathItem(path, options = {}) {
       const folder = dirname(path);
       const backupFolder = dirname(options.backupPath || "");
       const hasPathDetails = Boolean(folder || backupFolder);
       return `
         <article class="folder-qa-path-item">
-          <span class="folder-qa-path-kind">${escapeHtml(label)}</span>
           <strong>${escapeHtml(basename(path))}</strong>
-          <div class="folder-qa-path-meta">
-            ${options.backupPath ? `<em>백업 있음</em>` : ""}
-            ${hasPathDetails ? `
-              <details class="folder-qa-path-inline">
-                <summary>경로 보기</summary>
-                ${folder ? `<code title="${escapeHtml(path || "")}"><span>${escapeHtml(options.pathLabel || "파일 위치")}</span>${escapeHtml(folder)}</code>` : ""}
-                ${backupFolder ? `<code title="${escapeHtml(options.backupPath || "")}"><span>백업 위치</span>${escapeHtml(backupFolder)}</code>` : ""}
-              </details>
-            ` : ""}
-          </div>
+          ${hasPathDetails ? `
+            <details class="folder-qa-path-inline">
+              <summary>
+                ${options.backupPath ? `<em>백업 있음</em>` : ""}
+                <span>경로 보기</span>
+              </summary>
+            </details>
+            <div class="folder-qa-path-panel">
+              ${folder ? `<code title="${escapeHtml(path || "")}"><span>${escapeHtml(options.pathLabel || "파일 위치")}</span>${escapeHtml(folder)}</code>` : ""}
+              ${backupFolder ? `<code title="${escapeHtml(options.backupPath || "")}"><span>백업 위치</span>${escapeHtml(backupFolder)}</code>` : ""}
+            </div>
+          ` : ""}
         </article>
       `;
     }
@@ -888,8 +1056,13 @@ function renderFolderQaResult(data) {
   function renderBlockTree(item) {
     const blocks = Array.isArray(item.blocks) ? item.blocks : [];
     if (!blocks.length || isPreview) return "";
-    const requirementId = item.requirement_id || "";
-    const canRetryBlocks = jobId && ["error", "done"].includes(data.status || "");
+    const statusLabels = {
+      queued: "대기",
+      running: "진행 중",
+      updated: "완료",
+      error: "실패",
+      interrupted: "중단",
+    };
 
     return `
       <div class="folder-qa-block-tree">
@@ -898,26 +1071,26 @@ function renderFolderQaResult(data) {
             const status = block.status || "queued";
             const statusClass = ["queued", "running", "updated", "error", "interrupted"].includes(status) ? status : "queued";
             const blockLabel = block.screen_id || block.unit_test_id || `블록 ${Number(block.display_index || 0) || "-"}`;
-            const retryPayload = encodeURIComponent(JSON.stringify({
-              job_id: jobId,
-              requirement_id: requirementId,
-              screen_id: block.screen_id || "",
-              unit_test_id: block.unit_test_id || "",
-              original_index: block.original_index ?? "",
-            }));
+            const blockMeta = [
+              block.expected_steps !== undefined && block.expected_steps !== null ? `처리흐름 ${block.expected_steps}개` : "",
+              block.num_predict !== undefined && block.num_predict !== null ? `num_predict ${block.num_predict}` : "",
+              block.timeout !== undefined && block.timeout !== null ? `timeout ${block.timeout}초` : "",
+              block.generated_count !== undefined && block.generated_count !== null ? `생성 ${block.generated_count}건` : "",
+            ].filter(Boolean).join(" · ");
+
+            const blockError = formatUserErrorMessage(block.error);
 
             return `
               <article class="folder-qa-block ${statusClass}">
                 <div class="folder-qa-block-main">
                   <span class="folder-qa-block-title">
                     <strong>${escapeHtml(blockLabel)}</strong>
+                    ${blockMeta ? `<small>${escapeHtml(blockMeta)}</small>` : ""}
                   </span>
-                  ${block.error ? `<p>${escapeHtml(block.error)}</p>` : ""}
+                  ${blockError ? `<p>${escapeHtml(blockError)}</p>` : ""}
                 </div>
                 <div class="folder-qa-block-actions">
-                  ${canRetryBlocks && status === "error" ? `
-                    <button class="folder-qa-retry-button" type="button" data-retry-qa-block="${escapeHtml(retryPayload)}">재생성</button>
-                  ` : ""}
+                  <span class="folder-qa-block-status ${statusClass}">${escapeHtml(statusLabels[statusClass] || "대기")}</span>
                 </div>
               </article>
             `;
@@ -945,8 +1118,24 @@ function renderFolderQaResult(data) {
     ].filter(Boolean).join(" · ");
   }
 
+  function getFailedBlocks(item) {
+    const blocks = Array.isArray(item.blocks) ? item.blocks : [];
+    return blocks.filter((block) => block.status === "error");
+  }
+
   function renderRequirementCards() {
     if (!requirementIds.length) {
+      if (isActiveQaFolderStatus(data.status)) {
+        return `
+          <article class="folder-qa-requirement status-running">
+            <div class="folder-qa-requirement-head">
+              <strong>입력 파일 확인 중</strong>
+              <span>진행 중</span>
+            </div>
+            <p class="folder-qa-empty">매칭된 요구사항을 불러오고 있습니다.</p>
+          </article>
+        `;
+      }
       return `
         <article class="folder-qa-requirement has-errors">
           <div class="folder-qa-requirement-head">
@@ -966,6 +1155,12 @@ function renderFolderQaResult(data) {
       const sources = sourceByRequirement.get(requirementId) || [];
       const outputs = placedByRequirement.get(requirementId) || [];
       const blockSummary = getBlockSummary(item);
+      const failedBlocks = getFailedBlocks(item);
+      const canRetryRequirement = jobId && ["error", "done"].includes(data.status || "") && failedBlocks.length > 0;
+      const retryRequirementPayload = encodeURIComponent(JSON.stringify({
+        job_id: jobId,
+        requirement_id: requirementId,
+      }));
       const statusText = isError
         ? "실패"
         : isRunning
@@ -991,13 +1186,60 @@ function renderFolderQaResult(data) {
               <strong>${escapeHtml(requirementId)}</strong>
               ${blockSummary ? `<small>${escapeHtml(blockSummary)}</small>` : ""}
             </div>
-            <span>${escapeHtml(statusText)}</span>
+            <div class="folder-qa-requirement-actions">
+              ${canRetryRequirement ? `
+                <button class="folder-qa-retry-button" type="button" data-retry-qa-requirement="${escapeHtml(retryRequirementPayload)}">재생성</button>
+              ` : ""}
+              <span>${escapeHtml(statusText)}</span>
+            </div>
           </div>
           ${renderBlockTree(item)}
-          ${renderFileDetails(sources, outputs)}
+          ${showFileDetails ? renderFileDetails(sources, outputs) : ""}
         </article>
       `;
     }).join("");
+  }
+
+  function renderJobSummary() {
+    if (isPreview) {
+      return [
+        `${data.requirement_count ?? 0}개 요구사항`,
+        `입력 ${sourceFiles.length}개`,
+      ].join(" · ");
+    }
+    return [
+      `${data.processed_requirement_count ?? 0}/${data.requirement_count ?? 0}개 요구사항`,
+      `입력 ${sourceFiles.length}개`,
+      `생성 ${placedFiles.length}개`,
+    ].join(" · ");
+  }
+
+  function renderRoleCounts() {
+    if (!missingRequirements.length) return "";
+    return `
+      <div class="role-count-list">
+        <article>
+          <span>사용자인터페이스설계서</span>
+          <strong>${escapeHtml(roleCounts.ui_design ?? "-")}</strong>
+        </article>
+        <article>
+          <span>단위시험 케이스</span>
+          <strong>${escapeHtml(roleCounts.tc_template ?? "-")}</strong>
+        </article>
+        <article>
+          <span>단위시험 결과서</span>
+          <strong>${escapeHtml(roleCounts.unit_result_template ?? "-")}</strong>
+        </article>
+        <article>
+          <span>통합시험 시나리오</span>
+          <strong>${escapeHtml(roleCounts.ts_template ?? "-")}</strong>
+        </article>
+        <article>
+          <span>통합시험 결과서</span>
+          <strong>${escapeHtml(roleCounts.integration_result_template ?? "-")}</strong>
+        </article>
+      </div>
+    `;
   }
 
   downloadPanel.hidden = false;
@@ -1005,7 +1247,7 @@ function renderFolderQaResult(data) {
     <div class="download-panel-head">
       <strong>${isPreview ? "QA 매칭 확인" : data.ok === false ? "QA 생성 현황" : "QA 배치 결과"}</strong>
       <div class="folder-qa-job-actions">
-        <span>${isPreview ? `${data.requirement_count ?? 0}개 요구사항` : `${data.processed_requirement_count ?? 0}/${data.requirement_count ?? 0}개 요구사항`}</span>
+        <span>${escapeHtml(renderJobSummary())}</span>
         ${canCancelJob ? `
           <button class="folder-qa-cancel-button" type="button" data-cancel-qa-job="${escapeHtml(jobId)}" ${cancelRequested ? "disabled" : ""}>
             ${cancelRequested ? "취소 요청됨" : "취소"}
@@ -1013,28 +1255,7 @@ function renderFolderQaResult(data) {
         ` : ""}
       </div>
     </div>
-    <div class="role-count-list">
-      <article>
-        <span>사용자인터페이스설계서</span>
-        <strong>${escapeHtml(roleCounts.ui_design ?? "-")}</strong>
-      </article>
-      <article>
-        <span>단위시험 케이스</span>
-        <strong>${escapeHtml(roleCounts.tc_template ?? "-")}</strong>
-      </article>
-      <article>
-        <span>단위시험 결과서</span>
-        <strong>${escapeHtml(roleCounts.unit_result_template ?? "-")}</strong>
-      </article>
-      <article>
-        <span>통합시험 시나리오</span>
-        <strong>${escapeHtml(roleCounts.ts_template ?? "-")}</strong>
-      </article>
-      <article>
-        <span>통합시험 결과서</span>
-        <strong>${escapeHtml(roleCounts.integration_result_template ?? "-")}</strong>
-      </article>
-    </div>
+    ${renderRoleCounts()}
     <div class="folder-qa-result-list">
       ${renderRequirementCards()}
     </div>
@@ -1149,8 +1370,6 @@ async function runFolderQa(event) {
     const jobId = job.job_id || job.request_id || "";
     rememberQaFolderJob(jobId);
     resultMeta.textContent = `QA 생성 작업을 시작했습니다: ${jobId || "-"}`;
-    renderFolderQaResult(job);
-
     const data = await pollQaFolderJob(jobId, request);
     setQaFolderFinalStatus(data, dumpRoot || sourceRoot);
     renderFolderQaResult(data);
@@ -1173,7 +1392,7 @@ async function runTcGeneration(event) {
   event.preventDefault();
   if (!validateFiles(tcForm, [
     ["#tcTemplateHwpx", "기존 단위시험 케이스 HWPX를 선택하세요."],
-    ["#tcUiPdf", "사용자인터페이스 설계서 PDF를 선택하세요."],
+    ["#tcUiPdf", "사용자인터페이스 설계서 문서를 선택하세요."],
   ])) return;
 
   setBadge("처리중", "busy");
@@ -1182,6 +1401,14 @@ async function runTcGeneration(event) {
   clearError();
   resultTitle.textContent = "단위시험 케이스 생성";
   resultMeta.textContent = "요청 처리 중입니다.";
+  renderIndividualGenerationProgress({
+    title: "단위시험 케이스 생성 진행",
+    itemLabel: "설계서",
+    items: selectedFileNames("tcUiPdf").map((name) => ({
+      name,
+      detail: "단위시험 케이스를 생성하고 있습니다.",
+    })),
+  });
 
   const request = beginCancelableRequest();
 
@@ -1191,12 +1418,11 @@ async function runTcGeneration(event) {
     const sourceCount = data.source_count ?? data.source_results?.length ?? 1;
     const failedCount = data.failed_count ?? 0;
     resultMeta.textContent = `처리 설계서 ${sourceCount}개 · 생성 행 수 ${data.count ?? 0}개 · 다운로드 ${data.download_files?.length || 0}개${failedCount ? ` · 실패 ${failedCount}개` : ""}`;
-    renderDownloads(data.download_files || data.files, "단위시험 케이스 파일");
-    renderSourceResults(data.source_results || [], {
-      title: "단위시험 케이스 사전 분석",
+    renderIndividualGenerationResult(data, {
+      title: "단위시험 케이스 생성 결과",
       itemLabel: "설계서",
       countLabel: "생성 행",
-      fileLabel: "생성 파일",
+      fileLabel: "다운로드",
     });
   } catch (error) {
     if (isAbortError(error)) {
@@ -1215,7 +1441,7 @@ async function runTsGeneration(event) {
   if (!validateFiles(tsForm, [
     ["#tsTemplateXlsx", "기존 통합시험 시나리오 XLSX를 선택하세요."],
     ["#tsTcXlsx", "단위시험 케이스 XLSX를 선택하세요."],
-    ["#tsUiPdf", "사용자인터페이스설계서 PDF를 선택하세요."],
+    ["#tsUiPdf", "사용자인터페이스설계서 문서를 선택하세요."],
   ])) return;
 
   setBadge("처리중", "busy");
@@ -1224,6 +1450,19 @@ async function runTsGeneration(event) {
   clearError();
   resultTitle.textContent = "통합시험 시나리오 생성";
   resultMeta.textContent = "요청 처리 중입니다.";
+  const tcNames = selectedFileNames("tsTcXlsx").map((name) => ({
+    name,
+    detail: "통합시험 시나리오 생성을 준비하고 있습니다.",
+  }));
+  const uiNames = selectedFileNames("tsUiPdf").map((name) => ({
+    name,
+    detail: "화면설계서 매칭을 확인하고 있습니다.",
+  }));
+  renderIndividualGenerationProgress({
+    title: "통합시험 시나리오 생성 진행",
+    itemLabel: "파일",
+    items: [...tcNames, ...uiNames],
+  });
 
   const request = beginCancelableRequest();
 
@@ -1233,14 +1472,11 @@ async function runTsGeneration(event) {
     const setCount = data.set_count ?? data.source_results?.length ?? 1;
     const failedCount = data.failed_count ?? 0;
     resultMeta.textContent = `처리 세트 ${setCount}개 · 다운로드 ${data.download_files?.length || 0}개${failedCount ? ` · 확인 필요 ${failedCount}개` : ""}`;
-    renderDownloads(data.download_files || data.files, "통합시험 시나리오 파일", { plainPanel: true });
-    renderSourceResults(data.source_results || [], {
-      title: "통합시험 시나리오 세트 분석",
+    renderIndividualGenerationResult(data, {
+      title: "통합시험 시나리오 생성 결과",
       itemLabel: "세트",
-      fileLabel: "생성 파일",
-      primaryTotalLabel: "화면",
-      showPrimaryTotal: false,
-      showCountMetric: false,
+      countLabel: "생성 행",
+      fileLabel: "다운로드",
     });
   } catch (error) {
     if (isAbortError(error)) {
@@ -1278,13 +1514,13 @@ downloadPanel?.addEventListener("click", async (event) => {
 });
 downloadPanel?.addEventListener("click", async (event) => {
   const button = event.target instanceof Element
-    ? event.target.closest("[data-retry-qa-block]")
+    ? event.target.closest("[data-retry-qa-requirement]")
     : null;
   if (!button) return;
 
   let payload = {};
   try {
-    payload = JSON.parse(decodeURIComponent(button.dataset.retryQaBlock || "{}"));
+    payload = JSON.parse(decodeURIComponent(button.dataset.retryQaRequirement || "{}"));
   } catch {
     payload = {};
   }
@@ -1296,10 +1532,9 @@ downloadPanel?.addEventListener("click", async (event) => {
 
   const request = beginCancelableRequest();
   try {
-    const job = await retryQaFolderBlock(jobId, requirementId, payload);
+    const job = await retryQaFolderRequirement(jobId, requirementId);
     const nextJobId = job?.job_id || job?.request_id || jobId;
     rememberQaFolderJob(nextJobId);
-    renderFolderQaResult(job);
     const data = await pollQaFolderJob(nextJobId, request);
     setQaFolderFinalStatus(data);
     renderFolderQaResult(data);
