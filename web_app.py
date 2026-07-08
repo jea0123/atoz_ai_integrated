@@ -1274,6 +1274,7 @@ class WebHandler(BaseHTTPRequestHandler):
                         unit_result_root=Path(fields.get("unit_result_root", "")) if fields.get("unit_result_root") else None,
                         ts_source_root=Path(fields.get("ts_source_root", "")) if fields.get("ts_source_root") else None,
                         integration_result_root=Path(fields.get("integration_result_root", "")) if fields.get("integration_result_root") else None,
+                        system_name=str(fields.get("system_name") or "").strip(),
                         request_id=request_id,
                         cancel_check=cancel_checker(request_id),
                         status_callback=lambda updates: update_qa_folder_job(request_id, **updates),
@@ -1346,6 +1347,7 @@ class WebHandler(BaseHTTPRequestHandler):
                         unit_result_root=Path(str(fields.get("unit_result_root", ""))) if fields.get("unit_result_root") else None,
                         ts_source_root=Path(str(fields.get("ts_source_root", ""))) if fields.get("ts_source_root") else None,
                         integration_result_root=Path(str(fields.get("integration_result_root", ""))) if fields.get("integration_result_root") else None,
+                        system_name=str(fields.get("system_name") or "").strip(),
                         request_id=job_id,
                         cancel_check=cancel_checker(job_id),
                         status_callback=lambda updates: merge_qa_folder_retry_update(job_id, requirement_id, **updates),
@@ -1417,6 +1419,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 unit_result_root=Path(fields.get("unit_result_root", "")) if fields.get("unit_result_root") else None,
                 ts_source_root=Path(fields.get("ts_source_root", "")) if fields.get("ts_source_root") else None,
                 integration_result_root=Path(fields.get("integration_result_root", "")) if fields.get("integration_result_root") else None,
+                system_name=str(fields.get("system_name") or "").strip(),
                 request_id=request_id,
                 cancel_check=check_cancel,
             )
@@ -1613,6 +1616,7 @@ class WebHandler(BaseHTTPRequestHandler):
                         form_path=TS_TEMPLATE_PATH,
                         req_mapping=ui_item.get("req_mapping") if isinstance(ui_item.get("req_mapping"), dict) else None,
                         unit_test_data=tc_item.get("unit_test_data") if isinstance(tc_item.get("unit_test_data"), list) else None,
+                        system_name=str(fields.get("system_name") or "").strip(),
                         log_progress=index == 1,
                         cancel_check=check_cancel,
                     )

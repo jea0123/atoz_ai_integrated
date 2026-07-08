@@ -389,6 +389,7 @@ def run_folder_qa_pipeline(
         unit_result_root: Path | None = None,
         ts_source_root: Path | None = None,
         integration_result_root: Path | None = None,
+        system_name: str = "",
         request_id: str | None = None,
         cancel_check: Callable[[], None] | None = None,
         status_callback: Callable[[dict[str, object]], None] | None = None,
@@ -621,6 +622,7 @@ def run_folder_qa_pipeline(
                         ui_pdf_path=ui_design,
                         output_dir=item_ts_output_dir,
                         form_path=scenario_form_path,
+                        system_name=system_name,
                         cancel_check=cancel_check,
                     )
                 )
@@ -643,6 +645,7 @@ def run_folder_qa_pipeline(
                         ui_pdf_path=ui_design,
                         output_dir=item_integration_result_output_dir,
                         form_path=result_form_path,
+                        system_name=system_name,
                         cancel_check=cancel_check,
                     )
                 )

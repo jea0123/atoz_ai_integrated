@@ -6,6 +6,7 @@ import openpyxl
 from openpyxl.styles import Border, Side
 
 from qa_generation.generate_ts import (
+    build_test_scenarios_from_unit_tests,
     save_integration_test_results_to_excel,
     save_test_scenarios_to_excel,
 )
@@ -85,6 +86,15 @@ def sample_scenarios():
 
 
 class GenerateTsSheetGroupingTest(unittest.TestCase):
+    def test_build_scenarios_uses_system_name(self):
+        scenarios = build_test_scenarios_from_unit_tests(
+            [{"화면_ID": "UI-IIL-002-01-01-01", "테스트_케이스": "조회한다."}],
+            author="작성자",
+            system_name="수입식품통합시스템",
+        )
+
+        self.assertEqual("수입식품통합시스템", scenarios[0]["시스템"])
+
     def test_scenario_workbook_uses_requirement_sheet_and_repeated_blocks(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)

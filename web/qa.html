@@ -104,6 +104,13 @@
                   </details>
                 </div>
               </section>
+              <fieldset class="qa-system-fields">
+                <legend>통합시험 정보</legend>
+                <label class="field qa-system-name-field" for="qaSystemName">
+                  <span>시스템</span>
+                  <input id="qaSystemName" name="system_name" type="text" autocomplete="off" placeholder="시스템명">
+                </label>
+              </fieldset>
               <button class="primary-button folder-preview-button" id="folderPreviewButton" type="button">
                 <span>✓</span>
                 매칭 확인
@@ -164,6 +171,10 @@
                   <span class="file-mark">DOC</span>
                   <strong>사용자인터페이스설계서</strong>
                   <small data-file-label="tsUiPdf">파일 선택</small>
+                </label>
+                <label class="field qa-system-field" for="tsSystemName">
+                  <span>시스템</span>
+                  <input id="tsSystemName" name="system_name" type="text" autocomplete="off" placeholder="시스템명">
                 </label>
                 <button class="primary-button" id="tsButton" type="submit">생성</button>
               </form>

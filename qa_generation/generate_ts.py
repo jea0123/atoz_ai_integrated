@@ -209,7 +209,7 @@ def extract_cover_author_from_workbook(workbook_path):
 
   return ""
 
-def build_test_scenarios_from_unit_tests(unit_test_data, author=""):
+def build_test_scenarios_from_unit_tests(unit_test_data, author="", system_name=""):
   scenarios = []
   sequence_by_scenario = {}
   scenario_name_by_id = {}
@@ -228,7 +228,7 @@ def build_test_scenarios_from_unit_tests(unit_test_data, author=""):
       scenario_name_by_id[scenario_id] = scenario_name
 
     scenarios.append({
-      "시스템": "",
+      "시스템": system_name,
       "작성자": author,
       "테스트_기간": "",
       "시나리오ID": scenario_id,
@@ -597,6 +597,7 @@ def generate_test_scenarios(
     form_path: Path,
     req_mapping: dict[str, str] | None = None,
     unit_test_data: list[dict] | None = None,
+    system_name: str = "",
     log_progress: bool = True,
     cancel_check: Callable[[], None] | None = None,
 ) -> dict:
@@ -650,7 +651,7 @@ def generate_test_scenarios(
         screen_id = data.get("화면_ID", "").strip()
         data["요구사항_ID"] = req_mapping.get(screen_id, "")
 
-    ts_result = build_test_scenarios_from_unit_tests(unit_test_data, author=cover_author)
+    ts_result = build_test_scenarios_from_unit_tests(unit_test_data, author=cover_author, system_name=system_name)
     _check_cancel(cancel_check)
 
     if not ts_result:
@@ -690,6 +691,7 @@ def generate_integration_test_results(
     form_path: Path,
     req_mapping: dict[str, str] | None = None,
     unit_test_data: list[dict] | None = None,
+    system_name: str = "",
     cancel_check: Callable[[], None] | None = None,
 ) -> dict:
     _check_cancel(cancel_check)
@@ -742,7 +744,7 @@ def generate_integration_test_results(
         screen_id = data.get("화면_ID", "").strip()
         data["요구사항_ID"] = req_mapping.get(screen_id, "")
 
-    result_rows = build_test_scenarios_from_unit_tests(unit_test_data, author=cover_author)
+    result_rows = build_test_scenarios_from_unit_tests(unit_test_data, author=cover_author, system_name=system_name)
     _check_cancel(cancel_check)
     if not result_rows:
         return {
