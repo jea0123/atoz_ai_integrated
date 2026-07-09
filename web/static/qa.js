@@ -611,7 +611,7 @@ function friendlyErrorInfo(message, taskName) {
         summary: "'사용자인터페이스설계서' 파일을 확인하세요.",
         checks: [
           "'사용자인터페이스설계서' 칸에는 PDF, HWP 또는 HWPX 파일을 넣어야 합니다.",
-          "문서 안에 화면 ID, 화면명, 처리흐름 정보가 포함되어 있어야 단위시험 케이스를 만들 수 있습니다.",
+          "문서 안에 화면 ID, 화면명, 처리흐름, 이벤트 정의 정보가 포함되어 있어야 단위시험 케이스를 만들 수 있습니다.",
           "파일이 비어 있거나 텍스트를 추출할 수 없는 문서라면 다른 파일로 다시 선택하세요.",
         ],
         detail,
@@ -634,7 +634,7 @@ function friendlyErrorInfo(message, taskName) {
       return {
         summary: "사용자인터페이스설계서에서 생성할 테스트 케이스를 찾지 못했습니다.",
         checks: [
-          "문서에 화면 ID와 처리흐름이 포함되어 있는지 확인하세요.",
+          "문서에 화면 ID와 처리흐름, 이벤트 정의가 포함되어 있는지 확인하세요.",
           "스캔 이미지 위주의 PDF나 이미지형 문서라면 텍스트 추출이 되지 않아 생성 결과가 없을 수 있습니다.",
           "Ollama 서버와 모델이 정상 동작 중인지 확인한 뒤 다시 시도하세요.",
         ],
@@ -1053,8 +1053,25 @@ function renderFolderQaResult(data) {
     `;
   }
 
+  function getBlockDisplayOrder(block, fallbackIndex) {
+    const originalIndex = Number(block?.original_index);
+    if (Number.isFinite(originalIndex)) return originalIndex;
+    const displayIndex = Number(block?.display_index);
+    if (Number.isFinite(displayIndex)) return displayIndex - 1;
+    return fallbackIndex;
+  }
+
+  function sortBlocksByDisplayOrder(blocks) {
+    return [...blocks].sort((left, right) => {
+      const leftOrder = getBlockDisplayOrder(left, blocks.indexOf(left));
+      const rightOrder = getBlockDisplayOrder(right, blocks.indexOf(right));
+      if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+      return String(left.screen_id || left.unit_test_id || "").localeCompare(String(right.screen_id || right.unit_test_id || ""));
+    });
+  }
+
   function renderBlockTree(item) {
-    const blocks = Array.isArray(item.blocks) ? item.blocks : [];
+    const blocks = Array.isArray(item.blocks) ? sortBlocksByDisplayOrder(item.blocks) : [];
     if (!blocks.length || isPreview) return "";
     const statusLabels = {
       queued: "대기",
@@ -1072,7 +1089,7 @@ function renderFolderQaResult(data) {
             const statusClass = ["queued", "running", "updated", "error", "interrupted"].includes(status) ? status : "queued";
             const blockLabel = block.screen_id || block.unit_test_id || `블록 ${Number(block.display_index || 0) || "-"}`;
             const blockMeta = [
-              block.expected_steps !== undefined && block.expected_steps !== null ? `처리흐름 ${block.expected_steps}개` : "",
+              block.expected_steps !== undefined && block.expected_steps !== null ? `분석 항목 ${block.expected_steps}개` : "",
               block.num_predict !== undefined && block.num_predict !== null ? `num_predict ${block.num_predict}` : "",
               block.timeout !== undefined && block.timeout !== null ? `timeout ${block.timeout}초` : "",
               block.generated_count !== undefined && block.generated_count !== null ? `생성 ${block.generated_count}건` : "",

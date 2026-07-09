@@ -140,6 +140,70 @@ class GenerateTcTextExtractionTest(unittest.TestCase):
         self.assertEqual((2048, 90), generate_tc.get_llm_limits(4, "x"))
         self.assertEqual((4096, 180), generate_tc.get_llm_limits(9, "x"))
 
+    def test_event_definition_and_flow_are_compared_for_generation_basis(self):
+        block_text = """4.1. 내부사용자관리
+화면ID UI-SFD-001-01-01
+화면명 내부사용자관리
+처리흐름
+① 검색조건을 입력 후 검색 버튼을 클릭한다.
+② 내부사용자 목록이 검색된다.
+이벤트 정의
+순번 이벤트명 처리설명
+1 초기화 버튼 클릭 검색조건을 초기화한다.
+2 검색 버튼 클릭 내부사용자 목록을 조회한다.
+3 행 선택 조회 결과 목록 중 하나의 행이 선택된다.
+4 저장 버튼 클릭 변경한 사용자 상세 정보를 저장한다.
+"""
+        basis = generate_tc.get_test_case_generation_basis(block_text)
+
+        self.assertEqual("event_flow_compare", basis["basis"])
+        self.assertEqual(4, basis["expected_steps"])
+        self.assertEqual(["초기화 버튼 클릭", "검색 버튼 클릭", "행 선택", "저장 버튼 클릭"], [
+            step["이벤트명"] for step in basis["event_steps"]
+        ])
+        self.assertEqual(4, len(basis["action_candidates"]))
+
+    def test_sparse_event_definition_uses_flow_actions_as_supplement(self):
+        block_text = """4.1. 검토항목관리
+화면ID UI-SFD-001-01-01
+화면명 검토항목관리
+처리흐름
+① 동일제품 수입 신고 목록을 클릭한다.
+② 동일제품 수입 여부를 확인한다.
+③ 부적합 이력 목록을 클릭한다.
+④ 부적합 이력과 반입차단 완료 검출 여부를 확인한다.
+⑤ 정상 URL 여부 목록을 클릭한다.
+⑥ 정상 URL 여부를 확인한다.
+⑦ 제품명 확인 결과 목록을 클릭한다.
+⑧ 제품명 확인 결과를 확인한다.
+이벤트 정의
+순번 이벤트명 처리설명
+1 검토항목 행 클릭 검토항목 목록 중 하나의 행이 선택된다.
+"""
+        prompts = []
+        statuses = []
+        ai_response = """{
+          "test_cases": [
+            {"순서": 1, "테스트_케이스": "검토항목 행 클릭", "예상_결과": "상세 정보가 표시된다."}
+          ]
+        }"""
+
+        def fake_call(_url, _model, _system_prompt, user_prompt, **_kwargs):
+            prompts.append(user_prompt)
+            return ai_response
+
+        with patch("qa_generation.generate_tc.call_ollama", side_effect=fake_call):
+            self.build_cases_from_block(block_text, block_status_callback=statuses.append)
+
+        basis = generate_tc.get_test_case_generation_basis(block_text)
+        self.assertEqual("event_flow_compare", basis["basis"])
+        self.assertEqual(5, basis["expected_steps"])
+        self.assertIn("이벤트 정의 + 처리흐름 비교", prompts[0])
+        self.assertIn("검토항목 행 클릭", prompts[0])
+        self.assertIn("동일제품 수입 신고 목록을 클릭한다.", prompts[0])
+        self.assertEqual(5, statuses[-1]["expected_steps"])
+        self.assertEqual("medium", statuses[-1]["block_size"])
+
     def test_progress_message_includes_actual_llm_request_limits(self):
         block_text = """4.1. 내부사용자관리
 화면ID UI-SFD-001-01-01
@@ -222,6 +286,7 @@ class GenerateTcTextExtractionTest(unittest.TestCase):
             },
         ]
         call_order = []
+        block_events = []
 
         def fake_call(_url, _model, _system_prompt, user_prompt, **_kwargs):
             if "UI-SMALL-001" in user_prompt:
@@ -236,11 +301,17 @@ class GenerateTcTextExtractionTest(unittest.TestCase):
                 model_name="model",
                 ollama_url="http://localhost",
                 screen_blocks=screen_blocks,
+                block_status_callback=block_events.append,
             )
 
         self.assertEqual(["UI-SMALL-001", "UI-LARGE-001"], call_order)
         self.assertEqual(["UT-LARGE-001", "UT-SMALL-001"], [case["단위시험_ID"] for case in cases])
         self.assertNotIn("__block_original_index", cases[0])
+        queued_events = [event for event in block_events if event.get("status") == "queued"]
+        self.assertEqual(["UI-SMALL-001", "UI-LARGE-001"], [event["screen_id"] for event in queued_events])
+        self.assertEqual([1, 0], [event["original_index"] for event in queued_events])
+        self.assertEqual([2, 1], [event["display_index"] for event in queued_events])
+        self.assertEqual([1, 2], [event["processing_index"] for event in queued_events])
 
     def test_unit_test_name_uses_section_title_when_section_number_exists(self):
         block_text = """4.1. 내부사용자관리
