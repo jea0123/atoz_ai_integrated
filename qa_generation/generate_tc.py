@@ -184,13 +184,17 @@ def extract_screen_blocks(extracted_text):
 
   def screen_block_score(block_text):
     keyword_score = sum(
-      1 for keyword in ["요구사항ID", "화면ID", "화면명", "화면설명", "메뉴경로", "화면구성", "처리흐름"]
+      1 for keyword in ["요구사항ID", "화면ID", "화면명", "화면설명", "메뉴경로", "화면구성", "처리흐름", "이벤트 정의"]
       if keyword in block_text
     )
     flow_score = 100 if re.search(r"처리\s*흐름|처리흐름", block_text) else 0
-    step_score = len(extract_process_flow_steps(block_text)) * 10
+    event_score = 100 if re.search(r"이벤트\s*정의", block_text) else 0
+    step_score = (
+      len(extract_event_definition_steps(block_text)) * 12
+      + len(extract_process_flow_steps(block_text)) * 10
+    )
     length_score = min(len(block_text) // 500, 20)
-    return flow_score + step_score + keyword_score + length_score
+    return flow_score + event_score + step_score + keyword_score + length_score
 
   if section_matches:
     print(f"화면 정의 제목 기준 분할 시도: {len(section_matches)}개 제목 발견")
@@ -345,6 +349,207 @@ def extract_process_flow_steps(screen_text):
 
   return steps
 
+def extract_event_definition_steps(screen_text):
+  event_match = re.search(r"이벤트\s*정의", screen_text)
+  if not event_match:
+    return []
+
+  target_text = screen_text[event_match.end():]
+  next_section = re.search(
+    r"입력데이터\s*검증|입력\s*데이터|보안기능|에러처리|세션통제|개인정보|처리\s*흐름|처리흐름|4\.\d+",
+    target_text
+  )
+  if next_section:
+    target_text = target_text[:next_section.start()]
+
+  lines = [
+    line.strip()
+    for line in target_text.splitlines()
+  ]
+  lines = [
+    line for line in lines
+    if line and not re.fullmatch(r"(순번|이벤트명|처리설명|순번 이벤트명 처리설명)", re.sub(r"\s+", " ", line).strip())
+  ]
+  normalized_text = "\n".join(lines)
+  row_pattern = re.compile(r"(?m)^\s*(\d{1,2})[\.\)]?\s+")
+  row_matches = list(row_pattern.finditer(normalized_text))
+
+  steps = []
+  for idx, match in enumerate(row_matches):
+    start = match.end()
+    end = row_matches[idx + 1].start() if idx + 1 < len(row_matches) else len(normalized_text)
+    row_text = normalized_text[start:end].strip()
+    if not row_text:
+      continue
+    event_name, description = split_event_definition_row(row_text)
+    steps.append({
+      "순서": int(match.group(1)),
+      "이벤트명": event_name,
+      "처리설명": description,
+      "내용": re.sub(r"\s+", " ", row_text).strip(),
+    })
+
+  return steps
+
+
+def split_event_definition_row(row_text):
+  raw_text = str(row_text or "").strip()
+  text = re.sub(r"\s+", " ", raw_text).strip()
+  if not text:
+    return "", ""
+
+  parts = re.split(r"\s{2,}", raw_text, maxsplit=1)
+  if len(parts) == 2:
+    return re.sub(r"\s+", " ", parts[0]).strip(), re.sub(r"\s+", " ", parts[1]).strip()
+
+  event_name_pattern = re.compile(
+    r"^(.+?(?:버튼\s*클릭|행\s*선택|건\s*더블클릭|더블클릭|클릭|입력|선택|저장|검색|조회|다운로드|닫기|초기화|삭제|수정|등록|이동))\s+(.+)$"
+  )
+  match = event_name_pattern.match(text)
+  if match:
+    return match.group(1).strip(), match.group(2).strip()
+
+  return text, ""
+
+
+def is_user_action_step(step_text):
+  text = str(step_text or "").strip()
+  if not text:
+    return False
+
+  action_keywords = (
+    "클릭", "입력", "선택", "저장", "검색", "조회", "다운로드", "업로드",
+    "등록", "수정", "삭제", "초기화", "이동", "로그인", "체크", "해제",
+  )
+  result_keywords = (
+    "확인", "표시", "조회된다", "조회된다.", "호출", "검출", "보여", "나타",
+    "출력", "완료", "성공", "실패", "저장된다", "변경된다",
+  )
+  has_action = any(keyword in text for keyword in action_keywords)
+  if not has_action:
+    return False
+  if any(keyword in text for keyword in ("클릭", "입력", "선택", "저장", "검색", "다운로드", "업로드", "등록", "수정", "삭제", "초기화")):
+    return True
+  return not any(keyword in text for keyword in result_keywords)
+
+
+def extract_action_flow_steps(screen_text):
+  return [
+    step for step in extract_process_flow_steps(screen_text)
+    if is_user_action_step(step.get("내용", ""))
+  ]
+
+
+def get_action_type(text):
+  value = str(text or "")
+  action_groups = [
+    ("search", ("검색", "조회")),
+    ("save", ("저장",)),
+    ("select", ("행 선택", "선택", "클릭", "더블클릭")),
+    ("input", ("입력",)),
+    ("download", ("다운로드",)),
+    ("upload", ("업로드",)),
+    ("reset", ("초기화",)),
+    ("delete", ("삭제",)),
+    ("edit", ("수정", "변경")),
+    ("move", ("이동",)),
+    ("login", ("로그인",)),
+  ]
+  return {
+    action_type
+    for action_type, keywords in action_groups
+    if any(keyword in value for keyword in keywords)
+  }
+
+
+def normalize_action_text(text):
+  value = str(text or "")
+  value = re.sub(r"\[[^\]]+\]", " ", value)
+  value = re.sub(r"\([^)]*\)", " ", value)
+  value = re.sub(r"[^0-9A-Za-z가-힣]+", " ", value)
+  tokens = [
+    token for token in value.split()
+    if token not in {
+      "버튼", "클릭", "선택", "입력", "저장", "검색", "조회", "다운로드", "업로드",
+      "등록", "수정", "삭제", "초기화", "이동", "한다", "한다.", "후", "전",
+      "목록", "결과", "중", "하나", "행", "화면", "팝업",
+    }
+  ]
+  return "".join(tokens)
+
+
+def is_similar_action(event_step, flow_step):
+  event_text = f"{event_step.get('이벤트명', '')} {event_step.get('처리설명', '')}"
+  flow_text = str(flow_step.get("내용", ""))
+  event_actions = get_action_type(event_text)
+  flow_actions = get_action_type(flow_text)
+
+  if event_actions and flow_actions and not event_actions.intersection(flow_actions):
+    return False
+
+  event_key = normalize_action_text(event_text)
+  flow_key = normalize_action_text(flow_text)
+  if event_key and flow_key and (event_key in flow_key or flow_key in event_key):
+    return True
+
+  if "행" in event_text and any(keyword in flow_text for keyword in ("행", "목록 중", "하나의")):
+    return True
+
+  return bool(event_actions and flow_actions and event_actions.intersection(flow_actions) and event_key and flow_key and event_key[:2] == flow_key[:2])
+
+
+def merge_user_action_candidates(event_steps, action_flow_steps):
+  candidates = []
+  for step in event_steps:
+    candidates.append({
+      "source": "event",
+      "순서": step.get("순서", len(candidates) + 1),
+      "내용": f"{step.get('이벤트명', '')} - {step.get('처리설명', '')}".strip(" -"),
+      "event_step": step,
+      "flow_step": None,
+    })
+
+  for flow_step in action_flow_steps:
+    if any(is_similar_action(candidate.get("event_step") or {}, flow_step) for candidate in candidates if candidate.get("event_step")):
+      continue
+    candidates.append({
+      "source": "flow",
+      "순서": flow_step.get("순서", len(candidates) + 1),
+      "내용": flow_step.get("내용", ""),
+      "event_step": None,
+      "flow_step": flow_step,
+    })
+
+  return candidates
+
+
+def get_test_case_generation_basis(block_text):
+  event_steps = extract_event_definition_steps(block_text)
+  flow_steps = extract_process_flow_steps(block_text)
+  action_flow_steps = [
+    step for step in flow_steps
+    if is_user_action_step(step.get("내용", ""))
+  ]
+  action_candidates = merge_user_action_candidates(event_steps, action_flow_steps)
+
+  if event_steps and flow_steps:
+    basis = "event_flow_compare"
+  elif event_steps:
+    basis = "event"
+  else:
+    basis = "flow"
+  expected_steps = len(action_candidates) or len(flow_steps)
+
+  return {
+    "basis": basis,
+    "expected_steps": expected_steps,
+    "event_steps": event_steps,
+    "flow_steps": flow_steps,
+    "action_flow_steps": action_flow_steps,
+    "action_candidates": action_candidates,
+  }
+
+
 def parse_llm_json(response_text):
   try:
     return json.loads(response_text)
@@ -465,6 +670,31 @@ def sort_and_dedupe_cases(test_cases):
 
   return result
 
+
+def attach_block_original_index(test_cases, original_index):
+  for case in test_cases:
+    case["__block_original_index"] = original_index
+  return test_cases
+
+
+def restore_original_case_order(test_cases):
+  def sort_key(case):
+    try:
+      block_index = int(case.get("__block_original_index", 0))
+    except (TypeError, ValueError):
+      block_index = 0
+    try:
+      sequence = int(case.get("순서", 0))
+    except (TypeError, ValueError):
+      sequence = 0
+    return block_index, sequence
+
+  ordered = sorted(test_cases, key=sort_key)
+  for case in ordered:
+    case.pop("__block_original_index", None)
+  return ordered
+
+
 def call_ollama(ollama_url, model_name, system_prompt, user_prompt, num_predict=1024, timeout=60):
   if not ollama_url:
     raise ValueError("OLLAMA_URL 값이 비어 있습니다.")
@@ -504,14 +734,37 @@ def classify_block_size(expected_steps, block_text):
 
 
 def block_processing_key(block):
-  flow_steps = extract_process_flow_steps(block["text"])
-  block_size = classify_block_size(len(flow_steps), block["text"])
+  basis_info = get_test_case_generation_basis(block["text"])
+  block_size = classify_block_size(int(basis_info.get("expected_steps") or 0), block["text"])
   return (
     SIZE_ORDER.get(block_size, SIZE_ORDER["large"]),
     int(block.get("_original_index") or 0),
   )
 
 def build_retry_prompt(screen_id, unit_test_id, expected_steps, block_text, bad_response, error_message):
+  basis_info = get_test_case_generation_basis(block_text)
+  event_steps = basis_info["event_steps"]
+  flow_steps = basis_info["flow_steps"]
+  action_flow_steps = basis_info["action_flow_steps"]
+  action_candidates = basis_info["action_candidates"]
+  basis_label = {
+    "event": "이벤트 정의",
+    "event_flow_compare": "이벤트 정의 + 처리흐름 비교",
+    "flow": "처리흐름",
+  }.get(str(basis_info.get("basis")), "설계서")
+  event_steps_text = "\n".join(
+    f"{step['순서']}. {step.get('이벤트명', '')} - {step.get('처리설명', '')}".strip(" -")
+    for step in event_steps
+  )
+  action_flow_steps_text = "\n".join(
+    f"{step['순서']}. {step['내용']}" for step in action_flow_steps
+  )
+  flow_steps_text = "\n".join(
+    f"{step['순서']}. {step['내용']}" for step in flow_steps
+  )
+  action_candidates_text = "\n".join(
+    f"{idx}. {candidate.get('내용', '')}" for idx, candidate in enumerate(action_candidates, 1)
+  )
   return f"""
   이전 응답은 사용할 수 없습니다.
 
@@ -530,13 +783,30 @@ def build_retry_prompt(screen_id, unit_test_id, expected_steps, block_text, bad_
   [대상 단위시험_ID]
   {unit_test_id}
 
-  [처리흐름 참고 개수]
+  [주 작성 기준]
+  {basis_label}
+
+  [기준 단계 수]
   {expected_steps if expected_steps else "추출 안 됨"}
 
+  [이벤트 정의 목록]
+  {event_steps_text if event_steps_text else "이벤트 정의 목록을 추출하지 못했습니다."}
+
+  [처리흐름 중 사용자 조작 단계]
+  {action_flow_steps_text if action_flow_steps_text else "처리흐름에서 사용자 조작 단계를 별도로 추출하지 못했습니다."}
+
+  [이벤트 정의와 처리흐름을 비교해 구성한 사용자 조작 후보]
+  {action_candidates_text if action_candidates_text else "사용자 조작 후보를 추출하지 못했습니다."}
+
+  [전체 처리흐름 - 예상 결과 보강 참고]
+  {flow_steps_text if flow_steps_text else "처리흐름 목록을 추출하지 못했습니다."}
+
   [작성 기준]
-  - 사용자 조작은 "테스트_케이스"로 작성하세요.
-  - 시스템 반응, 조회 결과, 팝업 호출은 "예상_결과"로 작성하세요.
-  - 처리흐름 번호 개수와 test_cases 개수를 억지로 맞추지 마세요.
+  - 이벤트 정의와 처리흐름을 항상 비교해 최종 사용자 조작 목록을 구성하세요.
+  - 이벤트 정의와 처리흐름이 같은 조작을 말하면 하나의 test case로 합치세요.
+  - 처리흐름에만 있는 사용자 조작은 누락하지 말고 test case로 보완하세요.
+  - 이벤트명과 처리흐름의 사용자 조작은 "테스트_케이스"로 작성하세요.
+  - 시스템 반응, 조회 결과, 팝업 호출, 확인/검증 내용은 "예상_결과"로 작성하세요.
   - "테스트_데이터"는 출력하지 마세요. 시스템에서 빈 값으로 채웁니다.
   - 화면_ID와 단위시험_ID는 아래 값 그대로 사용하세요.
 
@@ -589,9 +859,10 @@ def build_test_cases_from_text(
   system_prompt = """
   당신은 UI 설계서의 화면 정의를 단위시험 케이스로 정리하는 QA 엔지니어입니다.
 
-  처리흐름과 이벤트 정의를 함께 보고 사용자 조작 단위로 test_cases를 작성하세요.
+  이벤트 정의와 처리흐름을 항상 비교해 사용자 조작 단위로 test_cases를 작성하세요.
+  이벤트 정의와 처리흐름이 같은 조작을 말하면 하나로 합치고, 처리흐름에만 있는 사용자 조작은 보완하세요.
   시스템 반응, 조회 결과, 팝업 호출처럼 사용자가 직접 수행하지 않는 항목은 별도 케이스로 만들지 말고 "예상_결과"에 반영하세요.
-  처리흐름 번호 개수와 test_cases 개수를 억지로 맞추지 마세요.
+  처리흐름의 확인/검증/조회 결과는 테스트 케이스가 아니라 관련 이벤트의 "예상_결과"에 반영하세요.
 
   작성 필드:
   - 화면명
@@ -623,23 +894,32 @@ def build_test_cases_from_text(
 
   print(f"\n추출된 고유 화면ID 수: {len(screen_blocks)}")
   for idx, block in enumerate(screen_blocks, 1):
-    flow_steps = extract_process_flow_steps(block["text"])
-    expected_steps = len(flow_steps)
+    basis_info = get_test_case_generation_basis(block["text"])
+    expected_steps = int(basis_info.get("expected_steps") or 0)
     num_predict, request_timeout = get_llm_limits(expected_steps, block["text"])
+    block_size = classify_block_size(expected_steps, block["text"])
+    original_index = int(block.get("_original_index", idx - 1))
     _report_block_status(block_status_callback, {
       "status": "queued",
       "screen_id": block.get("screen_id", ""),
       "unit_test_id": block.get("unit_test_id", ""),
-      "original_index": idx - 1,
-      "display_index": idx,
+      "original_index": original_index,
+      "display_index": original_index + 1,
+      "processing_index": idx,
       "expected_steps": expected_steps,
+      "block_size": block_size,
       "num_predict": num_predict,
       "timeout": request_timeout,
       "generated_count": 0,
       "error": "",
     })
-    print(f"[화면 분할] {idx}/{len(screen_blocks)} screen_id={block['screen_id']} expected_steps={expected_steps} text_len={len(block['text'])}")
-    for step in flow_steps:
+    print(
+      f"[화면 분할] {idx}/{len(screen_blocks)} screen_id={block['screen_id']} "
+      f"basis={basis_info.get('basis')} expected_steps={expected_steps} text_len={len(block['text'])}"
+    )
+    for step in basis_info["event_steps"]:
+      print(f"  - 이벤트 정의 {step['순서']}: {step.get('이벤트명', '')} | {step.get('처리설명', '')}")
+    for step in basis_info["flow_steps"]:
       print(f"  - 처리흐름 {step['순서']}: {step['내용']}")
 
   _report_progress(progress_callback, f"단위시험케이스 AI 생성 시작 | 화면 블록 {len(screen_blocks)}개")
@@ -647,25 +927,48 @@ def build_test_cases_from_text(
 
   for idx, block in enumerate(screen_blocks, 1):
     _check_cancel(cancel_check)
-    flow_steps = extract_process_flow_steps(block["text"])
-    expected_steps = len(flow_steps)
+    basis_info = get_test_case_generation_basis(block["text"])
+    event_steps = basis_info["event_steps"]
+    flow_steps = basis_info["flow_steps"]
+    action_flow_steps = basis_info["action_flow_steps"]
+    action_candidates = basis_info["action_candidates"]
+    expected_steps = int(basis_info.get("expected_steps") or 0)
     screen_id = block["screen_id"]
     unit_test_id = block["unit_test_id"]
     fallback_screen_name = extract_field_value(block["text"], "화면명")
     unit_test_title = str(block.get("section_title") or "").strip() or extract_block_section_title(block["text"]) or fallback_screen_name
     response_text = ""
     num_predict, request_timeout = get_llm_limits(expected_steps, block["text"])
+    block_size = classify_block_size(expected_steps, block["text"])
+    original_index = int(block.get("_original_index", idx - 1))
     block_status_base = {
       "screen_id": screen_id,
       "unit_test_id": unit_test_id,
-      "original_index": idx - 1,
-      "display_index": idx,
+      "original_index": original_index,
+      "display_index": original_index + 1,
+      "processing_index": idx,
       "expected_steps": expected_steps,
+      "block_size": block_size,
       "num_predict": num_predict,
       "timeout": request_timeout,
     }
+    basis_label = {
+      "event": "이벤트 정의",
+      "event_flow_compare": "이벤트 정의 + 처리흐름 비교",
+      "flow": "처리흐름",
+    }.get(str(basis_info.get("basis")), "설계서")
+    event_steps_text = "\n".join(
+      f"{step['순서']}. {step.get('이벤트명', '')} - {step.get('처리설명', '')}".strip(" -")
+      for step in event_steps
+    )
+    action_flow_steps_text = "\n".join(
+      f"{step['순서']}. {step['내용']}" for step in action_flow_steps
+    )
     flow_steps_text = "\n".join(
       f"{step['순서']}. {step['내용']}" for step in flow_steps
+    )
+    action_candidates_text = "\n".join(
+      f"{candidate_idx}. {candidate.get('내용', '')}" for candidate_idx, candidate in enumerate(action_candidates, 1)
     )
 
     user_prompt = f"""
@@ -677,13 +980,28 @@ def build_test_cases_from_text(
     [대상 단위시험_ID - 참고용]
     {unit_test_id}
 
-    [코드가 추출한 처리흐름 목록 - 참고용]
+    [주 작성 기준]
+    {basis_label}
+
+    [코드가 추출한 이벤트 정의 목록]
+    {event_steps_text if event_steps_text else "이벤트 정의 목록을 추출하지 못했습니다."}
+
+    [처리흐름 중 사용자 조작 단계]
+    {action_flow_steps_text if action_flow_steps_text else "처리흐름에서 사용자 조작 단계를 별도로 추출하지 못했습니다."}
+
+    [이벤트 정의와 처리흐름을 비교해 구성한 사용자 조작 후보]
+    {action_candidates_text if action_candidates_text else "사용자 조작 후보를 추출하지 못했습니다."}
+
+    [코드가 추출한 전체 처리흐름 목록 - 예상 결과 보강 참고]
     {flow_steps_text if flow_steps_text else "처리흐름 목록을 추출하지 못했습니다. 설계서 화면 정의 블록에서 직접 판단하세요."}
 
     [작성 기준]
-    - 사용자 조작 단위로 test_cases를 작성하세요.
-    - 조회됨, 표시됨, 팝업 호출 같은 시스템 반응은 "예상_결과"에 작성하세요.
-    - 처리흐름 번호 개수와 test_cases 개수를 억지로 맞추지 마세요.
+    - 이벤트 정의와 처리흐름을 항상 비교해 최종 사용자 조작 목록을 구성하세요.
+    - 이벤트 정의와 처리흐름이 같은 조작을 말하면 하나의 test case로 합치세요.
+    - 처리흐름에만 있는 사용자 조작은 누락하지 말고 test case로 보완하세요.
+    - 이벤트명과 처리흐름의 사용자 조작은 "테스트_케이스"에 작성하세요.
+    - 조회됨, 표시됨, 팝업 호출, 확인/검증 내용 같은 시스템 반응은 "예상_결과"에 작성하세요.
+    - 처리흐름의 확인/검증 단계만 별도 테스트 케이스로 만들지 말고 관련 조작의 예상 결과에 합치세요.
     - "테스트_데이터"는 출력하지 마세요. 시스템에서 빈 값으로 채웁니다.
     - 순수 JSON 객체만 출력하세요.
 
@@ -700,7 +1018,7 @@ def build_test_cases_from_text(
       _check_cancel(cancel_check)
       _report_progress(
         progress_callback,
-        f"단위시험케이스 AI 호출 중 | {idx}/{len(screen_blocks)} 화면={screen_id or '-'} timeout={request_timeout}s",
+        f"단위시험케이스 AI 호출 중 | {idx}/{len(screen_blocks)} 화면={screen_id or '-'} num_predict={num_predict} timeout={request_timeout}s",
       )
       _report_block_status(block_status_callback, {
         **block_status_base,
@@ -727,7 +1045,7 @@ def build_test_cases_from_text(
         "generated_count": len(normalized_cases),
         "error": "",
       })
-      all_test_cases.extend(normalized_cases)
+      all_test_cases.extend(attach_block_original_index(normalized_cases, block.get("_original_index", idx - 1)))
     
     except requests.exceptions.Timeout:
       message = f"단위시험케이스 AI 응답 시간 초과 | 화면={screen_id or '-'} | timeout={request_timeout}s"
@@ -791,7 +1109,7 @@ def build_test_cases_from_text(
           "generated_count": len(normalized_cases),
           "error": "",
         })
-        all_test_cases.extend(normalized_cases)
+        all_test_cases.extend(attach_block_original_index(normalized_cases, block.get("_original_index", idx - 1)))
       except Exception as retry_error:
         message = f"단위시험케이스 AI 응답 보정 실패 | 화면={screen_id or '-'} | {retry_error}"
         print(f"[재호출 실패] {screen_id}: {retry_error}")
@@ -805,6 +1123,7 @@ def build_test_cases_from_text(
         })
         raise TestCaseGenerationError(message)
 
+  all_test_cases = restore_original_case_order(all_test_cases)
   print(f"\n전체 생성 테스트 케이스 행 수: {len(all_test_cases)}")
   return all_test_cases
   
